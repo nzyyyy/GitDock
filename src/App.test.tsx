@@ -26,6 +26,9 @@ test("shows actionable first-run state", async () => {
   render(<App />);
   expect(await screen.findByText(/Put every working tree/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Add repository" })).toBeEnabled();
+  const contextMenu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+  window.dispatchEvent(contextMenu);
+  expect(contextMenu.defaultPrevented).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Initialize" }));
 });
 
@@ -38,7 +41,10 @@ test("creates a branch from the inline form", async () => {
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
-    if (command === "get_branches") return Promise.resolve([{ name: "main", oid: "12345678", current: true, remote: false }]);
+    if (command === "get_branches") return Promise.resolve([
+      { name: "main", oid: "12345678", current: true, remote: false },
+      { name: "origin/main", oid: "12345678", current: false, remote: true },
+    ]);
     if (["get_tags", "get_remotes", "get_submodules"].includes(command)) return Promise.resolve([]);
     if (command === "preview_operation") return Promise.resolve({ title: "Create branch", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
     if (command === "start_operation") return Promise.resolve({ operationId: 1, accepted: true });
@@ -48,11 +54,13 @@ test("creates a branch from the inline form", async () => {
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Branches" }));
   const newBranch = await screen.findByRole("button", { name: "New branch" });
+  expect(screen.getByText("Local branches")).toBeInTheDocument();
+  expect(screen.getByText("Remote branches")).toBeInTheDocument();
   fireEvent.click(newBranch);
   const input = screen.getByRole("textbox", { name: "New branch name" });
   expect(input).toHaveFocus();
   expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "More actions" })).toHaveAttribute("aria-haspopup", "menu");
+  expect(screen.getAllByRole("button", { name: "More actions" })[0]).toHaveAttribute("aria-haspopup", "menu");
   expect(document.querySelector("[popover='auto']")).toBeInTheDocument();
   fireEvent.keyDown(input, { key: "Escape" });
   expect(screen.queryByRole("textbox", { name: "New branch name" })).not.toBeInTheDocument();
@@ -66,6 +74,33 @@ test("creates a branch from the inline form", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Create" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "createBranch", name: "feature/test", checkout: true } }));
   expect(prompt).not.toHaveBeenCalled();
+});
+
+test("renders history topology and ref labels", async () => {
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    if (command === "get_history") return Promise.resolve({ commits: [
+      { oid: "aaaaaaaa", parents: ["bbbbbbbb", "cccccccc"], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Merge feature", refs: ["HEAD -> main", "tag: v1.0"], lane: { column: 0, parentColumns: [0, 2] } },
+      { oid: "bbbbbbbb", parents: ["dddddddd"], author: "Ada", authoredAt: "2026-08-08T00:00:00Z", subject: "Main work", refs: [], lane: { column: 0, parentColumns: [0] } },
+      { oid: "cccccccc", parents: ["dddddddd"], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Feature work", refs: ["origin/feature"], lane: { column: 2, parentColumns: [0] } },
+      { oid: "dddddddd", parents: [], author: "Ada", authoredAt: "2026-08-07T00:00:00Z", subject: "Base", refs: [], lane: { column: 0, parentColumns: [] } },
+    ], nextOffset: undefined });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  await screen.findByText("HEAD -> main");
+  expect(screen.getByText("tag: v1.0")).toHaveClass("tag");
+  expect(document.querySelectorAll(".graph-node")).toHaveLength(4);
+  expect(document.querySelectorAll(".graph-edge")).toHaveLength(4);
+  expect(document.querySelector<HTMLElement>(".graph-list")?.style.getPropertyValue("--graph-width")).toBe("52px");
+  expect(screen.getByRole("button", { name: /Git output/ })).toHaveClass("output-handle");
 });
 
 test("uses light-dismiss popovers for secondary menus", async () => {
