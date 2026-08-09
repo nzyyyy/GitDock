@@ -36,6 +36,7 @@ export type OperationRequest = { type: string; [key: string]: unknown };
 export const api = {
   bootstrap: () => invoke<Bootstrap>("bootstrap"),
   refreshRepositories: () => invoke<RepositorySummary[]>("refresh_repositories"),
+  refreshRepository: (repositoryId: number) => invoke<RepositorySummary>("refresh_repository", { repositoryId }),
   addRepository: (path: string) => invoke<RepositorySummary>("add_repository", { path }),
   initRepository: (path: string) => invoke<RepositorySummary>("initialize_repository", { path }),
   cloneRepository: (url: string, destination: string) => invoke<OperationResult>("clone_repository", { url, destination }),

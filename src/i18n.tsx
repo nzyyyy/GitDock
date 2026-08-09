@@ -1,4 +1,4 @@
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useMemo, type ReactNode } from "react";
 
 export type Language = "en" | "zh-CN";
 
@@ -77,7 +77,8 @@ export const translate = (language: Language, key: MessageKey) => dictionaries[l
 const I18nContext = createContext({ language: "en" as Language, t: (key: MessageKey) => en[key] as string });
 
 export function I18nProvider({ language, children }: { language: Language; children: ReactNode }) {
-  return <I18nContext.Provider value={{ language, t: (key) => dictionaries[language][key] }}>{children}</I18nContext.Provider>;
+  const value = useMemo(() => ({ language, t: (key: MessageKey) => dictionaries[language][key] }), [language]);
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 
 export const useI18n = () => useContext(I18nContext);

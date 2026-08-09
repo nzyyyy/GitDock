@@ -380,3 +380,199 @@ test("opens output on failure and confirms cancellation before close", async () 
   await act(async () => operationListener?.({ payload: { operationId: 10, repositoryId: 1, kind: "finished", message: "Failed", exitCode: 1, outcome: "failed" } }));
   expect(document.querySelector(".output-panel")).toHaveClass("open");
 });
+
+test("clears the commit message only after a successful early completion event", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" } }) => void) | undefined;
+  let resolveStart: ((result: { operationId: number; accepted: boolean }) => void) | undefined;
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [
+        { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 },
+        { id: 2, path: "/other", name: "Other", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "87654321", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+      ],
+    });
+    if (command === "get_status" && args && "repositoryId" in args && args.repositoryId === 2) return Promise.resolve({ id: 2, repositoryId: 2, headOid: "87654321", files: [] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "file.ts", kind: "Modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
+    if (command === "preview_operation") return Promise.resolve({ title: "Commit", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
+    if (command === "start_operation") return new Promise((resolve) => { resolveStart = resolve; });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  const message = await screen.findByRole("textbox", { name: "Commit message" });
+  fireEvent.change(message, { target: { value: "Ship it" } });
+  fireEvent.click(screen.getByRole("button", { name: "Commit staged changes" }));
+  expect(await screen.findByRole("button", { name: "running" })).toBeDisabled();
+  await waitFor(() => expect(resolveStart).toBeDefined());
+  await act(async () => operationListener?.({ payload: { operationId: 7, repositoryId: 1, kind: "started", message: "Commit" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 7, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
+  expect(message).toHaveValue("Ship it");
+  await act(async () => resolveStart?.({ operationId: 7, accepted: true }));
+  expect(message).toHaveValue("");
+
+  resolveStart = undefined;
+  fireEvent.change(message, { target: { value: "First draft" } });
+  fireEvent.click(screen.getByRole("button", { name: "Commit staged changes" }));
+  await waitFor(() => expect(resolveStart).toBeDefined());
+  await act(async () => operationListener?.({ payload: { operationId: 8, repositoryId: 1, kind: "started", message: "Commit" } }));
+  fireEvent.change(message, { target: { value: "Next draft" } });
+  await act(async () => operationListener?.({ payload: { operationId: 8, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
+  expect(message).toHaveValue("Next draft");
+  await act(async () => resolveStart?.({ operationId: 8, accepted: true }));
+
+  resolveStart = undefined;
+  fireEvent.change(message, { target: { value: "Switch draft" } });
+  fireEvent.click(screen.getByRole("button", { name: "Commit staged changes" }));
+  await waitFor(() => expect(resolveStart).toBeDefined());
+  await act(async () => operationListener?.({ payload: { operationId: 9, repositoryId: 1, kind: "started", message: "Commit" } }));
+  fireEvent.click(screen.getByRole("option", { name: /Other/ }));
+  const otherMessage = await screen.findByRole("textbox", { name: "Commit message" });
+  fireEvent.change(otherMessage, { target: { value: "Other draft" } });
+  await act(async () => operationListener?.({ payload: { operationId: 9, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
+  await act(async () => resolveStart?.({ operationId: 9, accepted: true }));
+  expect(otherMessage).toHaveValue("Other draft");
+  fireEvent.click(screen.getByRole("option", { name: /Repo/ }));
+  expect(await screen.findByRole("textbox", { name: "Commit message" })).toHaveValue("");
+});
+
+test("keeps the commit message after failed and cancelled operations", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "failed" | "cancelled" } }) => void) | undefined;
+  let nextOperationId = 0;
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "file.ts", kind: "Modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
+    if (command === "preview_operation") return Promise.resolve({ title: "Commit", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
+    if (command === "start_operation") return Promise.resolve({ operationId: ++nextOperationId, accepted: true });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  const message = await screen.findByRole("textbox", { name: "Commit message" });
+  fireEvent.change(message, { target: { value: "Keep me" } });
+  for (const outcome of ["failed", "cancelled"] as const) {
+    fireEvent.click(screen.getByRole("button", { name: "Commit staged changes" }));
+    await waitFor(() => expect(nextOperationId).toBe(outcome === "failed" ? 1 : 2));
+    await act(async () => operationListener?.({ payload: { operationId: nextOperationId, repositoryId: 1, kind: "started", message: "Commit" } }));
+    await act(async () => operationListener?.({ payload: { operationId: nextOperationId, repositoryId: 1, kind: "finished", message: outcome, outcome } }));
+    expect(message).toHaveValue("Keep me");
+    expect(screen.getByRole("button", { name: "Commit staged changes" })).toBeEnabled();
+  }
+});
+
+test("refreshes only the changed repository and status for the selected repository", async () => {
+  let repositoryChanged: ((event: { payload: { repositoryId: number } }) => void) | undefined;
+  const repositories = [
+    { id: 1, path: "/one", name: "One", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "11111111", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 2, path: "/two", name: "Two", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "22222222", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+  ];
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof repositoryChanged) => {
+    if (event === "repository-changed") repositoryChanged = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: Number(args && "repositoryId" in args ? args.repositoryId : 1), headOid: "11111111", files: [] });
+    if (command === "refresh_repository") return Promise.resolve(repositories[Number(args && "repositoryId" in args ? args.repositoryId : 1) - 1]);
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await screen.findByRole("option", { name: /One/ });
+  vi.mocked(invoke).mockClear();
+  await act(async () => repositoryChanged?.({ payload: { repositoryId: 2 } }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("refresh_repository", { repositoryId: 2 }));
+  expect(invoke).not.toHaveBeenCalledWith("get_status", expect.objectContaining({ repositoryId: 2 }));
+  expect(invoke).not.toHaveBeenCalledWith("refresh_repositories");
+
+  await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_status", { repositoryId: 1, includeIgnored: false }));
+});
+
+test("ignores an older repository summary response", async () => {
+  let repositoryChanged: ((event: { payload: { repositoryId: number } }) => void) | undefined;
+  const refreshResolvers: Array<(value: unknown) => void> = [];
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "11111111", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof repositoryChanged) => {
+    if (event === "repository-changed") repositoryChanged = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "11111111", files: [] });
+    if (command === "refresh_repository") return new Promise((resolve) => refreshResolvers.push(resolve));
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await screen.findByRole("option", { name: /Repo/ });
+  await act(async () => {
+    repositoryChanged?.({ payload: { repositoryId: 1 } });
+    repositoryChanged?.({ payload: { repositoryId: 1 } });
+  });
+  await waitFor(() => expect(refreshResolvers).toHaveLength(2));
+  await act(async () => refreshResolvers[1]({ ...repository, branch: "newer", changedCount: 2 }));
+  await waitFor(() => expect(screen.getByRole("option", { name: /Repo/ })).toHaveTextContent("newer"));
+  await act(async () => refreshResolvers[0]({ ...repository, branch: "older", changedCount: 1 }));
+  expect(screen.getByRole("option", { name: /Repo/ })).toHaveTextContent("newer");
+  expect(screen.getByRole("option", { name: /Repo/ })).not.toHaveTextContent("older");
+});
+
+test("ignores a stale status response after switching repositories", async () => {
+  const staleResolvers: Array<(value: unknown) => void> = [];
+  const repositories = [
+    { id: 1, path: "/one", name: "One", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "11111111", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 2, path: "/two", name: "Two", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "22222222", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 },
+  ];
+  vi.mocked(listen).mockImplementation(() => Promise.resolve(() => {}));
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    if (command === "get_status" && args && "repositoryId" in args && args.repositoryId === 1) return new Promise((resolve) => staleResolvers.push(resolve));
+    if (command === "get_status") return Promise.resolve({ id: 2, repositoryId: 2, headOid: "22222222", files: [{ path: "new.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("option", { name: /Two/ }));
+  expect(await screen.findByText("new.ts")).toBeInTheDocument();
+  await act(async () => staleResolvers.forEach((resolve) => resolve({ id: 1, repositoryId: 1, headOid: "11111111", files: [{ path: "old.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] })));
+  expect(screen.getByText("new.ts")).toBeInTheDocument();
+  expect(screen.queryByText("old.ts")).not.toBeInTheDocument();
+});
+
+test("does not reload branch data for unrelated operation events", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" } }) => void) | undefined;
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    if (command === "get_branches") return Promise.resolve([{ name: "main", oid: "12345678", current: true, remote: false }]);
+    if (["get_tags", "get_remotes", "get_submodules"].includes(command)) return Promise.resolve([]);
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Branches" }));
+  await screen.findByText("Local branches");
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_branches")).toHaveLength(1);
+  await act(async () => operationListener?.({ payload: { operationId: 3, repositoryId: 1, kind: "started", message: "Fetch" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 3, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_branches")).toHaveLength(1);
+});

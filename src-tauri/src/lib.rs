@@ -154,6 +154,14 @@ fn refresh_repositories(state: State<'_, AppState>) -> Result<Vec<RepositorySumm
 }
 
 #[tauri::command]
+fn refresh_repository(
+    repository_id: RepositoryId,
+    state: State<'_, AppState>,
+) -> Result<RepositorySummary, String> {
+    Ok(state.git()?.summary(&state.record(repository_id)?))
+}
+
+#[tauri::command]
 fn set_git_path(path: Option<String>, state: State<'_, AppState>) -> Result<GitInfo, String> {
     let discovered = Git::discover(path.as_deref());
     if discovered.is_err() {
@@ -1761,6 +1769,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bootstrap,
             refresh_repositories,
+            refresh_repository,
             set_git_path,
             save_layout,
             save_language,

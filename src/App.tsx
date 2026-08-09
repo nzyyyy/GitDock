@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -7,7 +7,10 @@ import { I18nProvider, translate, useI18n } from "./i18n";
 
 type Tab = "changes" | "history" | "branches" | "stashes";
 type LogLine = { id: number; kind: OperationEvent["kind"] | "error"; message: string };
-type Pending = { request: OperationRequest; preview: OperationPreview };
+type OperationOutcome = NonNullable<OperationEvent["outcome"]>;
+type OperationFinished = (outcome: OperationOutcome) => void;
+type RunOperation = (request: OperationRequest, onFinished?: OperationFinished) => void | Promise<void>;
+type Pending = { repositoryId: number; request: OperationRequest; preview: OperationPreview; onFinished?: OperationFinished };
 type DialogValue = string | boolean;
 type DialogField = { name: string; label: string; value?: DialogValue; required?: boolean; type?: "text" | "checkbox" };
 type DialogSpec = { title: string; message?: string; submitLabel?: string; danger?: boolean; fields?: DialogField[]; onSubmit: (values: Record<string, DialogValue>) => void | Promise<void> };
@@ -39,6 +42,12 @@ export default function App() {
   const allowClose = useRef(false);
   const cloneOperations = useRef(new Set<number>());
   const historyRepository = useRef<number | undefined>(undefined);
+  const selectedIdRef = useRef<number | undefined>(undefined);
+  const statusRequest = useRef(0);
+  const repositoryRequests = useRef(new Map<number, number>());
+  const operationCallbacks = useRef(new Map<number, OperationFinished>());
+  const earlyCompletions = useRef(new Map<number, OperationOutcome>());
+  selectedIdRef.current = selectedId;
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
   const showDialog = useCallback((spec: DialogSpec) => setDialog(spec), []);
 
@@ -52,11 +61,30 @@ export default function App() {
     catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
   }, [pushLog]);
 
-  const refreshStatus = useCallback(async (repositoryId = selectedId, includeIgnored = false) => {
+  const refreshRepository = useCallback(async (repositoryId: number) => {
+    const request = (repositoryRequests.current.get(repositoryId) ?? 0) + 1;
+    repositoryRequests.current.set(repositoryId, request);
+    try {
+      const repository = await api.refreshRepository(repositoryId);
+      if (repositoryRequests.current.get(repositoryId) !== request) return;
+      setRepositories((current) => current.map((item) => item.id === repositoryId ? repository : item));
+    } catch (error) {
+      if (repositoryRequests.current.get(repositoryId) !== request) return;
+      pushLog("error", errorMessage(error)); setOutputOpen(true);
+    }
+  }, [pushLog]);
+
+  const refreshStatus = useCallback(async (repositoryId = selectedIdRef.current, includeIgnored = false) => {
     if (!repositoryId) return;
-    try { setSnapshot(await api.status(repositoryId, includeIgnored)); }
-    catch (error) { setSnapshot(undefined); pushLog("error", errorMessage(error)); setOutputOpen(true); }
-  }, [selectedId, pushLog]);
+    const request = ++statusRequest.current;
+    try {
+      const value = await api.status(repositoryId, includeIgnored);
+      if (request === statusRequest.current && repositoryId === selectedIdRef.current) setSnapshot(value);
+    } catch (error) {
+      if (request !== statusRequest.current || repositoryId !== selectedIdRef.current) return;
+      setSnapshot(undefined); pushLog("error", errorMessage(error)); setOutputOpen(true);
+    }
+  }, [pushLog]);
 
   useEffect(() => {
     api.bootstrap().then((value) => {
@@ -79,7 +107,7 @@ export default function App() {
     if (!selectedId) return;
     setDiff(undefined);
     api.watchRepository(selectedId).catch((error) => pushLog("error", errorMessage(error)));
-    if (selected?.kind === "workTree") refreshStatus(selectedId); else setSnapshot(undefined);
+    if (selected?.kind === "workTree") refreshStatus(selectedId); else { statusRequest.current += 1; setSnapshot(undefined); }
   }, [selectedId, selected?.kind, refreshStatus, pushLog]);
 
   useEffect(() => {
@@ -94,7 +122,7 @@ export default function App() {
     return () => { current = false; if (!settled && historyRepository.current === selectedId) historyRepository.current = undefined; };
   }, [selectedId, tab, pushLog]);
 
-  const loadMoreHistory = async () => {
+  const loadMoreHistory = useCallback(async () => {
     if (!selectedId || historyRepository.current !== selectedId || nextHistoryOffset === undefined || historyLoading) return;
     const repositoryId = selectedId;
     setHistoryLoading(true);
@@ -105,9 +133,9 @@ export default function App() {
       setNextHistoryOffset(page.nextOffset ?? undefined);
     } catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
     finally { if (historyRepository.current === repositoryId) setHistoryLoading(false); }
-  };
+  }, [selectedId, nextHistoryOffset, historyLoading, pushLog]);
 
-  const openCommit = async (oid: string) => {
+  const openCommit = useCallback(async (oid: string) => {
     if (!selectedId) return;
     const repositoryId = selectedId;
     setSelectedCommit(oid);
@@ -116,7 +144,7 @@ export default function App() {
       if (historyRepository.current === repositoryId) setDiff({ path: t("commitDiff"), staged: false, binary: false, tooLarge: false, patch, hunks: [] });
     }
     catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
-  };
+  }, [selectedId, language, pushLog]);
 
   useEffect(() => {
     const unlisteners = Promise.all([
@@ -127,6 +155,14 @@ export default function App() {
           setBusyOperations((ids) => ids.includes(payload.operationId) ? ids : [...ids, payload.operationId]);
         }
         if (payload.kind === "finished") {
+          const callback = operationCallbacks.current.get(payload.operationId);
+          operationCallbacks.current.delete(payload.operationId);
+          const outcome = payload.outcome ?? "failed";
+          if (callback) callback(outcome);
+          else {
+            earlyCompletions.current.set(payload.operationId, outcome);
+            if (earlyCompletions.current.size > 20) earlyCompletions.current.delete(earlyCompletions.current.keys().next().value!);
+          }
           setBusyOperations((ids) => ids.filter((id) => id !== payload.operationId));
           if (payload.outcome !== "succeeded") setOutputOpen(true);
           if (cloneOperations.current.delete(payload.operationId)) {
@@ -137,13 +173,13 @@ export default function App() {
         if (payload.kind === "stderr") setOutputOpen(true);
       }),
       listen<{ repositoryId: number }>("repository-changed", ({ payload }) => {
-        refreshRepositories();
-        if (payload.repositoryId === selectedId) refreshStatus(payload.repositoryId);
+        refreshRepository(payload.repositoryId);
+        if (payload.repositoryId === selectedIdRef.current) refreshStatus(payload.repositoryId);
       }),
       listen("repository-list-changed", refreshRepositories),
     ]);
     return () => { unlisteners.then((values) => values.forEach((unlisten) => unlisten())); };
-  }, [pushLog, refreshRepositories, refreshStatus, selectedId]);
+  }, [pushLog, refreshRepositories, refreshRepository, refreshStatus]);
 
   useEffect(() => {
     const listener = getCurrentWindow().onCloseRequested(async (event) => {
@@ -167,19 +203,28 @@ export default function App() {
     return () => window.removeEventListener("blur", closeMenu);
   }, []);
 
-  const run = useCallback(async (request: OperationRequest) => {
-    if (!selectedId) return;
+  const startOperation = useCallback(async (repositoryId: number, request: OperationRequest, confirmed: boolean, onFinished?: OperationFinished) => {
+    const result = await api.start(repositoryId, request, confirmed);
+    if (onFinished) {
+      const outcome = earlyCompletions.current.get(result.operationId);
+      if (outcome) { earlyCompletions.current.delete(result.operationId); onFinished(outcome); }
+      else operationCallbacks.current.set(result.operationId, onFinished);
+    }
+  }, []);
+
+  const run = useCallback(async (request: OperationRequest, onFinished?: OperationFinished) => {
+    if (!selectedId) { onFinished?.("failed"); return; }
     try {
       const preview = await api.preview(selectedId, request);
-      if (preview.requiresConfirmation) { setPending({ request, preview }); return; }
-      await api.start(selectedId, request);
-    } catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
-  }, [selectedId, pushLog]);
+      if (preview.requiresConfirmation) { setPending({ repositoryId: selectedId, request, preview, onFinished }); return; }
+      await startOperation(selectedId, request, false, onFinished);
+    } catch (error) { onFinished?.("failed"); pushLog("error", errorMessage(error)); setOutputOpen(true); }
+  }, [selectedId, pushLog, startOperation]);
 
   const confirmPending = async () => {
-    if (!pending || !selectedId) return;
-    try { await api.start(selectedId, pending.request, true); setPending(undefined); }
-    catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
+    if (!pending) return;
+    try { await startOperation(pending.repositoryId, pending.request, true, pending.onFinished); setPending(undefined); }
+    catch (error) { pending.onFinished?.("failed"); pushLog("error", errorMessage(error)); setOutputOpen(true); }
   };
 
   const chooseDirectory = async () => {
@@ -252,11 +297,20 @@ export default function App() {
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop, { once: true });
   };
 
-  const openDiff = async (file: FileChange, staged: boolean) => {
+  const openDiff = useCallback(async (file: FileChange, staged: boolean) => {
     if (!selectedId || !snapshot) return;
     try { setDiff(await api.diff(selectedId, snapshot.id, file.path, staged)); }
     catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
-  };
+  }, [selectedId, snapshot, pushLog]);
+
+  const selectRepository = useCallback((repositoryId: number) => setSelectedId(repositoryId), []);
+  const closeDiff = useCallback(() => setDiff(undefined), []);
+  const openRepositoryFile = useCallback((path: string) => {
+    if (selectedId) api.openRepositoryFile(selectedId, path).catch((error) => pushLog("error", errorMessage(error)));
+  }, [selectedId, pushLog]);
+  const loadIgnored = useCallback(() => refreshStatus(selectedId, true), [selectedId, refreshStatus]);
+  const reportError = useCallback((message: string) => pushLog("error", message), [pushLog]);
+  const showBranchDiff = useCallback((value: string) => setDiff({ path: translate(language, "branchComparison"), staged: false, binary: false, tooLarge: false, patch: value, hunks: [] }), [language]);
 
   const visibleRepositories = useMemo(() => repositories.filter((repo) => `${repo.name} ${repo.path} ${repo.group ?? ""}`.toLowerCase().includes(filter.toLowerCase())).sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.name.localeCompare(b.name)), [repositories, filter]);
   const outputPanel = <section className={`output-panel ${outputOpen ? "open" : ""}`}>
@@ -272,7 +326,7 @@ export default function App() {
         <header className="brand"><RailMark /><div><strong>GitDock</strong><span>{git.supported ? `Git ${git.version}` : t("gitUnavailable")}</span></div></header>
         <label className="search"><span>⌕</span><input aria-label={t("searchRepositories")} placeholder={t("findRepository")} value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
         <div className="repo-list" role="listbox" aria-label={t("repositories")}>
-          {visibleRepositories.map((repository) => <RepositoryRow key={repository.id} repository={repository} selected={repository.id === selectedId} onSelect={() => setSelectedId(repository.id)} />)}
+          {visibleRepositories.map((repository) => <MemoRepositoryRow key={repository.id} repository={repository} selected={repository.id === selectedId} onSelect={selectRepository} />)}
         </div>
         <footer className="sidebar-actions"><button onClick={register}>{t("add")}</button><button onClick={clone}>{t("clone")}</button><button onClick={initialize}>{t("init")}</button><button onClick={toggleLanguage}>{t("language")}</button></footer><div className="resize-handle resize-left" onPointerDown={(event) => beginResize("left", event)} />
       </aside>
@@ -286,20 +340,20 @@ export default function App() {
 
         <div className="work-area" style={{ gridTemplateColumns: `minmax(480px, 1fr) ${rightWidth}px` }}>
           <section className="canvas">
-            {diff ? <DiffView diff={diff} snapshotId={snapshot?.id} onBack={() => setDiff(undefined)} onRun={run} /> : tab === "changes" ? <ChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <HistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
+            {diff ? <MemoDiffView diff={diff} snapshotId={snapshot?.id} onBack={closeDiff} onRun={run} /> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
           </section>
           <aside className="tool-pane"><div className="resize-handle resize-right" onPointerDown={(event) => beginResize("right", event)} />
-            {tab === "changes" && <ChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={(path) => api.openRepositoryFile(selectedId!, path).catch((error) => pushLog("error", errorMessage(error)))} onLoadIgnored={() => refreshStatus(selectedId, true)} onRun={run} />}
-            {tab === "history" && <HistoryPane commits={commits} selectedOid={selectedCommit} loading={historyLoading} hasMore={historyRepository.current === selectedId && nextHistoryOffset !== undefined} onLoadMore={loadMoreHistory} onSelect={openCommit} onRun={run} />}
-            {tab === "branches" && <BranchesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onDiff={(value) => setDiff({ path: t("branchComparison"), staged: false, binary: false, tooLarge: false, patch: value, hunks: [] })} onError={(message) => pushLog("error", message)} />}
-            {tab === "stashes" && <StashesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onError={(message) => pushLog("error", message)} />}
+            {tab === "changes" && <MemoChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={openRepositoryFile} onLoadIgnored={loadIgnored} onRun={run} />}
+            {tab === "history" && <MemoHistoryPane commits={commits} selectedOid={selectedCommit} loading={historyLoading} hasMore={historyRepository.current === selectedId && nextHistoryOffset !== undefined} onLoadMore={loadMoreHistory} onSelect={openCommit} onRun={run} />}
+            {tab === "branches" && <MemoBranchesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onDiff={showBranchDiff} onError={reportError} />}
+            {tab === "stashes" && <MemoStashesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onError={reportError} />}
           </aside>
         </div>
 
         {outputPanel}
       </main>
 
-      {pending && <ConfirmDialog pending={pending} onCancel={() => setPending(undefined)} onConfirm={confirmPending} />}
+      {pending && <ConfirmDialog pending={pending} onCancel={() => { pending.onFinished?.("cancelled"); setPending(undefined); }} onConfirm={confirmPending} />}
       {dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}
     </div></I18nProvider>
   );
@@ -312,10 +366,10 @@ function EmptyState({ git, onAdd, onClone, onInit, onSelectGit, onToggleLanguage
 
 function RailMark() { return <svg className="rail-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M9 4v18a6 6 0 0 0 6 6h3" /><path d="M23 4v7a5 5 0 0 1-5 5H9" /><circle cx="9" cy="4" r="2.5" /><circle cx="23" cy="4" r="2.5" /><circle cx="20" cy="28" r="2.5" /></svg>; }
 
-function RepositoryRow({ repository, selected, onSelect }: { repository: RepositorySummary; selected: boolean; onSelect: () => void }) {
+function RepositoryRow({ repository, selected, onSelect }: { repository: RepositorySummary; selected: boolean; onSelect: (repositoryId: number) => void }) {
   const { t } = useI18n();
   const state = repository.kind === "missing" ? "missing" : repository.conflictCount ? "conflict" : repository.changedCount ? "changed" : "clean";
-  return <button role="option" aria-selected={selected} className={`repo-row ${selected ? "selected" : ""}`} onClick={onSelect}><span className={`status-rail ${state}`} /><span className="repo-copy"><span className="repo-name">{repository.favorite && "★ "}{repository.name}<i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button>;
+  return <button role="option" aria-selected={selected} className={`repo-row ${selected ? "selected" : ""}`} onClick={() => onSelect(repository.id)}><span className={`status-rail ${state}`} /><span className="repo-copy"><span className="repo-name">{repository.favorite && "★ "}{repository.name}<i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button>;
 }
 
 function ChangesOverview({ repository, snapshot }: { repository?: RepositorySummary; snapshot?: WorkingTreeSnapshot }) {
@@ -325,10 +379,14 @@ function ChangesOverview({ repository, snapshot }: { repository?: RepositorySumm
   return <div className="canvas-empty"><div className="change-tally"><strong>{changed}</strong><span>{t("workingTreeChanges")}</span></div><h2>{t("selectFile")}</h2><p>{t("inspectHint")}</p></div>;
 }
 
-function ChangesPane({ repository, snapshot, onOpen, onOpenExternal, onLoadIgnored, onRun }: { repository?: RepositorySummary; snapshot?: WorkingTreeSnapshot; onOpen: (file: FileChange, staged: boolean) => void; onOpenExternal: (path: string) => void; onLoadIgnored: () => void; onRun: (request: OperationRequest) => void }) {
+function ChangesPane({ repository, snapshot, onOpen, onOpenExternal, onLoadIgnored, onRun }: { repository?: RepositorySummary; snapshot?: WorkingTreeSnapshot; onOpen: (file: FileChange, staged: boolean) => void; onOpenExternal: (path: string) => void; onLoadIgnored: () => void; onRun: RunOperation }) {
   const { t } = useI18n();
-  const [message, setMessage] = useState(""); const [amend, setAmend] = useState(false); const [signoff, setSignoff] = useState(false);
+  const [messages, setMessages] = useState<Record<number, string>>({}); const [amend, setAmend] = useState(false); const [signoff, setSignoff] = useState(false);
+  const [committingRepositories, setCommittingRepositories] = useState<Set<number>>(() => new Set());
   const [stageSelection, setStageSelection] = useState<string[]>([]); const [unstageSelection, setUnstageSelection] = useState<string[]>([]);
+  const repositoryId = repository?.id;
+  const message = repositoryId ? messages[repositoryId] ?? "" : "";
+  const commitRunning = repositoryId ? committingRepositories.has(repositoryId) : false;
   const files = snapshot?.files ?? [];
   const groups = [
     [t("conflictsGroup"), files.filter((f) => f.conflict), "conflict"],
@@ -345,7 +403,18 @@ function ChangesPane({ repository, snapshot, onOpen, onOpenExternal, onLoadIgnor
   }, [snapshot?.id, repository?.id]);
   const toggle = (path: string, selected: string[], setSelected: React.Dispatch<React.SetStateAction<string[]>>) => setSelected(selected.includes(path) ? selected.filter((item) => item !== path) : [...selected, path]);
   const batch = (type: "stageFiles" | "unstageFiles", paths: string[], clear: () => void) => { onRun({ type, paths }); clear(); };
-  return <div className="changes-pane"><div className="pane-title"><span>{t("workingTree")}</span><span className="batch-actions">{stageSelection.length > 0 && <button onClick={() => batch("stageFiles", stageSelection, () => setStageSelection([]))}>{t("stageSelected")} ({stageSelection.length})</button>}{unstageSelection.length > 0 && <button onClick={() => batch("unstageFiles", unstageSelection, () => setUnstageSelection([]))}>{t("unstageSelected")} ({unstageSelection.length})</button>}{stageSelection.length === 0 && unstageSelection.length === 0 && <button onClick={onLoadIgnored}>{t("loadIgnored")}</button>}</span></div><div className="change-groups">{repository?.ongoing && <div className="ongoing"><strong>{repository.ongoing.kind} {t("inProgress")}</strong>{repository.ongoing.canContinue && <button onClick={() => onRun({ type: "continue", kind: repository.ongoing!.kind })}>{t("continue")}</button>}{repository.ongoing.canSkip && <button onClick={() => onRun({ type: "skip", kind: repository.ongoing!.kind })}>{t("skip")}</button>}{repository.ongoing.canAbort && <button onClick={() => onRun({ type: "abort", kind: repository.ongoing!.kind })}>{t("abort")}</button>}</div>}{groups.map(([name, entries, type]) => { const selected = type === "staged" ? unstageSelection : stageSelection; const setSelected = type === "staged" ? setUnstageSelection : setStageSelection; return <ChangeGroup key={type} name={name} files={entries} type={type} selected={selected} onToggle={(path) => toggle(path, selected, setSelected)} onSelectAll={() => setSelected(entries.every((file) => selected.includes(file.path)) ? selected.filter((path) => !entries.some((file) => file.path === path)) : [...new Set([...selected, ...entries.map((file) => file.path)])])} onOpen={onOpen} onOpenExternal={onOpenExternal} onRun={onRun} />; })}</div><form className="commit-box" onSubmit={(event) => { event.preventDefault(); onRun({ type: "commit", message, amend, signoff }); }}><label>{t("commitMessage")}<textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder={t("commitPlaceholder")} /></label><div className="commit-options"><label><input type="checkbox" checked={amend} onChange={(event) => setAmend(event.target.checked)} /> {t("amend")}</label><label><input type="checkbox" checked={signoff} onChange={(event) => setSignoff(event.target.checked)} /> {t("signOff")}</label></div><button className="primary" disabled={!message.trim()}>{t("commitStaged")}</button></form></div>;
+  const commit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!repositoryId) return;
+    const submittedMessage = message;
+    const submittedRepositoryId = repositoryId;
+    setCommittingRepositories((current) => new Set(current).add(submittedRepositoryId));
+    onRun({ type: "commit", message, amend, signoff }, (outcome) => {
+      setCommittingRepositories((current) => { const next = new Set(current); next.delete(submittedRepositoryId); return next; });
+      if (outcome === "succeeded") setMessages((current) => current[submittedRepositoryId] === submittedMessage ? { ...current, [submittedRepositoryId]: "" } : current);
+    });
+  };
+  return <div className="changes-pane"><div className="pane-title"><span>{t("workingTree")}</span><span className="batch-actions">{stageSelection.length > 0 && <button onClick={() => batch("stageFiles", stageSelection, () => setStageSelection([]))}>{t("stageSelected")} ({stageSelection.length})</button>}{unstageSelection.length > 0 && <button onClick={() => batch("unstageFiles", unstageSelection, () => setUnstageSelection([]))}>{t("unstageSelected")} ({unstageSelection.length})</button>}{stageSelection.length === 0 && unstageSelection.length === 0 && <button onClick={onLoadIgnored}>{t("loadIgnored")}</button>}</span></div><div className="change-groups">{repository?.ongoing && <div className="ongoing"><strong>{repository.ongoing.kind} {t("inProgress")}</strong>{repository.ongoing.canContinue && <button onClick={() => onRun({ type: "continue", kind: repository.ongoing!.kind })}>{t("continue")}</button>}{repository.ongoing.canSkip && <button onClick={() => onRun({ type: "skip", kind: repository.ongoing!.kind })}>{t("skip")}</button>}{repository.ongoing.canAbort && <button onClick={() => onRun({ type: "abort", kind: repository.ongoing!.kind })}>{t("abort")}</button>}</div>}{groups.map(([name, entries, type]) => { const selected = type === "staged" ? unstageSelection : stageSelection; const setSelected = type === "staged" ? setUnstageSelection : setStageSelection; return <ChangeGroup key={type} name={name} files={entries} type={type} selected={selected} onToggle={(path) => toggle(path, selected, setSelected)} onSelectAll={() => setSelected(entries.every((file) => selected.includes(file.path)) ? selected.filter((path) => !entries.some((file) => file.path === path)) : [...new Set([...selected, ...entries.map((file) => file.path)])])} onOpen={onOpen} onOpenExternal={onOpenExternal} onRun={onRun} />; })}</div><form className="commit-box" onSubmit={commit}><label>{t("commitMessage")}<textarea value={message} onChange={(event) => { if (repositoryId) { const value = event.target.value; setMessages((current) => ({ ...current, [repositoryId]: value })); } }} placeholder={t("commitPlaceholder")} /></label><div className="commit-options"><label><input type="checkbox" checked={amend} onChange={(event) => setAmend(event.target.checked)} /> {t("amend")}</label><label><input type="checkbox" checked={signoff} onChange={(event) => setSignoff(event.target.checked)} /> {t("signOff")}</label></div><button className="primary" disabled={commitRunning || !message.trim()}>{commitRunning ? t("running") : t("commitStaged")}</button></form></div>;
 }
 
 function RowMenu({ children, label }: { children: React.ReactNode; label?: string }) {
@@ -369,14 +438,14 @@ function RowMenu({ children, label }: { children: React.ReactNode; label?: strin
   return <><button ref={buttonRef} className="row-menu-trigger" type="button" aria-label={actualLabel} aria-haspopup="menu" aria-expanded={open} onClick={toggle}>{label ? actualLabel : "•••"}</button><div ref={menuRef} className="row-menu-popover" popover="auto" role="menu" onToggle={(event) => setOpen(event.newState === "open")} onClick={(event) => { if ((event.target as HTMLElement).closest("button")) menuRef.current?.hidePopover(); }}>{children}</div></>;
 }
 
-function ChangeGroup({ name, files, type, selected, onToggle, onSelectAll, onOpen, onOpenExternal, onRun }: { name: string; files: FileChange[]; type: string; selected: string[]; onToggle: (path: string) => void; onSelectAll: () => void; onOpen: (file: FileChange, staged: boolean) => void; onOpenExternal: (path: string) => void; onRun: (request: OperationRequest) => void }) {
+function ChangeGroup({ name, files, type, selected, onToggle, onSelectAll, onOpen, onOpenExternal, onRun }: { name: string; files: FileChange[]; type: string; selected: string[]; onToggle: (path: string) => void; onSelectAll: () => void; onOpen: (file: FileChange, staged: boolean) => void; onOpenExternal: (path: string) => void; onRun: RunOperation }) {
   const { t } = useI18n();
   if (!files.length) return null;
   const selectable = type === "staged" || type === "unstaged" || type === "untracked";
   return <section className="change-group"><header><span>{selectable && <input type="checkbox" aria-label={`${t("selectAll")} ${name}`} checked={files.every((file) => selected.includes(file.path))} onChange={onSelectAll} />}{name}</span><code>{files.length}</code></header>{files.map((file) => <div className={`file-row ${selectable ? "selectable" : ""} ${type === "conflict" ? "conflict-row" : ""}`} key={`${type}-${file.path}`}>{selectable && <input type="checkbox" aria-label={`${type === "staged" ? t("selectFileForUnstage") : t("selectFileForStage")} ${file.path}`} checked={selected.includes(file.path)} onChange={() => onToggle(file.path)} />}<button className="file-main" onClick={() => onOpen(file, type === "staged")}><b>{file.path.split("/").at(-1)}</b><small>{file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "./"}</small></button><span className={`file-kind kind-${file.kind.toLowerCase()}`}>{file.kind[0]}</span>{type === "staged" ? <button onClick={() => onRun({ type: "unstageFiles", paths: [file.path] })}>{t("unstage")}</button> : type === "untracked" ? <><button onClick={() => onRun({ type: "stageFiles", paths: [file.path] })}>{t("stage")}</button><button className="danger-icon" aria-label={`${t("trash")} ${file.path}`} onClick={() => onRun({ type: "trashUntracked", paths: [file.path] })}>⌫</button></> : type === "conflict" ? <RowMenu label={t("resolve")}><button onClick={() => onRun({ type: "chooseConflictSide", path: file.path, side: "ours" })}>{t("useCurrent")}</button><button onClick={() => onRun({ type: "chooseConflictSide", path: file.path, side: "theirs" })}>{t("useIncoming")}</button><button onClick={() => onOpenExternal(file.path)}>{t("openExternal")}</button><button onClick={() => onRun({ type: "runMergetool", path: file.path })}>{t("runMergetool")}</button><button onClick={() => onRun({ type: "markResolved", paths: [file.path] })}>{t("markResolved")}</button></RowMenu> : type === "ignored" ? null : <><button onClick={() => onRun({ type: "stageFiles", paths: [file.path] })}>{t("stage")}</button><button className="danger-icon" aria-label={`${t("discard")} ${file.path}`} onClick={() => onRun({ type: "discardTracked", paths: [file.path] })}>↶</button></>}</div>)}</section>;
 }
 
-function DiffView({ diff, snapshotId, onBack, onRun }: { diff: DiffFile; snapshotId?: number; onBack: () => void; onRun: (request: OperationRequest) => void }) {
+function DiffView({ diff, snapshotId, onBack, onRun }: { diff: DiffFile; snapshotId?: number; onBack: () => void; onRun: RunOperation }) {
   const { t } = useI18n();
   if (diff.binary || diff.tooLarge) return <div className="diff-view"><header className="canvas-header"><button onClick={onBack}>← {t("back")}</button><strong>{diff.path}</strong></header><div className="canvas-empty"><h2>{diff.binary ? t("binaryDiff") : t("diffTooLarge")}</h2><button onClick={() => onRun({ type: "runDifftool", path: diff.path, staged: diff.staged })}>{t("openDifftool")}</button></div></div>;
   const lines = diff.patch.split("\n");
@@ -396,7 +465,7 @@ function HistoryCanvas({ commits, selectedOid, onSelect }: { commits: CommitInfo
   </svg>{commits.map((commit) => <button className={`graph-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid} onClick={() => onSelect(commit.oid)}><span /><code>{shortOid(commit.oid)}</code><div className="graph-subject"><strong>{commit.subject}</strong>{commit.refs.map((reference) => <span className={`ref-label ${reference.startsWith("tag: ") ? "tag" : ""}`} key={reference}>{reference}</span>)}</div><span>{commit.author}</span><time>{commit.authoredAt.slice(0, 10)}</time></button>)}</div></div>;
 }
 
-function HistoryPane({ commits, selectedOid, loading, hasMore, onLoadMore, onSelect, onRun }: { commits: CommitInfo[]; selectedOid?: string; loading: boolean; hasMore: boolean; onLoadMore: () => void; onSelect: (oid: string) => void; onRun: (request: OperationRequest) => void }) {
+function HistoryPane({ commits, selectedOid, loading, hasMore, onLoadMore, onSelect, onRun }: { commits: CommitInfo[]; selectedOid?: string; loading: boolean; hasMore: boolean; onLoadMore: () => void; onSelect: (oid: string) => void; onRun: RunOperation }) {
   const { t } = useI18n();
   return <div><div className="pane-title"><span>{t("commits")}</span><code>{commits.length}</code></div><div className="object-list">{commits.map((commit) => <div className={`object-action-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid}><button onClick={() => onSelect(commit.oid)}><strong>{commit.subject}</strong><span>{commit.author} · {shortOid(commit.oid)}</span></button><RowMenu><button onClick={() => onRun({ type: "cherryPick", commits: [commit.oid] })}>{t("cherryPick")}</button>{commit.parents.length === 1 && <button onClick={() => onRun({ type: "revert", oid: commit.oid })}>{t("revert")}</button>}</RowMenu></div>)}{hasMore && <button className="load-more" disabled={loading} onClick={onLoadMore}>{t("loadMore")}</button>}</div></div>;
 }
@@ -404,7 +473,7 @@ function HistoryPane({ commits, selectedOid, loading, hasMore, onLoadMore, onSel
 function BranchCanvas({ repository }: { repository?: RepositorySummary }) { const { t } = useI18n(); return <div className="canvas-empty"><div className="branch-hero"><RailMark /><code>{repository?.branch ?? t("detachedHead")}</code></div><h2>{t("refsIntegration")}</h2><p>{t("branchHint")}</p></div>; }
 function StashCanvas({ repository }: { repository?: RepositorySummary }) { const { t } = useI18n(); return <div className="canvas-empty"><div className="change-tally"><strong>≋</strong><span>{t("savedStates")}</span></div><h2>{repository?.name} {t("stashes")}</h2><p>{t("stashHint")}</p></div>; }
 
-function BranchesPane({ repositoryId, onRun, onDialog, onDiff, onError }: { repositoryId: number; onRun: (request: OperationRequest) => void; onDialog: (spec: DialogSpec) => void; onDiff: (diff: string) => void; onError: (message: string) => void }) {
+function BranchesPane({ repositoryId, onRun, onDialog, onDiff, onError }: { repositoryId: number; onRun: RunOperation; onDialog: (spec: DialogSpec) => void; onDiff: (diff: string) => void; onError: (message: string) => void }) {
   const { t } = useI18n();
   const [section, setSection] = useState<"branches" | "tags" | "remotes" | "submodules">("branches");
   const [creatingBranch, setCreatingBranch] = useState(false); const [branchName, setBranchName] = useState("");
@@ -422,7 +491,7 @@ function BranchesPane({ repositoryId, onRun, onDialog, onDiff, onError }: { repo
   return <div><div className="segmented">{(["branches", "tags", "remotes", "submodules"] as const).map((item) => <button className={section === item ? "active" : ""} key={item} onClick={() => setSection(item)}>{t(item)}</button>)}</div>{section === "branches" && <><div className="pane-title"><span>{t("branches")}</span><span><button onClick={compare}>{t("compare")}</button><button onClick={() => setCreatingBranch(true)}>{t("newBranch")}</button></span></div>{creatingBranch && <form className="new-branch-form" onSubmit={createBranch}><input autoFocus aria-label={t("newBranchName")} value={branchName} onChange={(event) => setBranchName(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") { setBranchName(""); setCreatingBranch(false); } }} /><button type="submit" disabled={!branchName.trim()}>{t("create")}</button><button type="button" onClick={() => { setBranchName(""); setCreatingBranch(false); }}>{t("cancel")}</button></form>}<div className="object-list">{branchGroups.map(([name, entries]) => entries.length > 0 && <section className="branch-group" key={name}><header><span>{name}</span><code>{entries.length}</code></header>{entries.map((branch) => <div className="object-action-row" key={`${branch.remote}-${branch.name}`}><button className={branch.current ? "current" : ""} onDoubleClick={() => !branch.remote && !branch.current && onRun({ type: "switchBranch", name: branch.name })}><strong>{branch.current && "● "}{branch.name}</strong><span>{shortOid(branch.oid)} {branch.upstream && `· ${branch.upstream}`}</span></button><RowMenu>{branch.remote ? <button onClick={() => { const [remote, ...parts] = branch.name.split("/"); onRun({ type: "deleteRemoteBranch", remote, branch: parts.join("/") }); }}>{t("deleteRemoteBranch")}</button> : <>{!branch.current && <button onClick={() => onRun({ type: "switchBranch", name: branch.name })}>{t("switch")}</button>}{!branch.current && <button onClick={() => onRun({ type: "merge", reference: branch.name, mode: "normal" })}>{t("merge")}</button>}{!branch.current && <button onClick={() => onRun({ type: "merge", reference: branch.name, mode: "fastForward" })}>{t("fastForward")}</button>}{!branch.current && <button onClick={() => onRun({ type: "merge", reference: branch.name, mode: "squash" })}>{t("squashMerge")}</button>}{!branch.current && <button onClick={() => onRun({ type: "rebase", onto: branch.name })}>{t("rebaseOnto")}</button>}<button onClick={() => renameBranch(branch.name)}>{t("rename")}</button>{!branch.current && <button onClick={() => onRun({ type: "deleteBranch", name: branch.name, force: false })}>{t("delete")}</button>}{!branch.current && <button onClick={() => onRun({ type: "deleteBranch", name: branch.name, force: true })}>{t("forceDelete")}</button>}</>}</RowMenu></div>)}</section>)}</div></>}{section === "tags" && <><div className="pane-title"><span>{t("tags")}</span><button onClick={createTag}>＋</button></div><div className="object-list">{tags.map((tag) => <div className="object-action-row" key={tag.name}><button><strong>{tag.name}</strong><span>{tag.subject || shortOid(tag.oid)}</span></button><RowMenu><button onClick={() => pushTag(tag.name)}>{t("pushTag")}</button><button onClick={() => onRun({ type: "deleteLocalTag", name: tag.name })}>{t("deleteLocalTag")}</button></RowMenu></div>)}</div></>}{section === "remotes" && <><div className="pane-title"><span>{t("remotes")}</span><button onClick={addRemote}>＋</button></div><div className="object-list">{remotes.map((remote) => <div className="object-action-row" key={remote.name}><button><strong>{remote.name}</strong><span>{remote.fetchUrl}</span></button><RowMenu><button onClick={() => editRemote(remote.name, remote.fetchUrl)}>{t("editUrl")}</button><button onClick={() => onRun({ type: "removeRemote", name: remote.name })}>{t("removeRemote")}</button></RowMenu></div>)}</div></>}{section === "submodules" && <><div className="pane-title"><span>{t("submodules")}</span><span><button onClick={() => onRun({ type: "submoduleInit", paths: [], recursive: false })}>{t("init")}</button><button onClick={() => onRun({ type: "submoduleSync", paths: [], recursive: false })}>{t("sync")}</button><button onClick={updateSubmodules}>{t("update")}</button></span></div><div className="object-list">{submodules.map((module) => <button key={module.path}><strong>{module.path}</strong><span>{module.state} · {shortOid(module.oid)}</span></button>)}</div></>}</div>;
 }
 
-function StashesPane({ repositoryId, onRun, onDialog, onError }: { repositoryId: number; onRun: (request: OperationRequest) => void; onDialog: (spec: DialogSpec) => void; onError: (message: string) => void }) {
+function StashesPane({ repositoryId, onRun, onDialog, onError }: { repositoryId: number; onRun: RunOperation; onDialog: (spec: DialogSpec) => void; onError: (message: string) => void }) {
   const { t } = useI18n();
   const [stashes, setStashes] = useState<StashInfo[]>([]);
   useEffect(() => { api.stashes(repositoryId).then(setStashes).catch((error) => onError(errorMessage(error))); }, [repositoryId, onError]);
@@ -450,3 +519,12 @@ function ConfirmDialog({ pending, onCancel, onConfirm }: { pending: Pending; onC
   const { t } = useI18n();
   return <div className="modal-backdrop" role="presentation"><section className={`confirm-dialog risk-${pending.preview.risk}`} role="alertdialog" aria-modal="true" aria-labelledby="confirm-title"><div className="risk-stripe" /><header><span>{pending.preview.risk === "destructive" ? t("irreversible") : t("reviewOperation")}</span><h2 id="confirm-title">{pending.preview.title}</h2></header><p>{pending.preview.summary}</p>{pending.preview.affectedPaths.length > 0 && <div className="impact"><label>{t("affectedPaths")}</label>{pending.preview.affectedPaths.map((path) => <code key={path}>{path}</code>)}</div>}{pending.preview.affectedRefs.length > 0 && <div className="impact"><label>{t("affectedRefs")}</label>{pending.preview.affectedRefs.map((ref) => <code key={ref}>{ref}</code>)}</div>}<footer><span>{pending.preview.recoverable ? t("recoverable") : t("unrecoverable")}</span><button onClick={onCancel}>{t("cancel")}</button><button className="danger" onClick={onConfirm}>{pending.preview.title}</button></footer></section></div>;
 }
+
+const MemoRepositoryRow = memo(RepositoryRow);
+const MemoChangesOverview = memo(ChangesOverview);
+const MemoChangesPane = memo(ChangesPane);
+const MemoDiffView = memo(DiffView);
+const MemoHistoryCanvas = memo(HistoryCanvas);
+const MemoHistoryPane = memo(HistoryPane);
+const MemoBranchesPane = memo(BranchesPane);
+const MemoStashesPane = memo(StashesPane);
