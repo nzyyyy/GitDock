@@ -221,6 +221,7 @@ test("repository list refresh preserves the current selection", async () => {
     { id: 1, path: "/alpha", name: "Alpha", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
     { id: 2, path: "/beta", name: "Beta", favorite: false, order: 1, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "bbbbbbbb", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
   ];
+  let resolveRefresh: ((value: typeof repositories) => void) | undefined;
   let repositorySummaryListener: ((event: { payload: (typeof repositories)[number] }) => void) | undefined;
   vi.mocked(listen).mockImplementation(((event: string, handler: (...args: never[]) => void) => {
     if (event === "repository-list-changed") repositoryListListener = handler;
@@ -229,7 +230,7 @@ test("repository list refresh preserves the current selection", async () => {
   }) as never);
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 2, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
-    if (command === "refresh_repositories") return Promise.resolve(repositories);
+    if (command === "refresh_repositories") return new Promise((resolve) => { resolveRefresh = resolve; });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
     return Promise.resolve([]);
   });
@@ -240,9 +241,36 @@ test("repository list refresh preserves the current selection", async () => {
   expect(alpha).toHaveAttribute("aria-selected", "true");
   await act(async () => repositorySummaryListener?.({ payload: { ...repositories[0], changedCount: 3 } }));
   expect(screen.getByRole("option", { name: /Alpha/ })).toHaveTextContent("±3");
-  await act(async () => repositoryListListener?.());
+  act(() => { void repositoryListListener?.(); });
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("refresh_repositories", { activeRepositoryId: 1 }));
+  await act(async () => repositorySummaryListener?.({ payload: { ...repositories[1], changedCount: 4 } }));
+  await act(async () => resolveRefresh?.(repositories));
   expect(screen.getByRole("option", { name: /Alpha/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("option", { name: /Beta/ })).toHaveTextContent("±4");
+});
+
+test("ignores an older refresh-all response", async () => {
+  let repositoryListListener: (() => void) | undefined;
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
+  const resolvers: Array<(value: unknown) => void> = [];
+  vi.mocked(listen).mockImplementation(((event: string, handler: (...args: never[]) => void) => {
+    if (event === "repository-list-changed") repositoryListListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "refresh_repositories") return new Promise((resolve) => resolvers.push(resolve));
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  await screen.findByRole("option", { name: /Repo/ });
+  act(() => { void repositoryListListener?.(); void repositoryListListener?.(); });
+  await waitFor(() => expect(resolvers).toHaveLength(2));
+  await act(async () => resolvers[1]([{ ...repository, changedCount: 2 }]));
+  await act(async () => resolvers[0]([{ ...repository, changedCount: 1 }]));
+  expect(screen.getByRole("option", { name: /Repo/ })).toHaveTextContent("±2");
 });
 
 test("uses light-dismiss popovers for secondary menus", async () => {
@@ -648,4 +676,22 @@ test("exports the retained session log only after an explicit save choice", asyn
   await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "stderr", message: "x".repeat(5 * 1024 * 1024) } }));
   fireEvent.click(await screen.findByRole("button", { name: "Export log" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_session_log", { fileName: expect.stringMatching(/^gitdock-session-.+\.log$/), lines: [expect.objectContaining({ kind: "stderr", message: "https://user:token@example.com/repo", timestamp: expect.any(String) })] }));
+});
+
+test("opens the command palette and routes repository actions through existing previews", async () => {
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "a".repeat(40), changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, files: [] });
+    if (command === "preview_operation") return Promise.resolve({ title: "Fetch", summary: "Fetch", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
+    if (command === "start_operation") return Promise.resolve({ operationId: 9, accepted: true });
+    return Promise.resolve([]);
+  });
+  render(<App />);
+  await screen.findByRole("button", { name: "Command palette" });
+  fireEvent.keyDown(window, { key: "k", metaKey: true });
+  const input = await screen.findByPlaceholderText("Search commands");
+  fireEvent.change(input, { target: { value: "fetch" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "fetch", prune: false } }));
 });

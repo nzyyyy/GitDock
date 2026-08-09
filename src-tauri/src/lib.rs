@@ -17,7 +17,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc, Condvar, Mutex,
     },
     thread,
     time::Duration,
@@ -36,6 +36,26 @@ pub struct AppState {
     mutating_repositories: Mutex<HashSet<RepositoryId>>,
     running: Mutex<HashMap<OperationId, RunningOperation>>,
     watcher: Mutex<Option<RecommendedWatcher>>,
+    summary_refresh: Mutex<SummaryRefreshState>,
+    summary_refresh_running: Mutex<usize>,
+    summary_refresh_ready: Condvar,
+}
+
+#[derive(Default)]
+struct SummaryRefreshState {
+    generation: u64,
+    cache: HashMap<RepositoryId, RepositorySummary>,
+}
+
+struct SummaryRefreshPermit<'a>(&'a AppState);
+
+impl Drop for SummaryRefreshPermit<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut running) = self.0.summary_refresh_running.lock() {
+            *running -= 1;
+            self.0.summary_refresh_ready.notify_one();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -106,22 +126,29 @@ impl AppState {
 
 #[tauri::command]
 fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
-    let store = state.store.lock().map_err(|_| "Settings are busy")?;
-    let git = state.git.lock().map_err(|_| "Git state is busy")?;
-    let repositories = git
+    let (settings, records) = {
+        let store = state.store.lock().map_err(|_| "Settings are busy")?;
+        (
+            store.config.settings.clone(),
+            store.config.repositories.clone(),
+        )
+    };
+    let git = state.git.lock().map_err(|_| "Git state is busy")?.clone();
+    let repositories: Vec<RepositorySummary> = git
         .as_ref()
-        .map(|git| {
-            store
-                .config
-                .repositories
-                .iter()
-                .map(|r| git.summary(r))
-                .collect()
-        })
+        .map(|git| records.iter().map(|record| git.summary(record)).collect())
         .unwrap_or_default();
+    state
+        .summary_refresh
+        .lock()
+        .map_err(|_| "Repository summary cache is busy")?
+        .cache = repositories
+        .iter()
+        .map(|summary| (summary.id, summary.clone()))
+        .collect();
     Ok(Bootstrap {
         git: Git::info(&git),
-        settings: store.config.settings.clone(),
+        settings,
         repositories,
     })
 }
@@ -133,48 +160,188 @@ fn refresh_repositories(
     app: AppHandle,
 ) -> Result<Vec<RepositorySummary>, String> {
     let git = state.git()?;
-    let mut records = state
+    let records = state
         .store
         .lock()
         .map_err(|_| "Settings are busy")?
         .config
         .repositories
         .clone();
-    prioritize_repository(&mut records, active_repository_id);
-    let mut summaries = Vec::with_capacity(records.len());
-    for (index, chunk) in records.chunks(4).enumerate() {
-        let batch = thread::scope(|scope| {
-            chunk
-                .iter()
-                .map(|record| {
-                    let git = git.clone();
-                    scope.spawn(move || git.summary(record))
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|handle| handle.join().expect("repository refresh worker panicked"))
-                .collect::<Vec<_>>()
-        });
-        if index == 0 {
-            if let Some(summary) =
-                active_repository_id.and_then(|id| batch.iter().find(|summary| summary.id == id))
-            {
-                let _ = app.emit("repository-summary-refreshed", summary.clone());
-            }
+    let generation = start_summary_refresh(&state)?;
+    let active = active_repository_id
+        .and_then(|id| records.iter().find(|record| record.id == id))
+        .map(|record| git.summary(record));
+    let mut refresh = state
+        .summary_refresh
+        .lock()
+        .map_err(|_| "Repository summary cache is busy")?;
+    refresh
+        .cache
+        .retain(|id, _| records.iter().any(|record| record.id == *id));
+    let current = refresh.generation == generation;
+    if current {
+        if let Some(summary) = &active {
+            refresh.cache.insert(summary.id, summary.clone());
+            let _ = app.emit("repository-summary-refreshed", summary.clone());
         }
-        summaries.extend(batch);
+    }
+    let summaries = records
+        .iter()
+        .map(|record| {
+            refresh
+                .cache
+                .get(&record.id)
+                .filter(|summary| summary.path == record.path)
+                .cloned()
+                .map(|summary| summary_with_record(summary, record))
+                .unwrap_or_else(|| {
+                    let summary = git.summary(record);
+                    if current {
+                        refresh.cache.insert(record.id, summary.clone());
+                    }
+                    summary
+                })
+        })
+        .collect::<Vec<_>>();
+    drop(refresh);
+
+    let inactive = records
+        .into_iter()
+        .filter(|record| Some(record.id) != active_repository_id)
+        .collect::<Vec<_>>();
+    if current && !inactive.is_empty() {
+        thread::spawn(move || {
+            for chunk in inactive.chunks(4) {
+                let state = app.state::<AppState>();
+                if !summary_refresh_is_current(&state, generation) {
+                    return;
+                }
+                let batch = thread::scope(|scope| {
+                    chunk
+                        .iter()
+                        .map(|record| {
+                            let git = git.clone();
+                            let state = &state;
+                            scope.spawn(move || {
+                                let _permit = acquire_summary_refresh_permit(state)?;
+                                summary_refresh_is_current(state, generation)
+                                    .then(|| git.summary(record))
+                                    .ok_or_else(|| "stale summary refresh".to_string())
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .filter_map(|handle| {
+                            handle
+                                .join()
+                                .expect("repository refresh worker panicked")
+                                .ok()
+                        })
+                        .collect::<Vec<_>>()
+                });
+                if !publish_summary_batch(&state, generation, &batch, |summary| {
+                    let _ = app.emit("repository-summary-refreshed", summary.clone());
+                }) {
+                    return;
+                }
+            }
+        });
     }
     Ok(summaries)
 }
 
-fn prioritize_repository(
-    records: &mut [RepositoryRecord],
-    active_repository_id: Option<RepositoryId>,
-) {
-    if let Some(index) =
-        active_repository_id.and_then(|id| records.iter().position(|record| record.id == id))
-    {
-        records.swap(0, index);
+fn summary_with_record(
+    mut summary: RepositorySummary,
+    record: &RepositoryRecord,
+) -> RepositorySummary {
+    summary.path = record.path.clone();
+    summary.name = record.name.clone();
+    summary.group = record.group.clone();
+    summary.favorite = record.favorite;
+    summary.order = record.order;
+    summary
+}
+
+fn start_summary_refresh(state: &AppState) -> Result<u64, String> {
+    let mut refresh = state
+        .summary_refresh
+        .lock()
+        .map_err(|_| "Repository summary cache is busy")?;
+    refresh.generation += 1;
+    Ok(refresh.generation)
+}
+
+fn invalidate_summary_refresh(state: &AppState) {
+    if let Ok(mut refresh) = state.summary_refresh.lock() {
+        refresh.generation += 1;
+    }
+}
+
+fn summary_refresh_is_current(state: &AppState, generation: u64) -> bool {
+    state
+        .summary_refresh
+        .lock()
+        .is_ok_and(|refresh| refresh.generation == generation)
+}
+
+fn publish_summary_batch(
+    state: &AppState,
+    generation: u64,
+    summaries: &[RepositorySummary],
+    mut publish: impl FnMut(&RepositorySummary),
+) -> bool {
+    let Ok(mut refresh) = state.summary_refresh.lock() else {
+        return false;
+    };
+    if refresh.generation != generation {
+        return false;
+    }
+    for summary in summaries {
+        refresh.cache.insert(summary.id, summary.clone());
+        publish(summary);
+    }
+    true
+}
+
+fn acquire_summary_refresh_permit(state: &AppState) -> Result<SummaryRefreshPermit<'_>, String> {
+    let mut running = state
+        .summary_refresh_running
+        .lock()
+        .map_err(|_| "Repository refresh limiter is busy")?;
+    while *running >= 4 {
+        running = state
+            .summary_refresh_ready
+            .wait(running)
+            .map_err(|_| "Repository refresh limiter is busy")?;
+    }
+    *running += 1;
+    Ok(SummaryRefreshPermit(state))
+}
+
+fn replace_cached_summary(
+    state: &AppState,
+    summary: RepositorySummary,
+) -> Result<RepositorySummary, String> {
+    let mut refresh = state
+        .summary_refresh
+        .lock()
+        .map_err(|_| "Repository summary cache is busy")?;
+    refresh.generation += 1;
+    refresh.cache.insert(summary.id, summary.clone());
+    Ok(summary)
+}
+
+fn remove_cached_summary(state: &AppState, repository_id: RepositoryId) {
+    if let Ok(mut refresh) = state.summary_refresh.lock() {
+        refresh.generation += 1;
+        refresh.cache.remove(&repository_id);
+    }
+}
+
+fn clear_summary_cache(state: &AppState) {
+    if let Ok(mut refresh) = state.summary_refresh.lock() {
+        refresh.generation += 1;
+        refresh.cache.clear();
     }
 }
 
@@ -183,7 +350,10 @@ fn refresh_repository(
     repository_id: RepositoryId,
     state: State<'_, AppState>,
 ) -> Result<RepositorySummary, String> {
-    Ok(state.git()?.summary(&state.record(repository_id)?))
+    let generation = start_summary_refresh(&state)?;
+    let summary = state.git()?.summary(&state.record(repository_id)?);
+    publish_summary_batch(&state, generation, std::slice::from_ref(&summary), |_| {});
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -198,6 +368,7 @@ fn set_git_path(path: Option<String>, state: State<'_, AppState>) -> Result<GitI
         store.save()?;
     }
     *state.git.lock().map_err(|_| "Git state is busy")? = discovered.clone();
+    clear_summary_cache(&state);
     Ok(Git::info(&discovered))
 }
 
@@ -265,7 +436,7 @@ fn register_repository(
         record
     };
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
-    Ok(git.summary(&record))
+    replace_cached_summary(state, git.summary(&record))
 }
 
 #[tauri::command]
@@ -359,7 +530,7 @@ fn relocate_repository(
         result
     };
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
-    Ok(git.summary(&record))
+    replace_cached_summary(&state, git.summary(&record))
 }
 
 #[tauri::command]
@@ -380,6 +551,7 @@ fn update_repository(
     existing.favorite = repository.favorite;
     existing.order = repository.order;
     store.save()?;
+    invalidate_summary_refresh(&state);
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
     Ok(())
 }
@@ -392,6 +564,7 @@ fn reorder_repositories(
 ) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
     persist_repository_placements(&mut store, &placements)?;
+    invalidate_summary_refresh(&state);
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
     Ok(())
 }
@@ -470,6 +643,7 @@ fn remove_repository(
         store.config.settings.selected_repository_id = None;
     }
     store.save()?;
+    remove_cached_summary(&state, repository_id);
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
     Ok(())
 }
@@ -918,9 +1092,9 @@ fn start_operation(
                 None,
                 None,
             );
-            let result = paths
-                .iter()
-                .try_for_each(|path| trash::delete(root.join(path)).map_err(|e| e.to_string()));
+            let result = trash_paths(&root, &paths, |path| {
+                trash::delete(path).map_err(|error| error.to_string())
+            });
             let (message, code) = match result {
                 Ok(()) => ("Moved to Trash".to_string(), 0),
                 Err(error) => (error, 1),
@@ -981,6 +1155,17 @@ fn start_operation(
     Ok(OperationResult {
         operation_id,
         accepted: true,
+    })
+}
+
+fn trash_paths(
+    root: &Path,
+    paths: &[String],
+    mut delete: impl FnMut(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    paths.iter().try_for_each(|path| {
+        validate_relative_path(path)?;
+        delete(&root.join(path))
     })
 }
 
@@ -1977,6 +2162,9 @@ pub fn run() {
                 mutating_repositories: Mutex::new(HashSet::new()),
                 running: Mutex::new(HashMap::new()),
                 watcher: Mutex::new(None),
+                summary_refresh: Mutex::new(SummaryRefreshState::default()),
+                summary_refresh_running: Mutex::new(0),
+                summary_refresh_ready: Condvar::new(),
             });
             Ok(())
         })
@@ -2018,6 +2206,33 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Output;
+
+    fn git_ok(git: &Git, cwd: &Path, args: &[&str]) {
+        ensure_success(git.run(cwd, &strings(args), None).unwrap()).unwrap();
+    }
+
+    fn init_repo(git: &Git, path: &Path) {
+        git_ok(git, path, &["init", "-b", "main"]);
+        git_ok(git, path, &["config", "user.name", "GitDock Tests"]);
+        git_ok(git, path, &["config", "user.email", "gitdock@example.com"]);
+    }
+
+    fn run_request(state: &AppState, cwd: &Path, request: OperationRequest) -> Output {
+        let spec = command_spec(state, 1, cwd, &request).unwrap();
+        let output = state
+            .git()
+            .unwrap()
+            .run(cwd, &spec.args, spec.input.as_deref())
+            .unwrap();
+        ensure_success(output).unwrap()
+    }
+
+    fn commit_file(git: &Git, cwd: &Path, path: &str, contents: &str, message: &str) {
+        fs::write(cwd.join(path), contents).unwrap();
+        git_ok(git, cwd, &["add", path]);
+        git_ok(git, cwd, &["commit", "-m", message]);
+    }
 
     fn test_state(git: Git, config_path: PathBuf) -> AppState {
         AppState {
@@ -2030,6 +2245,9 @@ mod tests {
             mutating_repositories: Mutex::new(HashSet::new()),
             running: Mutex::new(HashMap::new()),
             watcher: Mutex::new(None),
+            summary_refresh: Mutex::new(SummaryRefreshState::default()),
+            summary_refresh_running: Mutex::new(0),
+            summary_refresh_ready: Condvar::new(),
         }
     }
 
@@ -2269,20 +2487,976 @@ mod tests {
     }
 
     #[test]
-    fn prioritizes_the_active_repository_in_a_fifty_repository_refresh() {
-        let mut records = (0..50)
+    fn cached_summary_uses_current_repository_metadata_and_generation() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        commit_file(&git, dir.path(), "a", "a", "base");
+        let original = RepositoryRecord {
+            id: 1,
+            path: dir.path().to_string_lossy().into(),
+            name: "old".into(),
+            group: None,
+            favorite: false,
+            order: 0,
+        };
+        let summary = git.summary(&original);
+        let current = RepositoryRecord {
+            name: "new".into(),
+            group: Some("work".into()),
+            favorite: true,
+            order: 49,
+            ..original
+        };
+        let refreshed = summary_with_record(summary, &current);
+        assert_eq!(refreshed.name, "new");
+        assert_eq!(refreshed.group.as_deref(), Some("work"));
+        assert!(refreshed.favorite);
+        assert_eq!(refreshed.order, 49);
+
+        let state = test_state(git, dir.path().join("config.json"));
+        let generation = state.summary_refresh.lock().unwrap().generation;
+        invalidate_summary_refresh(&state);
+        assert_eq!(
+            state.summary_refresh.lock().unwrap().generation,
+            generation + 1
+        );
+
+        let stale_generation = start_summary_refresh(&state).unwrap();
+        invalidate_summary_refresh(&state);
+        let mut published = false;
+        assert!(!publish_summary_batch(
+            &state,
+            stale_generation,
+            std::slice::from_ref(&refreshed),
+            |_| published = true,
+        ));
+        assert!(!published);
+        assert!(state.summary_refresh.lock().unwrap().cache.is_empty());
+    }
+
+    #[test]
+    fn background_summary_refresh_never_exceeds_four_slots() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state(git, dir.path().join("config.json")));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let maximum = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let workers = (0..8)
+            .map(|_| {
+                let state = state.clone();
+                let barrier = barrier.clone();
+                let active = active.clone();
+                let maximum = maximum.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    let _permit = acquire_summary_refresh_permit(&state).unwrap();
+                    let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    maximum.fetch_max(count, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(20));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .for_each(|worker| worker.join().unwrap());
+        assert_eq!(maximum.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn file_commit_stash_hunk_and_undo_requests_change_the_repository() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        commit_file(&git, dir.path(), "a.txt", "one\n", "base");
+        let state = test_state(git.clone(), dir.path().join("config.json"));
+
+        fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::StageFiles {
+                paths: vec!["a.txt".into()],
+            },
+        );
+        assert!(!git
+            .text(dir.path(), &["diff", "--cached", "--name-only"])
+            .unwrap()
+            .is_empty());
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::UnstageFiles {
+                paths: vec!["a.txt".into()],
+            },
+        );
+        assert!(git
+            .text(dir.path(), &["diff", "--cached", "--name-only"])
+            .unwrap()
+            .is_empty());
+
+        let diff = git.diff(dir.path(), "a.txt", false, 7).unwrap();
+        let hunk = diff.hunks[0].clone();
+        state.snapshots.lock().unwrap().insert(
+            7,
+            SnapshotCache {
+                repository_id: 1,
+                head_oid: Some(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap()),
+                hunks: HashMap::from([(
+                    hunk.id.clone(),
+                    CachedHunk {
+                        path: "a.txt".into(),
+                        staged: false,
+                        patch: hunk.patch.into_bytes(),
+                        source_diff: diff.patch,
+                    },
+                )]),
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::StageHunk {
+                snapshot_id: 7,
+                hunk_id: hunk.id.clone(),
+            },
+        );
+        assert_eq!(git.text(dir.path(), &["show", ":a.txt"]).unwrap(), "two");
+        let staged = git.diff(dir.path(), "a.txt", true, 8).unwrap();
+        let staged_hunk = staged.hunks[0].clone();
+        state.snapshots.lock().unwrap().insert(
+            8,
+            SnapshotCache {
+                repository_id: 1,
+                head_oid: Some(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap()),
+                hunks: HashMap::from([(
+                    staged_hunk.id.clone(),
+                    CachedHunk {
+                        path: "a.txt".into(),
+                        staged: true,
+                        patch: staged_hunk.patch.into_bytes(),
+                        source_diff: staged.patch,
+                    },
+                )]),
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::UnstageHunk {
+                snapshot_id: 8,
+                hunk_id: staged_hunk.id,
+            },
+        );
+        assert_eq!(git.text(dir.path(), &["show", ":a.txt"]).unwrap(), "one");
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::DiscardTracked {
+                paths: vec!["a.txt".into()],
+            },
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "one\n"
+        );
+
+        fs::write(dir.path().join("a.txt"), "committed\n").unwrap();
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::StageFiles {
+                paths: vec!["a.txt".into()],
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::Commit {
+                message: "signed".into(),
+                amend: false,
+                signoff: true,
+            },
+        );
+        assert!(git
+            .text(dir.path(), &["log", "-1", "--format=%B"])
+            .unwrap()
+            .contains("Signed-off-by:"));
+        fs::write(dir.path().join("a.txt"), "amended\n").unwrap();
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::StageFiles {
+                paths: vec!["a.txt".into()],
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::Commit {
+                message: "amended".into(),
+                amend: true,
+                signoff: false,
+            },
+        );
+        assert_eq!(
+            git.text(dir.path(), &["log", "-1", "--format=%s"]).unwrap(),
+            "amended"
+        );
+
+        fs::write(dir.path().join("a.txt"), "stashed\n").unwrap();
+        fs::write(dir.path().join("new.txt"), "new\n").unwrap();
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::StashCreate {
+                message: Some("save".into()),
+                include_untracked: true,
+            },
+        );
+        assert!(!dir.path().join("new.txt").exists());
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::StashApply {
+                index: 0,
+                pop: false,
+            },
+        );
+        assert!(dir.path().join("new.txt").exists());
+        git_ok(&git, dir.path(), &["reset", "--hard"]);
+        git_ok(&git, dir.path(), &["clean", "-fd"]);
+        run_request(&state, dir.path(), OperationRequest::StashDrop { index: 0 });
+        assert!(git.text(dir.path(), &["stash", "list"]).unwrap().is_empty());
+
+        run_request(&state, dir.path(), OperationRequest::UndoLastCommit);
+        assert_eq!(
+            git.text(dir.path(), &["log", "-1", "--format=%s"]).unwrap(),
+            "base"
+        );
+        assert!(!git
+            .text(dir.path(), &["diff", "--cached", "--name-only"])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn trash_uses_only_validated_repository_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a"), "a").unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested/b"), "b").unwrap();
+        let mut removed = Vec::new();
+        trash_paths(dir.path(), &["a".into(), "nested/b".into()], |path| {
+            removed.push(path.to_path_buf());
+            fs::remove_file(path).map_err(|error| error.to_string())
+        })
+        .unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(trash_paths(dir.path(), &["../outside".into()], |_| Ok(())).is_err());
+        assert!(trash_paths(dir.path(), &["missing".into()], |_| Err(
+            "delete failed".into()
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn branch_merge_rebase_cherry_pick_revert_and_recovery_requests_execute() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        git_ok(&git, dir.path(), &["config", "core.editor", "true"]);
+        commit_file(&git, dir.path(), "base", "base\n", "base");
+        let state = test_state(git.clone(), dir.path().join("config.json"));
+
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::CreateBranch {
+                name: "feature".into(),
+                start_point: None,
+                checkout: true,
+            },
+        );
+        commit_file(&git, dir.path(), "feature", "feature\n", "feature");
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::SwitchBranch {
+                name: "main".into(),
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::Merge {
+                reference: "feature".into(),
+                mode: MergeMode::FastForward,
+            },
+        );
+        assert_eq!(
+            git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap(),
+            git.text(dir.path(), &["rev-parse", "feature"]).unwrap()
+        );
+
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::CreateBranch {
+                name: "normal".into(),
+                start_point: None,
+                checkout: true,
+            },
+        );
+        commit_file(&git, dir.path(), "normal", "normal\n", "normal");
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::SwitchBranch {
+                name: "main".into(),
+            },
+        );
+        commit_file(&git, dir.path(), "main", "main\n", "main");
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::Merge {
+                reference: "normal".into(),
+                mode: MergeMode::Normal,
+            },
+        );
+        assert_eq!(
+            git.text(dir.path(), &["rev-list", "--parents", "-n", "1", "HEAD"])
+                .unwrap()
+                .split_whitespace()
+                .count(),
+            3
+        );
+
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::CreateBranch {
+                name: "squash".into(),
+                start_point: None,
+                checkout: true,
+            },
+        );
+        commit_file(&git, dir.path(), "squash", "squash\n", "squash");
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::SwitchBranch {
+                name: "main".into(),
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::Merge {
+                reference: "squash".into(),
+                mode: MergeMode::Squash,
+            },
+        );
+        assert_eq!(
+            git.text(dir.path(), &["diff", "--cached", "--name-only"])
+                .unwrap(),
+            "squash"
+        );
+        git_ok(&git, dir.path(), &["reset", "--hard"]);
+
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::CreateBranch {
+                name: "rebased".into(),
+                start_point: None,
+                checkout: true,
+            },
+        );
+        commit_file(&git, dir.path(), "rebased", "rebased\n", "rebased");
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::SwitchBranch {
+                name: "main".into(),
+            },
+        );
+        commit_file(&git, dir.path(), "main-2", "main-2\n", "main-2");
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::SwitchBranch {
+                name: "rebased".into(),
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::Rebase {
+                onto: "main".into(),
+            },
+        );
+        assert!(git
+            .run(
+                dir.path(),
+                &strings(&["merge-base", "--is-ancestor", "main", "HEAD"]),
+                None
+            )
+            .unwrap()
+            .status
+            .success());
+
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::CreateBranch {
+                name: "pick".into(),
+                start_point: Some("main".into()),
+                checkout: true,
+            },
+        );
+        commit_file(&git, dir.path(), "picked", "picked\n", "picked");
+        let picked = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::SwitchBranch {
+                name: "main".into(),
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::CherryPick {
+                commits: vec![picked.clone()],
+            },
+        );
+        assert!(dir.path().join("picked").exists());
+        run_request(&state, dir.path(), OperationRequest::Revert { oid: picked });
+        assert!(!dir.path().join("picked").exists());
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::RenameBranch {
+                old_name: "pick".into(),
+                new_name: "picked-branch".into(),
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::DeleteBranch {
+                name: "picked-branch".into(),
+                force: true,
+            },
+        );
+
+        fs::write(dir.path().join("base"), "main conflict\n").unwrap();
+        git_ok(&git, dir.path(), &["add", "base"]);
+        git_ok(&git, dir.path(), &["commit", "-m", "main conflict"]);
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::CreateBranch {
+                name: "conflict".into(),
+                start_point: Some("HEAD^".into()),
+                checkout: true,
+            },
+        );
+        fs::write(dir.path().join("base"), "branch conflict\n").unwrap();
+        git_ok(&git, dir.path(), &["add", "base"]);
+        git_ok(&git, dir.path(), &["commit", "-m", "branch conflict"]);
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::SwitchBranch {
+                name: "main".into(),
+            },
+        );
+        let spec = command_spec(
+            &state,
+            1,
+            dir.path(),
+            &OperationRequest::Merge {
+                reference: "conflict".into(),
+                mode: MergeMode::Normal,
+            },
+        )
+        .unwrap();
+        assert!(!git
+            .run(dir.path(), &spec.args, spec.input.as_deref())
+            .unwrap()
+            .status
+            .success());
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::ChooseConflictSide {
+                path: "base".into(),
+                side: ConflictSide::Ours,
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::MarkResolved {
+                paths: vec!["base".into()],
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::Continue {
+                kind: OngoingKind::Merge,
+            },
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("base")).unwrap(),
+            "main conflict\n"
+        );
+    }
+
+    #[test]
+    fn skip_and_abort_requests_clear_a_cherry_pick_conflict() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        commit_file(&git, dir.path(), "conflict", "base\n", "base");
+        let base = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        let state = test_state(git.clone(), dir.path().join("config.json"));
+
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::CreateBranch {
+                name: "source".into(),
+                start_point: None,
+                checkout: true,
+            },
+        );
+        commit_file(&git, dir.path(), "conflict", "source\n", "source");
+        let source = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::SwitchBranch {
+                name: "main".into(),
+            },
+        );
+        commit_file(&git, dir.path(), "conflict", "main\n", "main");
+        let main = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        let spec = command_spec(
+            &state,
+            1,
+            dir.path(),
+            &OperationRequest::CherryPick {
+                commits: vec![source],
+            },
+        )
+        .unwrap();
+        assert!(!git
+            .run(dir.path(), &spec.args, spec.input.as_deref())
+            .unwrap()
+            .status
+            .success());
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::Skip {
+                kind: OngoingKind::CherryPick,
+            },
+        );
+        assert_eq!(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap(), main);
+
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::CreateBranch {
+                name: "abort-source".into(),
+                start_point: Some(base),
+                checkout: true,
+            },
+        );
+        commit_file(&git, dir.path(), "conflict", "abort\n", "abort source");
+        let abort_source = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::SwitchBranch {
+                name: "main".into(),
+            },
+        );
+        let spec = command_spec(
+            &state,
+            1,
+            dir.path(),
+            &OperationRequest::CherryPick {
+                commits: vec![abort_source],
+            },
+        )
+        .unwrap();
+        assert!(!git
+            .run(dir.path(), &spec.args, spec.input.as_deref())
+            .unwrap()
+            .status
+            .success());
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::Abort {
+                kind: OngoingKind::CherryPick,
+            },
+        );
+        assert_eq!(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap(), main);
+    }
+
+    #[test]
+    fn remote_pull_push_lease_branch_and_tag_requests_execute() {
+        let git = Git::discover(None).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let peer = root.path().join("peer");
+        let remote = root.path().join("remote.git");
+        fs::create_dir(&repo).unwrap();
+        fs::create_dir(&remote).unwrap();
+        init_repo(&git, &repo);
+        git_ok(&git, &remote, &["init", "--bare"]);
+        commit_file(&git, &repo, "a", "a\n", "base");
+        let state = test_state(git.clone(), root.path().join("config.json"));
+        let remote_url = remote.to_string_lossy().to_string();
+
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::AddRemote {
+                name: "origin".into(),
+                url: remote_url.clone(),
+            },
+        );
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::Push {
+                remote: Some("origin".into()),
+                branch: Some("main".into()),
+            },
+        );
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::Fetch {
+                remote: Some("origin".into()),
+                prune: true,
+            },
+        );
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::SetUpstream {
+                remote: "origin".into(),
+                branch: "main".into(),
+            },
+        );
+        for strategy in [
+            PullStrategy::Merge,
+            PullStrategy::Rebase,
+            PullStrategy::FastForwardOnly,
+        ] {
+            run_request(
+                &state,
+                &repo,
+                OperationRequest::Pull {
+                    strategy: Some(strategy),
+                },
+            );
+        }
+
+        let expected = git.text(&repo, &["rev-parse", "origin/main"]).unwrap();
+        commit_file(&git, &repo, "a", "local\n", "local");
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::ForcePushWithLease {
+                remote: "origin".into(),
+                branch: "main".into(),
+                expected_oid: expected,
+            },
+        );
+        let pushed = git.text(&repo, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(git.text(&remote, &["rev-parse", "main"]).unwrap(), pushed);
+
+        git_ok(
+            &git,
+            root.path(),
+            &["clone", "-b", "main", &remote_url, peer.to_str().unwrap()],
+        );
+        git_ok(&git, &peer, &["config", "user.name", "GitDock Tests"]);
+        git_ok(
+            &git,
+            &peer,
+            &["config", "user.email", "gitdock@example.com"],
+        );
+        commit_file(&git, &peer, "peer", "peer\n", "peer");
+        git_ok(&git, &peer, &["push", "origin", "main"]);
+        commit_file(&git, &repo, "local", "local\n", "local again");
+        let spec = command_spec(
+            &state,
+            1,
+            &repo,
+            &OperationRequest::ForcePushWithLease {
+                remote: "origin".into(),
+                branch: "main".into(),
+                expected_oid: pushed,
+            },
+        )
+        .unwrap();
+        assert!(!git
+            .run(&repo, &spec.args, spec.input.as_deref())
+            .unwrap()
+            .status
+            .success());
+
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::CreateBranch {
+                name: "remote-delete".into(),
+                start_point: None,
+                checkout: false,
+            },
+        );
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::Push {
+                remote: Some("origin".into()),
+                branch: Some("remote-delete".into()),
+            },
+        );
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::DeleteRemoteBranch {
+                remote: "origin".into(),
+                branch: "remote-delete".into(),
+            },
+        );
+        assert!(git
+            .text(
+                &remote,
+                &["show-ref", "--verify", "refs/heads/remote-delete"]
+            )
+            .is_err());
+
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::CreateTag {
+                name: "v1".into(),
+                target: Some("HEAD".into()),
+                message: Some("release".into()),
+            },
+        );
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::PushTag {
+                remote: "origin".into(),
+                name: "v1".into(),
+            },
+        );
+        assert!(git
+            .text(&remote, &["show-ref", "--verify", "refs/tags/v1"])
+            .is_ok());
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::DeleteLocalTag { name: "v1".into() },
+        );
+        assert!(git
+            .text(&repo, &["show-ref", "--verify", "refs/tags/v1"])
+            .is_err());
+
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::SetRemoteUrl {
+                name: "origin".into(),
+                url: remote_url.clone(),
+            },
+        );
+        assert_eq!(
+            git.text(&repo, &["remote", "get-url", "origin"]).unwrap(),
+            remote_url
+        );
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::RemoveRemote {
+                name: "origin".into(),
+            },
+        );
+        assert!(git.text(&repo, &["remote"]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn submodule_and_repository_local_tool_requests_execute() {
+        let git = Git::discover(None).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let module = root.path().join("module");
+        let host = root.path().join("host");
+        fs::create_dir(&module).unwrap();
+        fs::create_dir(&host).unwrap();
+        init_repo(&git, &module);
+        commit_file(&git, &module, "module.txt", "module\n", "module");
+        init_repo(&git, &host);
+        commit_file(&git, &host, "tracked.txt", "base\n", "base");
+        git_ok(
+            &git,
+            &host,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                module.to_str().unwrap(),
+                "modules/one",
+            ],
+        );
+        git_ok(&git, &host, &["commit", "-am", "submodule"]);
+        git_ok(
+            &git,
+            &host,
+            &["submodule", "deinit", "-f", "--", "modules/one"],
+        );
+        let clone = host;
+        let state = test_state(git.clone(), root.path().join("config.json"));
+
+        run_request(
+            &state,
+            &clone,
+            OperationRequest::SubmoduleInit {
+                paths: vec!["modules/one".into()],
+                recursive: false,
+            },
+        );
+        run_request(
+            &state,
+            &clone,
+            OperationRequest::SubmoduleUpdate {
+                paths: vec!["modules/one".into()],
+                recursive: true,
+            },
+        );
+        assert!(clone.join("modules/one/module.txt").exists());
+        run_request(
+            &state,
+            &clone,
+            OperationRequest::SubmoduleSync {
+                paths: vec!["modules/one".into()],
+                recursive: false,
+            },
+        );
+
+        fs::write(clone.join("tracked.txt"), "changed\n").unwrap();
+        git_ok(&git, &clone, &["config", "diff.tool", "gitdock-test"]);
+        git_ok(
+            &git,
+            &clone,
+            &[
+                "config",
+                "difftool.gitdock-test.cmd",
+                "printf called > \"$MERGED.gd-difftool\"",
+            ],
+        );
+        run_request(
+            &state,
+            &clone,
+            OperationRequest::RunDifftool {
+                path: "tracked.txt".into(),
+                staged: false,
+            },
+        );
+        assert_eq!(
+            fs::read_to_string(clone.join("tracked.txt.gd-difftool")).unwrap(),
+            "called"
+        );
+
+        git_ok(&git, &clone, &["restore", "tracked.txt"]);
+        git_ok(&git, &clone, &["switch", "-c", "tool-conflict"]);
+        commit_file(&git, &clone, "tracked.txt", "branch\n", "branch");
+        git_ok(&git, &clone, &["switch", "main"]);
+        commit_file(&git, &clone, "tracked.txt", "main\n", "main");
+        assert!(!git
+            .run(&clone, &strings(&["merge", "tool-conflict"]), None)
+            .unwrap()
+            .status
+            .success());
+        git_ok(&git, &clone, &["config", "merge.tool", "gitdock-test"]);
+        git_ok(
+            &git,
+            &clone,
+            &[
+                "config",
+                "mergetool.gitdock-test.cmd",
+                "printf called > \"$MERGED.gd-mergetool\"",
+            ],
+        );
+        git_ok(
+            &git,
+            &clone,
+            &["config", "mergetool.gitdock-test.trustExitCode", "true"],
+        );
+        run_request(
+            &state,
+            &clone,
+            OperationRequest::RunMergetool {
+                path: Some("tracked.txt".into()),
+            },
+        );
+        assert_eq!(
+            fs::read_to_string(clone.join("tracked.txt.gd-mergetool")).unwrap(),
+            "called"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual performance benchmark"]
+    fn benchmarks_cached_fifty_repository_response() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        commit_file(&git, dir.path(), "a", "a\n", "base");
+        let records = (0..50)
             .map(|id| RepositoryRecord {
                 id,
-                path: format!("/tmp/{id}"),
-                name: id.to_string(),
+                path: dir.path().to_string_lossy().into(),
+                name: format!("repo-{id}"),
                 group: None,
                 favorite: false,
                 order: id as u32,
             })
             .collect::<Vec<_>>();
-        prioritize_repository(&mut records, Some(37));
-        assert_eq!(records[0].id, 37);
-        assert_eq!(records.len(), 50);
+        let cached = git.summary(&records[1]);
+        let mut samples = Vec::new();
+        for _ in 0..20 {
+            let started = std::time::Instant::now();
+            let active = git.summary(&records[0]);
+            let summaries = std::iter::once(active)
+                .chain(
+                    records[1..]
+                        .iter()
+                        .map(|record| summary_with_record(cached.clone(), record)),
+                )
+                .collect::<Vec<_>>();
+            assert_eq!(summaries.len(), 50);
+            samples.push(started.elapsed());
+        }
+        samples.sort();
+        eprintln!("50 repository cached refresh p95: {:?}", samples[18]);
     }
 
     #[test]

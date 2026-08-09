@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, type BranchInfo, type CommitInfo, type DiffFile, type FileChange, type GitInfo, type HistoryCursor, type Language, type OperationEvent, type OperationPreview, type OperationRequest, type RemoteInfo, type RepositorySummary, type SessionLogLine, type StashInfo, type SubmoduleInfo, type TagInfo, type WorkingTreeSnapshot } from "./api";
+import { DiffView, type DiffMode } from "./DiffView";
 import { I18nProvider, translate, useI18n } from "./i18n";
 
 type Tab = "changes" | "history" | "branches" | "stashes";
@@ -16,6 +17,7 @@ type Pending = { repositoryId: number; request: OperationRequest; preview: Opera
 type DialogValue = string | boolean;
 type DialogField = { name: string; label: string; value?: DialogValue; required?: boolean; type?: "text" | "checkbox" };
 type DialogSpec = { title: string; message?: string; submitLabel?: string; danger?: boolean; fields?: DialogField[]; onSubmit: (values: Record<string, DialogValue>) => void | Promise<void> };
+type CommandItem = { id: string; label: string; search: string; action: () => void };
 
 const shortOid = (oid?: string) => oid?.slice(0, 8) ?? "—";
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -54,6 +56,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("changes");
   const [snapshot, setSnapshot] = useState<WorkingTreeSnapshot>();
   const [diff, setDiff] = useState<DiffFile>();
+  const [diffMode, setDiffMode] = useState<DiffMode>("unified");
   const [commits, setCommits] = useState<CommitInfo[]>([]);
   const [nextHistoryCursor, setNextHistoryCursor] = useState<HistoryCursor>();
   const [selectedCommit, setSelectedCommit] = useState<string>();
@@ -71,12 +74,15 @@ export default function App() {
   const [rightWidth, setRightWidth] = useState(360);
   const [outputHeight, setOutputHeight] = useState(190);
   const [language, setLanguage] = useState<Language>("en");
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const allowClose = useRef(false);
   const cloneOperations = useRef(new Set<number>());
   const historyRepository = useRef<number | undefined>(undefined);
   const selectedIdRef = useRef<number | undefined>(undefined);
   const statusRequest = useRef(0);
+  const repositoryListRequest = useRef(0);
   const repositoryRequests = useRef(new Map<number, number>());
+  const streamedSummaries = useRef(new Map<number, RepositorySummary>());
   const operationCallbacks = useRef(new Map<number, OperationFinished>());
   const earlyCompletions = useRef(new Map<number, OperationOutcome>());
   selectedIdRef.current = selectedId;
@@ -91,8 +97,14 @@ export default function App() {
   }, []);
 
   const refreshRepositories = useCallback(async () => {
-    try { setRepositories(await api.refreshRepositories(selectedIdRef.current)); }
-    catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
+    const request = ++repositoryListRequest.current;
+    streamedSummaries.current.clear();
+    try {
+      const summaries = await api.refreshRepositories(selectedIdRef.current);
+      if (request !== repositoryListRequest.current) return;
+      setRepositories(summaries.map((summary) => streamedSummaries.current.get(summary.id) ?? summary));
+    }
+    catch (error) { if (request === repositoryListRequest.current) { pushLog("error", errorMessage(error)); setOutputOpen(true); } }
   }, [pushLog]);
 
   const refreshRepository = useCallback(async (repositoryId: number) => {
@@ -130,6 +142,16 @@ export default function App() {
   }, [pushLog]);
 
   useEffect(() => { document.documentElement.lang = language; }, [language]);
+
+  useEffect(() => {
+    const openPalette = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault(); setPaletteOpen(true);
+      }
+    };
+    window.addEventListener("keydown", openPalette);
+    return () => window.removeEventListener("keydown", openPalette);
+  }, []);
 
   useEffect(() => {
     const preventSystemMenu = (event: MouseEvent) => event.preventDefault();
@@ -211,6 +233,7 @@ export default function App() {
         if (payload.repositoryId === selectedIdRef.current) refreshStatus(payload.repositoryId);
       }),
       listen<RepositorySummary>("repository-summary-refreshed", ({ payload }) => {
+        streamedSummaries.current.set(payload.id, payload);
         setRepositories((current) => current.map((repository) => repository.id === payload.id ? payload : repository));
       }),
       listen("repository-list-changed", refreshRepositories),
@@ -427,12 +450,36 @@ export default function App() {
   const clearLogs = () => { logBuffer.current = newLogBuffer(); setLogRevision((current) => current + 1); };
   const logCount = logBuffer.current.length;
 
+  const command = (id: string, key: Parameters<typeof translate>[1], action: () => void, enabled = true): CommandItem | undefined => enabled ? { id, label: t(key), search: `${t(key)} ${translate("en", key)}`.toLowerCase(), action } : undefined;
+  const commands = [
+    command("changes", "changes", () => { setTab("changes"); setDiff(undefined); }, Boolean(selected)),
+    command("history", "history", () => { setTab("history"); setDiff(undefined); }, Boolean(selected)),
+    command("branches", "branches", () => { setTab("branches"); setDiff(undefined); }, Boolean(selected)),
+    command("stashes", "stashes", () => { setTab("stashes"); setDiff(undefined); }, Boolean(selected)),
+    command("add", "addRepository", register, git.supported), command("clone", "clone", clone, git.supported), command("init", "initialize", initialize, git.supported),
+    command("refresh", "refreshAll", refreshRepositories), command("language", "language", toggleLanguage), command("git", "selectGit", selectGit),
+    command("fetch", "fetch", () => { void run({ type: "fetch", prune: false }); }, Boolean(selected?.capabilities.canManageRemotes)),
+    command("pull", "pull", () => { void run({ type: "pull" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
+    command("pull-merge", "pullMerge", () => { void run({ type: "pull", strategy: "merge" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
+    command("pull-rebase", "pullRebase", () => { void run({ type: "pull", strategy: "rebase" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
+    command("pull-ff", "pullFf", () => { void run({ type: "pull", strategy: "fastForwardOnly" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
+    command("push", "push", () => { void run({ type: "push" }); }, Boolean(selected?.capabilities.canManageRemotes)),
+    command("force-push", "forcePush", forcePush, Boolean(selected?.capabilities.canManageRemotes && selected.branch)),
+    command("upstream", "setUpstream", () => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } }), Boolean(selected?.branch)),
+    command("cherry-pick", "cherryPickCommits", () => showDialog({ title: t("cherryPickCommits"), fields: [{ name: "commits", label: t("commitOids"), required: true }], onSubmit: ({ commits }) => run({ type: "cherryPick", commits: String(commits).trim().split(/\s+/) }) }), Boolean(selected?.capabilities.canWriteWorkTree)),
+    command("undo", "undoCommit", () => { void run({ type: "undoLastCommit" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
+    command("rename", "renameEntry", () => showDialog({ title: t("renameEntry"), fields: [{ name: "name", label: t("repositoryName"), value: selected?.name, required: true }], onSubmit: ({ name }) => updateSelected({ name: String(name).trim() }) }), Boolean(selected)),
+    command("favorite", selected?.favorite ? "removeFavorite" : "addFavorite", () => { void updateSelected({ favorite: !selected?.favorite }); }, Boolean(selected)),
+    command("group", "setGroup", () => showDialog({ title: t("setGroup"), fields: [{ name: "group", label: t("group"), value: selected?.group ?? "" }], onSubmit: ({ group }) => updateSelected({ group: String(group).trim() }) }), Boolean(selected)),
+    command("relocate", "relocate", relocateSelected, Boolean(selected)), command("remove", "removeGitDock", removeSelected, Boolean(selected)),
+  ].filter((item): item is CommandItem => Boolean(item));
+
   const outputPanel = <section className={`output-panel ${outputOpen ? "open" : ""}`}>
     <button className="output-handle" onClick={() => setOutputOpen((value) => !value)}><span>{t("gitOutput")}</span><span>{busyOperations.length ? `${busyOperations.length} ${t("running")}` : `${logCount} ${t("lines")}`} {outputOpen ? "⌄" : "⌃"}</span></button>
     {outputOpen && <><div className="resize-handle resize-output" onPointerDown={(event) => beginResize("output", event)} /><div className="log" style={{ height: outputHeight }}><div className="log-toolbar">{busyOperations.map((id) => <button key={id} onClick={() => api.cancel(id)}>{t("cancel")} #{id}</button>)}<button disabled={!logCount} onClick={exportLogs}>{t("exportLog")}</button><button onClick={clearLogs}>{t("clear")}</button></div>{readLogs(logBuffer.current).map((line) => <div key={line.id} className={`log-${line.kind}`}><time>{line.timestamp}</time> {line.message}</div>)}</div></>}
   </section>;
 
-  if (!repositories.length) return <I18nProvider language={language}><><main className="empty-workspace"><EmptyState git={git} onAdd={register} onClone={clone} onInit={initialize} onSelectGit={selectGit} onToggleLanguage={toggleLanguage} lastLog={lastLog(logBuffer.current)} />{outputPanel}</main>{dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}</></I18nProvider>;
+  if (!repositories.length) return <I18nProvider language={language}><><main className="empty-workspace"><EmptyState git={git} onAdd={register} onClone={clone} onInit={initialize} onSelectGit={selectGit} onToggleLanguage={toggleLanguage} lastLog={lastLog(logBuffer.current)} />{outputPanel}</main>{paletteOpen && <CommandPalette items={commands} onClose={() => setPaletteOpen(false)} />}{dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}</></I18nProvider>;
 
   return (
     <I18nProvider language={language}><div className="app-shell" style={{ gridTemplateColumns: `${leftWidth}px 1fr` }}>
@@ -452,12 +499,12 @@ export default function App() {
         <header className="topbar">
           <div className="repo-context"><span className="branch-dot" /> <strong>{selected?.name}</strong><code>{selected?.branch || shortOid(selected?.headOid)}</code></div>
           <nav aria-label={t("workflows")}>{(["changes", "history", "branches", "stashes"] as Tab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => { setTab(item); setDiff(undefined); }}>{t(item)}</button>)}</nav>
-          <div className="sync-actions"><button disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "fetch", prune: false })}>{t("fetch")}</button><button disabled={!selected?.capabilities.canWriteWorkTree} onClick={() => run({ type: "pull" })}>{t("pull")}</button><button className="primary" disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "push" })}>{t("push")}</button><RowMenu label={t("more")}><button onClick={refreshRepositories}>{t("refreshAll")}</button><button onClick={() => run({ type: "pull", strategy: "merge" })}>{t("pullMerge")}</button><button onClick={() => run({ type: "pull", strategy: "rebase" })}>{t("pullRebase")}</button><button onClick={() => run({ type: "pull", strategy: "fastForwardOnly" })}>{t("pullFf")}</button><button onClick={forcePush}>{t("forcePush")}</button><button onClick={() => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } })}>{t("setUpstream")}</button><button onClick={() => showDialog({ title: t("cherryPickCommits"), fields: [{ name: "commits", label: t("commitOids"), required: true }], onSubmit: ({ commits }) => run({ type: "cherryPick", commits: String(commits).trim().split(/\s+/) }) })}>{t("cherryPickCommits")}</button><button onClick={() => run({ type: "undoLastCommit" })}>{t("undoCommit")}</button><button onClick={() => showDialog({ title: t("renameEntry"), fields: [{ name: "name", label: t("repositoryName"), value: selected?.name, required: true }], onSubmit: ({ name }) => updateSelected({ name: String(name).trim() }) })}>{t("renameEntry")}</button><button onClick={() => updateSelected({ favorite: !selected?.favorite })}>{selected?.favorite ? t("removeFavorite") : t("addFavorite")}</button><button onClick={() => showDialog({ title: t("setGroup"), fields: [{ name: "group", label: t("group"), value: selected?.group ?? "" }], onSubmit: ({ group }) => updateSelected({ group: String(group).trim() }) })}>{t("setGroup")}</button><button onClick={relocateSelected}>{t("relocate")}</button><button onClick={selectGit}>{t("selectGit")}</button><button className="menu-danger" onClick={removeSelected}>{t("removeGitDock")}</button></RowMenu></div>
+          <div className="sync-actions"><button aria-label={t("commandPalette")} onClick={() => setPaletteOpen(true)}>⌘K</button><button disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "fetch", prune: false })}>{t("fetch")}</button><button disabled={!selected?.capabilities.canWriteWorkTree} onClick={() => run({ type: "pull" })}>{t("pull")}</button><button className="primary" disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "push" })}>{t("push")}</button><RowMenu label={t("more")}><button onClick={refreshRepositories}>{t("refreshAll")}</button><button onClick={() => run({ type: "pull", strategy: "merge" })}>{t("pullMerge")}</button><button onClick={() => run({ type: "pull", strategy: "rebase" })}>{t("pullRebase")}</button><button onClick={() => run({ type: "pull", strategy: "fastForwardOnly" })}>{t("pullFf")}</button><button onClick={forcePush}>{t("forcePush")}</button><button onClick={() => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } })}>{t("setUpstream")}</button><button onClick={() => showDialog({ title: t("cherryPickCommits"), fields: [{ name: "commits", label: t("commitOids"), required: true }], onSubmit: ({ commits }) => run({ type: "cherryPick", commits: String(commits).trim().split(/\s+/) }) })}>{t("cherryPickCommits")}</button><button onClick={() => run({ type: "undoLastCommit" })}>{t("undoCommit")}</button><button onClick={() => showDialog({ title: t("renameEntry"), fields: [{ name: "name", label: t("repositoryName"), value: selected?.name, required: true }], onSubmit: ({ name }) => updateSelected({ name: String(name).trim() }) })}>{t("renameEntry")}</button><button onClick={() => updateSelected({ favorite: !selected?.favorite })}>{selected?.favorite ? t("removeFavorite") : t("addFavorite")}</button><button onClick={() => showDialog({ title: t("setGroup"), fields: [{ name: "group", label: t("group"), value: selected?.group ?? "" }], onSubmit: ({ group }) => updateSelected({ group: String(group).trim() }) })}>{t("setGroup")}</button><button onClick={relocateSelected}>{t("relocate")}</button><button onClick={selectGit}>{t("selectGit")}</button><button className="menu-danger" onClick={removeSelected}>{t("removeGitDock")}</button></RowMenu></div>
         </header>
 
         <div className="work-area" style={{ gridTemplateColumns: `minmax(480px, 1fr) ${rightWidth}px` }}>
           <section className="canvas">
-            {diff ? <MemoDiffView diff={diff} snapshotId={snapshot?.id} onBack={closeDiff} onRun={run} /> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
+            {diff ? <MemoDiffView diff={diff} snapshotId={snapshot?.id} mode={diffMode} onModeChange={setDiffMode} onBack={closeDiff} onRun={run} /> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
           </section>
           <aside className="tool-pane"><div className="resize-handle resize-right" onPointerDown={(event) => beginResize("right", event)} />
             {tab === "changes" && <MemoChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={openRepositoryFile} onLoadIgnored={loadIgnored} onRun={run} />}
@@ -471,6 +518,7 @@ export default function App() {
       </main>
 
       {pending && <ConfirmDialog pending={pending} onCancel={() => { pending.onFinished?.("cancelled"); setPending(undefined); }} onConfirm={confirmPending} />}
+      {paletteOpen && <CommandPalette items={commands} onClose={() => setPaletteOpen(false)} />}
       {dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}
     </div></I18nProvider>
   );
@@ -560,13 +608,6 @@ function ChangeGroup({ name, files, type, selected, onToggle, onSelectAll, onOpe
   if (!files.length) return null;
   const selectable = type === "staged" || type === "unstaged" || type === "untracked";
   return <section className="change-group"><header><span>{selectable && <input type="checkbox" aria-label={`${t("selectAll")} ${name}`} checked={files.every((file) => selected.includes(file.path))} onChange={onSelectAll} />}{name}</span><code>{files.length}</code></header>{files.map((file) => <div className={`file-row ${selectable ? "selectable" : ""} ${type === "conflict" ? "conflict-row" : ""}`} key={`${type}-${file.path}`}>{selectable && <input type="checkbox" aria-label={`${type === "staged" ? t("selectFileForUnstage") : t("selectFileForStage")} ${file.path}`} checked={selected.includes(file.path)} onChange={() => onToggle(file.path)} />}<button className="file-main" onClick={() => onOpen(file, type === "staged")}><b>{file.path.split("/").at(-1)}</b><small>{file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "./"}</small></button><span className={`file-kind kind-${file.kind.toLowerCase()}`}>{file.kind[0]}</span>{type === "staged" ? <button onClick={() => onRun({ type: "unstageFiles", paths: [file.path] })}>{t("unstage")}</button> : type === "untracked" ? <><button onClick={() => onRun({ type: "stageFiles", paths: [file.path] })}>{t("stage")}</button><button className="danger-icon" aria-label={`${t("trash")} ${file.path}`} onClick={() => onRun({ type: "trashUntracked", paths: [file.path] })}>⌫</button></> : type === "conflict" ? <RowMenu label={t("resolve")}><button onClick={() => onRun({ type: "chooseConflictSide", path: file.path, side: "ours" })}>{t("useCurrent")}</button><button onClick={() => onRun({ type: "chooseConflictSide", path: file.path, side: "theirs" })}>{t("useIncoming")}</button><button onClick={() => onOpenExternal(file.path)}>{t("openExternal")}</button><button onClick={() => onRun({ type: "runMergetool", path: file.path })}>{t("runMergetool")}</button><button onClick={() => onRun({ type: "markResolved", paths: [file.path] })}>{t("markResolved")}</button></RowMenu> : type === "ignored" ? null : <><button onClick={() => onRun({ type: "stageFiles", paths: [file.path] })}>{t("stage")}</button><button className="danger-icon" aria-label={`${t("discard")} ${file.path}`} onClick={() => onRun({ type: "discardTracked", paths: [file.path] })}>↶</button></>}</div>)}</section>;
-}
-
-function DiffView({ diff, snapshotId, onBack, onRun }: { diff: DiffFile; snapshotId?: number; onBack: () => void; onRun: RunOperation }) {
-  const { t } = useI18n();
-  if (diff.binary || diff.tooLarge) return <div className="diff-view"><header className="canvas-header"><button onClick={onBack}>← {t("back")}</button><strong>{diff.path}</strong></header><div className="canvas-empty"><h2>{diff.binary ? t("binaryDiff") : t("diffTooLarge")}</h2><button onClick={() => onRun({ type: "runDifftool", path: diff.path, staged: diff.staged })}>{t("openDifftool")}</button></div></div>;
-  const lines = diff.patch.split("\n");
-  return <div className="diff-view"><header className="canvas-header"><button onClick={onBack}>← {t("back")}</button><strong>{diff.path}</strong><span>{diff.staged ? "INDEX ↔ HEAD" : "WORKTREE ↔ INDEX"}</span></header><div className="diff-lines">{lines.map((line, index) => <div key={index} className={line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "delete" : line.startsWith("@@") ? "hunk" : line.startsWith("diff ") ? "file-header" : "context"}><span>{index + 1}</span><code>{line || " "}</code>{line.startsWith("@@") && snapshotId && <button onClick={() => { const hunk = diff.hunks.find((item) => item.header === line); if (hunk) onRun({ type: diff.staged ? "unstageHunk" : "stageHunk", snapshotId, hunkId: hunk.id }); }}>{diff.staged ? t("unstageHunk") : t("stageHunk")}</button>}</div>)}</div></div>;
 }
 
 function useVirtualRows(count: number, rowHeight: number, overscan = 12) {
@@ -667,6 +708,27 @@ function StashesPane({ repositoryId, onRun, onDialog, onError }: { repositoryId:
   useEffect(() => { api.stashes(repositoryId).then(setStashes).catch((error) => onError(errorMessage(error))); }, [repositoryId, onError]);
   const create = () => onDialog({ title: t("create"), fields: [{ name: "message", label: t("stashMessage") }, { name: "includeUntracked", label: t("includeUntracked"), value: false, type: "checkbox" }], onSubmit: ({ message, includeUntracked }) => onRun({ type: "stashCreate", message: String(message).trim() || undefined, includeUntracked: Boolean(includeUntracked) }) });
   return <div><div className="pane-title"><span>{t("stashes")}</span><button onClick={create}>＋</button></div><div className="object-list">{stashes.map((stash) => <div className="stash-row" key={stash.oid}><button><strong>stash@{`{${stash.index}}`}</strong><span>{stash.subject}</span></button><div><button onClick={() => onRun({ type: "stashApply", index: stash.index, pop: false })}>{t("apply")}</button><button onClick={() => onRun({ type: "stashApply", index: stash.index, pop: true })}>{t("pop")}</button><button onClick={() => onRun({ type: "stashDrop", index: stash.index })}>{t("drop")}</button></div></div>)}</div></div>;
+}
+
+function CommandPalette({ items, onClose }: { items: CommandItem[]; onClose: () => void }) {
+  const { t } = useI18n();
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const visible = items.filter((item) => item.search.includes(query.trim().toLowerCase()));
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (typeof dialog.showModal === "function") dialog.showModal(); else dialog.setAttribute("open", "");
+    return () => { if (dialog.open && typeof dialog.close === "function") dialog.close(); };
+  }, []);
+  useEffect(() => { setActive(0); }, [query]);
+  const run = (item?: CommandItem) => { if (item) { onClose(); item.action(); } };
+  return <dialog ref={dialogRef} className="command-palette" aria-labelledby="command-palette-title" onCancel={(event) => { event.preventDefault(); onClose(); }} onClose={onClose}><header id="command-palette-title">{t("commandPalette")}<kbd>⌘K</kbd></header><input autoFocus role="combobox" aria-controls="command-list" aria-expanded="true" aria-activedescendant={visible[active] ? `command-${visible[active].id}` : undefined} placeholder={t("searchCommands")} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
+    if (event.key === "ArrowDown") { event.preventDefault(); setActive((index) => visible.length ? (index + 1) % visible.length : 0); }
+    if (event.key === "ArrowUp") { event.preventDefault(); setActive((index) => visible.length ? (index - 1 + visible.length) % visible.length : 0); }
+    if (event.key === "Enter") { event.preventDefault(); run(visible[active]); }
+  }} /><div id="command-list" role="listbox">{visible.map((item, index) => <button id={`command-${item.id}`} role="option" aria-selected={index === active} className={index === active ? "active" : ""} key={item.id} onMouseEnter={() => setActive(index)} onClick={() => run(item)}>{item.label}</button>)}</div></dialog>;
 }
 
 function FormDialog({ spec, onClose }: { spec: DialogSpec; onClose: () => void }) {

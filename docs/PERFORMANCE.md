@@ -1,6 +1,6 @@
 # Performance checks
 
-Performance checks are ignored by the normal Rust test run because they create 100,000 Git objects or files. Run them explicitly:
+Performance checks are ignored by the normal Rust test run because they create large fixtures or measure timing-sensitive paths. Run them explicitly:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml benchmarks_ -- --ignored --nocapture
@@ -17,7 +17,9 @@ cargo test --manifest-path src-tauri/Cargo.toml benchmarks_ -- --ignored --nocap
 - History page at offset 50,000 p95 (10 runs, 100 commits): 369 ms
 - Ignored-tree fixture: 100,000 files under one ignored dependency directory
 - Working-tree status p95 (10 runs): 27 ms
+- Cached 50-repository refresh fixture: one real active repository plus 49 session-cached inactive summaries
+- Cached refresh p95 (20 runs, active Git summary + metadata overlay): 128 ms
 
-Both Git history measurements are below the 1-second page target. The ignored dependency tree remains excluded from ordinary status results.
+Both Git history measurements and the cached refresh response are below the 1-second target. The ignored dependency tree remains excluded from ordinary status results. The cache benchmark was run with Apple Git 2.50.1 on the hardware above using `benchmarks_cached_fifty_repository_response`; it times the synchronous stale-while-revalidate response and excludes subsequent background refresh events.
 
 Frontend history uses fixed-height windowing in both panes. Regression tests assert that loading 600 commits renders fewer than 60 rows per pane and that a long cross-bucket graph edge remains visible while scrolling.
