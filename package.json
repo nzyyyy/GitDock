@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "package": "tauri build --bundles app && rm -rf dist/GitDock.app && rm -f dist/GitDock_*.dmg && cp -R src-tauri/target/release/bundle/macos/GitDock.app dist/",
     "test": "vitest run",
     "tauri": "tauri"
   },
