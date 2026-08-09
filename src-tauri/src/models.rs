@@ -458,12 +458,21 @@ pub enum OperationEventKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub enum OperationOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct OperationEvent {
     pub operation_id: OperationId,
-    pub repository_id: RepositoryId,
+    pub repository_id: Option<RepositoryId>,
     pub kind: OperationEventKind,
     pub message: String,
     pub exit_code: Option<i32>,
+    pub outcome: Option<OperationOutcome>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

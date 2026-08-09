@@ -8,6 +8,9 @@ import { I18nProvider, translate, useI18n } from "./i18n";
 type Tab = "changes" | "history" | "branches" | "stashes";
 type LogLine = { id: number; kind: OperationEvent["kind"] | "error"; message: string };
 type Pending = { request: OperationRequest; preview: OperationPreview };
+type DialogValue = string | boolean;
+type DialogField = { name: string; label: string; value?: DialogValue; required?: boolean; type?: "text" | "checkbox" };
+type DialogSpec = { title: string; message?: string; submitLabel?: string; danger?: boolean; fields?: DialogField[]; onSubmit: (values: Record<string, DialogValue>) => void | Promise<void> };
 
 const shortOid = (oid?: string) => oid?.slice(0, 8) ?? "—";
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -19,9 +22,14 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("changes");
   const [snapshot, setSnapshot] = useState<WorkingTreeSnapshot>();
   const [diff, setDiff] = useState<DiffFile>();
+  const [commits, setCommits] = useState<CommitInfo[]>([]);
+  const [nextHistoryOffset, setNextHistoryOffset] = useState<number>();
+  const [selectedCommit, setSelectedCommit] = useState<string>();
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [outputOpen, setOutputOpen] = useState(false);
   const [pending, setPending] = useState<Pending>();
+  const [dialog, setDialog] = useState<DialogSpec>();
   const [busyOperations, setBusyOperations] = useState<number[]>([]);
   const [filter, setFilter] = useState("");
   const [leftWidth, setLeftWidth] = useState(240);
@@ -29,7 +37,10 @@ export default function App() {
   const [outputHeight, setOutputHeight] = useState(190);
   const [language, setLanguage] = useState<Language>("en");
   const allowClose = useRef(false);
+  const cloneOperations = useRef(new Set<number>());
+  const historyRepository = useRef<number | undefined>(undefined);
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
+  const showDialog = useCallback((spec: DialogSpec) => setDialog(spec), []);
 
   const selected = repositories.find((repository) => repository.id === selectedId);
   const pushLog = useCallback((kind: LogLine["kind"], message: string) => {
@@ -72,13 +83,56 @@ export default function App() {
   }, [selectedId, selected?.kind, refreshStatus, pushLog]);
 
   useEffect(() => {
+    if (!selectedId || tab !== "history" || historyRepository.current === selectedId) return;
+    let current = true;
+    let settled = false;
+    historyRepository.current = selectedId;
+    setCommits([]); setNextHistoryOffset(undefined); setSelectedCommit(undefined); setHistoryLoading(true);
+    api.history(selectedId).then((page) => {
+      if (current) { setCommits(page.commits); setNextHistoryOffset(page.nextOffset ?? undefined); }
+    }).catch((error) => { if (current) { historyRepository.current = undefined; pushLog("error", errorMessage(error)); setOutputOpen(true); } }).finally(() => { settled = true; if (current) setHistoryLoading(false); });
+    return () => { current = false; if (!settled && historyRepository.current === selectedId) historyRepository.current = undefined; };
+  }, [selectedId, tab, pushLog]);
+
+  const loadMoreHistory = async () => {
+    if (!selectedId || historyRepository.current !== selectedId || nextHistoryOffset === undefined || historyLoading) return;
+    const repositoryId = selectedId;
+    setHistoryLoading(true);
+    try {
+      const page = await api.history(repositoryId, nextHistoryOffset);
+      if (historyRepository.current !== repositoryId) return;
+      setCommits((current) => [...new Map([...current, ...page.commits].map((commit) => [commit.oid, commit])).values()]);
+      setNextHistoryOffset(page.nextOffset ?? undefined);
+    } catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
+    finally { if (historyRepository.current === repositoryId) setHistoryLoading(false); }
+  };
+
+  const openCommit = async (oid: string) => {
+    if (!selectedId) return;
+    const repositoryId = selectedId;
+    setSelectedCommit(oid);
+    try {
+      const patch = await api.commitDiff(repositoryId, oid);
+      if (historyRepository.current === repositoryId) setDiff({ path: t("commitDiff"), staged: false, binary: false, tooLarge: false, patch, hunks: [] });
+    }
+    catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
+  };
+
+  useEffect(() => {
     const unlisteners = Promise.all([
       listen<OperationEvent>("operation-event", ({ payload }) => {
         pushLog(payload.kind, payload.message);
-        if (payload.kind === "started") setBusyOperations((ids) => [...ids, payload.operationId]);
+        if (payload.kind === "started") {
+          if (payload.repositoryId == null) cloneOperations.current.add(payload.operationId);
+          setBusyOperations((ids) => ids.includes(payload.operationId) ? ids : [...ids, payload.operationId]);
+        }
         if (payload.kind === "finished") {
           setBusyOperations((ids) => ids.filter((id) => id !== payload.operationId));
-          if ((payload.exitCode ?? 1) !== 0) setOutputOpen(true);
+          if (payload.outcome !== "succeeded") setOutputOpen(true);
+          if (cloneOperations.current.delete(payload.operationId)) {
+            refreshRepositories();
+            if (payload.outcome === "succeeded" && payload.repositoryId) setSelectedId(payload.repositoryId);
+          }
         }
         if (payload.kind === "stderr") setOutputOpen(true);
       }),
@@ -95,14 +149,17 @@ export default function App() {
     const listener = getCurrentWindow().onCloseRequested(async (event) => {
       if (allowClose.current || !busyOperations.length) return;
       event.preventDefault();
-      if (window.confirm(`${busyOperations.length} ${t("closeOperations")}`)) {
-        await Promise.allSettled(busyOperations.map(api.cancel));
-        allowClose.current = true;
-        await getCurrentWindow().close();
-      }
+      showDialog({
+        title: t("confirm"), message: `${busyOperations.length} ${t("closeOperations")}`, danger: true,
+        onSubmit: async () => {
+          await Promise.allSettled(busyOperations.map(api.cancel));
+          allowClose.current = true;
+          await getCurrentWindow().close();
+        },
+      });
     });
     return () => { listener.then((unlisten) => unlisten()); };
-  }, [busyOperations, language]);
+  }, [busyOperations, language, showDialog]);
 
   useEffect(() => {
     const closeMenu = () => document.querySelector<HTMLDivElement>(".row-menu-popover:popover-open")?.hidePopover();
@@ -131,10 +188,13 @@ export default function App() {
   };
   const register = async () => { const path = await chooseDirectory(); if (path) await mutateRepository(() => api.addRepository(path)); };
   const initialize = async () => { const path = await chooseDirectory(); if (path) await mutateRepository(() => api.initRepository(path)); };
-  const clone = async () => {
-    const url = window.prompt(t("remoteUrl")); if (!url) return;
-    const destination = await chooseDirectory(); if (destination) await mutateRepository(() => api.cloneRepository(url, destination));
-  };
+  const clone = () => showDialog({ title: t("clone"), submitLabel: t("clone"), fields: [{ name: "url", label: t("remoteUrl"), required: true }], onSubmit: async ({ url }) => {
+    const destination = await chooseDirectory();
+    if (!destination) return;
+    try {
+      await api.cloneRepository(String(url).trim(), destination);
+    } catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
+  } });
   const mutateRepository = async (action: () => Promise<RepositorySummary>) => {
     try { const repository = await action(); await refreshRepositories(); setSelectedId(repository.id); }
     catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
@@ -149,23 +209,24 @@ export default function App() {
   };
 
   const relocateSelected = async () => { const path = await chooseDirectory(); if (path && selectedId) await mutateRepository(() => api.relocateRepository(selectedId, path)); };
-  const removeSelected = async () => {
-    if (!selected || !window.confirm(`${selected.name} ${t("removeRepositoryConfirm")}`)) return;
+  const removeSelected = () => { if (selected) showDialog({ title: t("removeGitDock"), message: `${selected.name} ${t("removeRepositoryConfirm")}`, danger: true, onSubmit: async () => {
     await api.removeRepository(selected.id); setSelectedId(repositories.find((item) => item.id !== selected.id)?.id); await refreshRepositories();
-  };
+  } }); };
   const selectGit = async () => {
     const path = await open({ directory: false, multiple: false, title: t("selectGit") });
     if (typeof path === "string") setGit(await api.setGitPath(path));
   };
-  const forcePush = async () => {
+  const forcePush = () => {
     if (!selectedId || !selected?.branch) return;
-    const remote = window.prompt(t("remote"), "origin"); if (!remote) return;
-    try {
-      const branches = await api.branches(selectedId);
-      const expectedOid = branches.find((branch) => branch.remote && branch.name === `${remote}/${selected.branch}`)?.oid;
-      if (!expectedOid) throw new Error(`${t("fetch")} ${remote}/${selected.branch} ${t("fetchBeforeForce")}`);
-      await run({ type: "forcePushWithLease", remote, branch: selected.branch, expectedOid });
-    } catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
+    showDialog({ title: t("forcePush"), submitLabel: t("forcePush"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: async ({ remote }) => {
+      try {
+        const value = String(remote).trim();
+        const branches = await api.branches(selectedId);
+        const expectedOid = branches.find((branch) => branch.remote && branch.name === `${value}/${selected.branch}`)?.oid;
+        if (!expectedOid) throw new Error(`${t("fetch")} ${value}/${selected.branch} ${t("fetchBeforeForce")}`);
+        await run({ type: "forcePushWithLease", remote: value, branch: selected.branch, expectedOid });
+      } catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
+    } });
   };
 
   const toggleLanguage = () => {
@@ -198,8 +259,12 @@ export default function App() {
   };
 
   const visibleRepositories = useMemo(() => repositories.filter((repo) => `${repo.name} ${repo.path} ${repo.group ?? ""}`.toLowerCase().includes(filter.toLowerCase())).sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.name.localeCompare(b.name)), [repositories, filter]);
+  const outputPanel = <section className={`output-panel ${outputOpen ? "open" : ""}`}>
+    <button className="output-handle" onClick={() => setOutputOpen((value) => !value)}><span>{t("gitOutput")}</span><span>{busyOperations.length ? `${busyOperations.length} ${t("running")}` : `${logs.length} ${t("lines")}`} {outputOpen ? "⌄" : "⌃"}</span></button>
+    {outputOpen && <><div className="resize-handle resize-output" onPointerDown={(event) => beginResize("output", event)} /><div className="log" style={{ height: outputHeight }}><div className="log-toolbar">{busyOperations.map((id) => <button key={id} onClick={() => api.cancel(id)}>{t("cancel")} #{id}</button>)}<button onClick={() => setLogs([])}>{t("clear")}</button></div>{logs.map((line) => <div key={line.id} className={`log-${line.kind}`}>{line.message}</div>)}</div></>}
+  </section>;
 
-  if (!repositories.length) return <I18nProvider language={language}><EmptyState git={git} onAdd={register} onClone={clone} onInit={initialize} onSelectGit={selectGit} onToggleLanguage={toggleLanguage} logs={logs} /></I18nProvider>;
+  if (!repositories.length) return <I18nProvider language={language}><><main className="empty-workspace"><EmptyState git={git} onAdd={register} onClone={clone} onInit={initialize} onSelectGit={selectGit} onToggleLanguage={toggleLanguage} logs={logs} />{outputPanel}</main>{dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}</></I18nProvider>;
 
   return (
     <I18nProvider language={language}><div className="app-shell" style={{ gridTemplateColumns: `${leftWidth}px 1fr` }}>
@@ -216,28 +281,26 @@ export default function App() {
         <header className="topbar">
           <div className="repo-context"><span className="branch-dot" /> <strong>{selected?.name}</strong><code>{selected?.branch || shortOid(selected?.headOid)}</code></div>
           <nav aria-label={t("workflows")}>{(["changes", "history", "branches", "stashes"] as Tab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => { setTab(item); setDiff(undefined); }}>{t(item)}</button>)}</nav>
-          <div className="sync-actions"><button disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "fetch", prune: false })}>{t("fetch")}</button><button disabled={!selected?.capabilities.canWriteWorkTree} onClick={() => run({ type: "pull" })}>{t("pull")}</button><button className="primary" disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "push" })}>{t("push")}</button><RowMenu label={t("more")}><button onClick={refreshRepositories}>{t("refreshAll")}</button><button onClick={() => run({ type: "pull", strategy: "merge" })}>{t("pullMerge")}</button><button onClick={() => run({ type: "pull", strategy: "rebase" })}>{t("pullRebase")}</button><button onClick={() => run({ type: "pull", strategy: "fastForwardOnly" })}>{t("pullFf")}</button><button onClick={forcePush}>{t("forcePush")}</button><button onClick={() => { const remote = window.prompt(t("remote"), "origin"); const branch = remote && selected?.branch; if (remote && branch) run({ type: "setUpstream", remote, branch }); }}>{t("setUpstream")}</button><button onClick={() => { const commits = window.prompt(t("commitOids"))?.trim().split(/\s+/); if (commits?.length) run({ type: "cherryPick", commits }); }}>{t("cherryPickCommits")}</button><button onClick={() => run({ type: "undoLastCommit" })}>{t("undoCommit")}</button><button onClick={() => { const name = window.prompt(t("repositoryName"), selected?.name); if (name) updateSelected({ name }); }}>{t("renameEntry")}</button><button onClick={() => updateSelected({ favorite: !selected?.favorite })}>{selected?.favorite ? t("removeFavorite") : t("addFavorite")}</button><button onClick={() => { const group = window.prompt(t("group"), selected?.group ?? ""); if (group !== null) updateSelected({ group }); }}>{t("setGroup")}</button><button onClick={relocateSelected}>{t("relocate")}</button><button onClick={selectGit}>{t("selectGit")}</button><button className="menu-danger" onClick={removeSelected}>{t("removeGitDock")}</button></RowMenu></div>
+          <div className="sync-actions"><button disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "fetch", prune: false })}>{t("fetch")}</button><button disabled={!selected?.capabilities.canWriteWorkTree} onClick={() => run({ type: "pull" })}>{t("pull")}</button><button className="primary" disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "push" })}>{t("push")}</button><RowMenu label={t("more")}><button onClick={refreshRepositories}>{t("refreshAll")}</button><button onClick={() => run({ type: "pull", strategy: "merge" })}>{t("pullMerge")}</button><button onClick={() => run({ type: "pull", strategy: "rebase" })}>{t("pullRebase")}</button><button onClick={() => run({ type: "pull", strategy: "fastForwardOnly" })}>{t("pullFf")}</button><button onClick={forcePush}>{t("forcePush")}</button><button onClick={() => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } })}>{t("setUpstream")}</button><button onClick={() => showDialog({ title: t("cherryPickCommits"), fields: [{ name: "commits", label: t("commitOids"), required: true }], onSubmit: ({ commits }) => run({ type: "cherryPick", commits: String(commits).trim().split(/\s+/) }) })}>{t("cherryPickCommits")}</button><button onClick={() => run({ type: "undoLastCommit" })}>{t("undoCommit")}</button><button onClick={() => showDialog({ title: t("renameEntry"), fields: [{ name: "name", label: t("repositoryName"), value: selected?.name, required: true }], onSubmit: ({ name }) => updateSelected({ name: String(name).trim() }) })}>{t("renameEntry")}</button><button onClick={() => updateSelected({ favorite: !selected?.favorite })}>{selected?.favorite ? t("removeFavorite") : t("addFavorite")}</button><button onClick={() => showDialog({ title: t("setGroup"), fields: [{ name: "group", label: t("group"), value: selected?.group ?? "" }], onSubmit: ({ group }) => updateSelected({ group: String(group).trim() }) })}>{t("setGroup")}</button><button onClick={relocateSelected}>{t("relocate")}</button><button onClick={selectGit}>{t("selectGit")}</button><button className="menu-danger" onClick={removeSelected}>{t("removeGitDock")}</button></RowMenu></div>
         </header>
 
         <div className="work-area" style={{ gridTemplateColumns: `minmax(480px, 1fr) ${rightWidth}px` }}>
           <section className="canvas">
-            {diff ? <DiffView diff={diff} snapshotId={snapshot?.id} onBack={() => setDiff(undefined)} onRun={run} /> : tab === "changes" ? <ChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <HistoryCanvas repositoryId={selectedId!} onError={(message) => { pushLog("error", message); setOutputOpen(true); }} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
+            {diff ? <DiffView diff={diff} snapshotId={snapshot?.id} onBack={() => setDiff(undefined)} onRun={run} /> : tab === "changes" ? <ChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <HistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
           </section>
           <aside className="tool-pane"><div className="resize-handle resize-right" onPointerDown={(event) => beginResize("right", event)} />
             {tab === "changes" && <ChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={(path) => api.openRepositoryFile(selectedId!, path).catch((error) => pushLog("error", errorMessage(error)))} onLoadIgnored={() => refreshStatus(selectedId, true)} onRun={run} />}
-            {tab === "history" && <HistoryPane repositoryId={selectedId!} onRun={run} onDiff={(value) => setDiff({ path: t("commitDiff"), staged: false, binary: false, tooLarge: false, patch: value, hunks: [] })} onError={(message) => { pushLog("error", message); setOutputOpen(true); }} />}
-            {tab === "branches" && <BranchesPane repositoryId={selectedId!} onRun={run} onDiff={(value) => setDiff({ path: t("branchComparison"), staged: false, binary: false, tooLarge: false, patch: value, hunks: [] })} onError={(message) => pushLog("error", message)} />}
-            {tab === "stashes" && <StashesPane repositoryId={selectedId!} onRun={run} onError={(message) => pushLog("error", message)} />}
+            {tab === "history" && <HistoryPane commits={commits} selectedOid={selectedCommit} loading={historyLoading} hasMore={historyRepository.current === selectedId && nextHistoryOffset !== undefined} onLoadMore={loadMoreHistory} onSelect={openCommit} onRun={run} />}
+            {tab === "branches" && <BranchesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onDiff={(value) => setDiff({ path: t("branchComparison"), staged: false, binary: false, tooLarge: false, patch: value, hunks: [] })} onError={(message) => pushLog("error", message)} />}
+            {tab === "stashes" && <StashesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onError={(message) => pushLog("error", message)} />}
           </aside>
         </div>
 
-        <section className={`output-panel ${outputOpen ? "open" : ""}`}>
-          <button className="output-handle" onClick={() => setOutputOpen((value) => !value)}><span>{t("gitOutput")}</span><span>{busyOperations.length ? `${busyOperations.length} ${t("running")}` : `${logs.length} ${t("lines")}`} {outputOpen ? "⌄" : "⌃"}</span></button>
-          {outputOpen && <><div className="resize-handle resize-output" onPointerDown={(event) => beginResize("output", event)} /><div className="log" style={{ height: outputHeight }}><div className="log-toolbar">{busyOperations.map((id) => <button key={id} onClick={() => api.cancel(id)}>{t("cancel")} #{id}</button>)}<button onClick={() => setLogs([])}>{t("clear")}</button></div>{logs.map((line) => <div key={line.id} className={`log-${line.kind}`}>{line.message}</div>)}</div></>}
-        </section>
+        {outputPanel}
       </main>
 
       {pending && <ConfirmDialog pending={pending} onCancel={() => setPending(undefined)} onConfirm={confirmPending} />}
+      {dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}
     </div></I18nProvider>
   );
 }
@@ -320,10 +383,8 @@ function DiffView({ diff, snapshotId, onBack, onRun }: { diff: DiffFile; snapsho
   return <div className="diff-view"><header className="canvas-header"><button onClick={onBack}>← {t("back")}</button><strong>{diff.path}</strong><span>{diff.staged ? "INDEX ↔ HEAD" : "WORKTREE ↔ INDEX"}</span></header><div className="diff-lines">{lines.map((line, index) => <div key={index} className={line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "delete" : line.startsWith("@@") ? "hunk" : line.startsWith("diff ") ? "file-header" : "context"}><span>{index + 1}</span><code>{line || " "}</code>{line.startsWith("@@") && snapshotId && <button onClick={() => { const hunk = diff.hunks.find((item) => item.header === line); if (hunk) onRun({ type: diff.staged ? "unstageHunk" : "stageHunk", snapshotId, hunkId: hunk.id }); }}>{diff.staged ? t("unstageHunk") : t("stageHunk")}</button>}</div>)}</div></div>;
 }
 
-function HistoryCanvas({ repositoryId, onError }: { repositoryId: number; onError: (message: string) => void }) {
+function HistoryCanvas({ commits, selectedOid, onSelect }: { commits: CommitInfo[]; selectedOid?: string; onSelect: (oid: string) => void }) {
   const { t } = useI18n();
-  const [commits, setCommits] = useState<CommitInfo[]>([]);
-  useEffect(() => { api.history(repositoryId).then((page) => setCommits(page.commits)).catch((error) => onError(errorMessage(error))); }, [repositoryId, onError]);
   const rowHeight = 34; const laneGap = 14;
   const commitRows = new Map(commits.map((commit, index) => [commit.oid, index]));
   const maxLane = Math.max(0, ...commits.flatMap((commit) => [commit.lane.column, ...commit.lane.parentColumns]));
@@ -332,37 +393,57 @@ function HistoryCanvas({ repositoryId, onError }: { repositoryId: number; onErro
   return <div className="history-canvas"><header className="canvas-header"><strong>{t("repositoryGraph")}</strong><span>{commits.length} {t("commitsLoaded")}</span></header><div className="graph-list" style={{ "--graph-width": `${graphWidth}px` } as React.CSSProperties}><svg className="commit-graph" width={graphWidth} height={commits.length * rowHeight} aria-label={t("repositoryGraph")}>
     {commits.flatMap((commit, row) => commit.parents.map((parent, parentIndex) => { const targetRow = commitRows.get(parent); const targetColumn = targetRow === undefined ? commit.lane.parentColumns[parentIndex] ?? commit.lane.column : commits[targetRow].lane.column; const startX = laneX(commit.lane.column); const startY = row * rowHeight + rowHeight / 2; const endX = laneX(targetColumn); const endY = targetRow === undefined ? commits.length * rowHeight : targetRow * rowHeight + rowHeight / 2; return <path className={`graph-edge lane-${targetColumn % 5}`} key={`${commit.oid}-${parent}`} d={`M ${startX} ${startY} C ${startX} ${startY + 12}, ${endX} ${Math.max(startY + 12, endY - 12)}, ${endX} ${endY}`} />; }))}
     {commits.map((commit, row) => <circle className={`graph-node lane-${commit.lane.column % 5}`} key={commit.oid} cx={laneX(commit.lane.column)} cy={row * rowHeight + rowHeight / 2} r="4" />)}
-  </svg>{commits.map((commit) => <div className="graph-row" key={commit.oid}><span /><code>{shortOid(commit.oid)}</code><div className="graph-subject"><strong>{commit.subject}</strong>{commit.refs.map((reference) => <span className={`ref-label ${reference.startsWith("tag: ") ? "tag" : ""}`} key={reference}>{reference}</span>)}</div><span>{commit.author}</span><time>{commit.authoredAt.slice(0, 10)}</time></div>)}</div></div>;
+  </svg>{commits.map((commit) => <button className={`graph-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid} onClick={() => onSelect(commit.oid)}><span /><code>{shortOid(commit.oid)}</code><div className="graph-subject"><strong>{commit.subject}</strong>{commit.refs.map((reference) => <span className={`ref-label ${reference.startsWith("tag: ") ? "tag" : ""}`} key={reference}>{reference}</span>)}</div><span>{commit.author}</span><time>{commit.authoredAt.slice(0, 10)}</time></button>)}</div></div>;
 }
 
-function HistoryPane({ repositoryId, onRun, onDiff, onError }: { repositoryId: number; onRun: (request: OperationRequest) => void; onDiff: (diff: string) => void; onError: (message: string) => void }) {
+function HistoryPane({ commits, selectedOid, loading, hasMore, onLoadMore, onSelect, onRun }: { commits: CommitInfo[]; selectedOid?: string; loading: boolean; hasMore: boolean; onLoadMore: () => void; onSelect: (oid: string) => void; onRun: (request: OperationRequest) => void }) {
   const { t } = useI18n();
-  const [commits, setCommits] = useState<CommitInfo[]>([]);
-  useEffect(() => { api.history(repositoryId).then((page) => setCommits(page.commits)).catch((error) => onError(errorMessage(error))); }, [repositoryId, onError]);
-  return <div><div className="pane-title"><span>{t("commits")}</span><code>{commits.length}</code></div><div className="object-list">{commits.map((commit) => <div className="object-action-row" key={commit.oid}><button onClick={() => api.commitDiff(repositoryId, commit.oid).then(onDiff).catch((error) => onError(errorMessage(error)))}><strong>{commit.subject}</strong><span>{commit.author} · {shortOid(commit.oid)}</span></button><RowMenu><button onClick={() => onRun({ type: "cherryPick", commits: [commit.oid] })}>{t("cherryPick")}</button>{commit.parents.length === 1 && <button onClick={() => onRun({ type: "revert", oid: commit.oid })}>{t("revert")}</button>}</RowMenu></div>)}</div></div>;
+  return <div><div className="pane-title"><span>{t("commits")}</span><code>{commits.length}</code></div><div className="object-list">{commits.map((commit) => <div className={`object-action-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid}><button onClick={() => onSelect(commit.oid)}><strong>{commit.subject}</strong><span>{commit.author} · {shortOid(commit.oid)}</span></button><RowMenu><button onClick={() => onRun({ type: "cherryPick", commits: [commit.oid] })}>{t("cherryPick")}</button>{commit.parents.length === 1 && <button onClick={() => onRun({ type: "revert", oid: commit.oid })}>{t("revert")}</button>}</RowMenu></div>)}{hasMore && <button className="load-more" disabled={loading} onClick={onLoadMore}>{t("loadMore")}</button>}</div></div>;
 }
 
 function BranchCanvas({ repository }: { repository?: RepositorySummary }) { const { t } = useI18n(); return <div className="canvas-empty"><div className="branch-hero"><RailMark /><code>{repository?.branch ?? t("detachedHead")}</code></div><h2>{t("refsIntegration")}</h2><p>{t("branchHint")}</p></div>; }
 function StashCanvas({ repository }: { repository?: RepositorySummary }) { const { t } = useI18n(); return <div className="canvas-empty"><div className="change-tally"><strong>≋</strong><span>{t("savedStates")}</span></div><h2>{repository?.name} {t("stashes")}</h2><p>{t("stashHint")}</p></div>; }
 
-function BranchesPane({ repositoryId, onRun, onDiff, onError }: { repositoryId: number; onRun: (request: OperationRequest) => void; onDiff: (diff: string) => void; onError: (message: string) => void }) {
+function BranchesPane({ repositoryId, onRun, onDialog, onDiff, onError }: { repositoryId: number; onRun: (request: OperationRequest) => void; onDialog: (spec: DialogSpec) => void; onDiff: (diff: string) => void; onError: (message: string) => void }) {
   const { t } = useI18n();
   const [section, setSection] = useState<"branches" | "tags" | "remotes" | "submodules">("branches");
   const [creatingBranch, setCreatingBranch] = useState(false); const [branchName, setBranchName] = useState("");
   const [branches, setBranches] = useState<BranchInfo[]>([]); const [tags, setTags] = useState<TagInfo[]>([]); const [remotes, setRemotes] = useState<RemoteInfo[]>([]); const [submodules, setSubmodules] = useState<SubmoduleInfo[]>([]);
   useEffect(() => { Promise.all([api.branches(repositoryId), api.tags(repositoryId), api.remotes(repositoryId), api.submodules(repositoryId)]).then(([b, t, r, s]) => { setBranches(b); setTags(t); setRemotes(r); setSubmodules(s); }).catch((error) => onError(errorMessage(error))); }, [repositoryId, onError]);
   const createBranch = (event: React.FormEvent) => { event.preventDefault(); const name = branchName.trim(); if (!name) return; onRun({ type: "createBranch", name, checkout: true }); setBranchName(""); setCreatingBranch(false); };
-  const compare = async () => { const base = window.prompt(t("baseBranch")); const head = base && window.prompt(t("headBranch")); if (base && head) api.compareBranches(repositoryId, base, head).then(onDiff).catch((error) => onError(errorMessage(error))); };
+  const compare = () => onDialog({ title: t("compare"), fields: [{ name: "base", label: t("baseBranch"), required: true }, { name: "head", label: t("headBranch"), required: true }], onSubmit: ({ base, head }) => api.compareBranches(repositoryId, String(base).trim(), String(head).trim()).then(onDiff).catch((error) => onError(errorMessage(error))) });
+  const renameBranch = (oldName: string) => onDialog({ title: t("rename"), fields: [{ name: "name", label: t("newBranchName"), value: oldName, required: true }], onSubmit: ({ name }) => onRun({ type: "renameBranch", oldName, newName: String(name).trim() }) });
+  const createTag = () => onDialog({ title: t("create"), fields: [{ name: "name", label: t("tagName"), required: true }, { name: "message", label: t("annotation") }], onSubmit: ({ name, message }) => onRun({ type: "createTag", name: String(name).trim(), message: String(message).trim() || undefined }) });
+  const pushTag = (name: string) => onDialog({ title: t("pushTag"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => onRun({ type: "pushTag", remote: String(remote).trim(), name }) });
+  const addRemote = () => onDialog({ title: t("add"), fields: [{ name: "name", label: t("remoteName"), required: true }, { name: "url", label: t("remoteUrl"), required: true }], onSubmit: ({ name, url }) => onRun({ type: "addRemote", name: String(name).trim(), url: String(url).trim() }) });
+  const editRemote = (name: string, value: string) => onDialog({ title: t("editUrl"), fields: [{ name: "url", label: t("newRemoteUrl"), value, required: true }], onSubmit: ({ url }) => onRun({ type: "setRemoteUrl", name, url: String(url).trim() }) });
+  const updateSubmodules = () => onDialog({ title: t("update"), fields: [{ name: "recursive", label: t("updateNested"), value: false, type: "checkbox" }], onSubmit: ({ recursive }) => onRun({ type: "submoduleUpdate", paths: [], recursive: Boolean(recursive) }) });
   const branchGroups = [[t("localBranches"), branches.filter((branch) => !branch.remote)], [t("remoteBranches"), branches.filter((branch) => branch.remote)]] as const;
-  return <div><div className="segmented">{(["branches", "tags", "remotes", "submodules"] as const).map((item) => <button className={section === item ? "active" : ""} key={item} onClick={() => setSection(item)}>{t(item)}</button>)}</div>{section === "branches" && <><div className="pane-title"><span>{t("branches")}</span><span><button onClick={compare}>{t("compare")}</button><button onClick={() => setCreatingBranch(true)}>{t("newBranch")}</button></span></div>{creatingBranch && <form className="new-branch-form" onSubmit={createBranch}><input autoFocus aria-label={t("newBranchName")} value={branchName} onChange={(event) => setBranchName(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") { setBranchName(""); setCreatingBranch(false); } }} /><button type="submit" disabled={!branchName.trim()}>{t("create")}</button><button type="button" onClick={() => { setBranchName(""); setCreatingBranch(false); }}>{t("cancel")}</button></form>}<div className="object-list">{branchGroups.map(([name, entries]) => entries.length > 0 && <section className="branch-group" key={name}><header><span>{name}</span><code>{entries.length}</code></header>{entries.map((branch) => <div className="object-action-row" key={`${branch.remote}-${branch.name}`}><button className={branch.current ? "current" : ""} onDoubleClick={() => !branch.remote && !branch.current && onRun({ type: "switchBranch", name: branch.name })}><strong>{branch.current && "● "}{branch.name}</strong><span>{shortOid(branch.oid)} {branch.upstream && `· ${branch.upstream}`}</span></button><RowMenu>{branch.remote ? <button onClick={() => { const [remote, ...parts] = branch.name.split("/"); onRun({ type: "deleteRemoteBranch", remote, branch: parts.join("/") }); }}>{t("deleteRemoteBranch")}</button> : <>{!branch.current && <button onClick={() => onRun({ type: "switchBranch", name: branch.name })}>{t("switch")}</button>}{!branch.current && <button onClick={() => onRun({ type: "merge", reference: branch.name, mode: "normal" })}>{t("merge")}</button>}{!branch.current && <button onClick={() => onRun({ type: "merge", reference: branch.name, mode: "fastForward" })}>{t("fastForward")}</button>}{!branch.current && <button onClick={() => onRun({ type: "merge", reference: branch.name, mode: "squash" })}>{t("squashMerge")}</button>}{!branch.current && <button onClick={() => onRun({ type: "rebase", onto: branch.name })}>{t("rebaseOnto")}</button>}<button onClick={() => { const name = window.prompt(t("newBranchName"), branch.name); if (name) onRun({ type: "renameBranch", oldName: branch.name, newName: name }); }}>{t("rename")}</button>{!branch.current && <button onClick={() => onRun({ type: "deleteBranch", name: branch.name, force: false })}>{t("delete")}</button>}{!branch.current && <button onClick={() => onRun({ type: "deleteBranch", name: branch.name, force: true })}>{t("forceDelete")}</button>}</>}</RowMenu></div>)}</section>)}</div></>}{section === "tags" && <><div className="pane-title"><span>{t("tags")}</span><button onClick={() => { const name = window.prompt(t("tagName")); const message = name && window.prompt(t("annotation")); if (name) onRun({ type: "createTag", name, message: message || undefined }); }}>＋</button></div><div className="object-list">{tags.map((tag) => <div className="object-action-row" key={tag.name}><button><strong>{tag.name}</strong><span>{tag.subject || shortOid(tag.oid)}</span></button><RowMenu><button onClick={() => { const remote = window.prompt(t("remote"), "origin"); if (remote) onRun({ type: "pushTag", remote, name: tag.name }); }}>{t("pushTag")}</button><button onClick={() => onRun({ type: "deleteLocalTag", name: tag.name })}>{t("deleteLocalTag")}</button></RowMenu></div>)}</div></>}{section === "remotes" && <><div className="pane-title"><span>{t("remotes")}</span><button onClick={() => { const name = window.prompt(t("remoteName")); const url = name && window.prompt(t("remoteUrl")); if (name && url) onRun({ type: "addRemote", name, url }); }}>＋</button></div><div className="object-list">{remotes.map((remote) => <div className="object-action-row" key={remote.name}><button><strong>{remote.name}</strong><span>{remote.fetchUrl}</span></button><RowMenu><button onClick={() => { const url = window.prompt(t("newRemoteUrl")); if (url) onRun({ type: "setRemoteUrl", name: remote.name, url }); }}>{t("editUrl")}</button><button onClick={() => onRun({ type: "removeRemote", name: remote.name })}>{t("removeRemote")}</button></RowMenu></div>)}</div></>}{section === "submodules" && <><div className="pane-title"><span>{t("submodules")}</span><span><button onClick={() => onRun({ type: "submoduleInit", paths: [], recursive: false })}>{t("init")}</button><button onClick={() => onRun({ type: "submoduleSync", paths: [], recursive: false })}>{t("sync")}</button><button onClick={() => onRun({ type: "submoduleUpdate", paths: [], recursive: window.confirm(t("updateNested")) })}>{t("update")}</button></span></div><div className="object-list">{submodules.map((module) => <button key={module.path}><strong>{module.path}</strong><span>{module.state} · {shortOid(module.oid)}</span></button>)}</div></>}</div>;
+  return <div><div className="segmented">{(["branches", "tags", "remotes", "submodules"] as const).map((item) => <button className={section === item ? "active" : ""} key={item} onClick={() => setSection(item)}>{t(item)}</button>)}</div>{section === "branches" && <><div className="pane-title"><span>{t("branches")}</span><span><button onClick={compare}>{t("compare")}</button><button onClick={() => setCreatingBranch(true)}>{t("newBranch")}</button></span></div>{creatingBranch && <form className="new-branch-form" onSubmit={createBranch}><input autoFocus aria-label={t("newBranchName")} value={branchName} onChange={(event) => setBranchName(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") { setBranchName(""); setCreatingBranch(false); } }} /><button type="submit" disabled={!branchName.trim()}>{t("create")}</button><button type="button" onClick={() => { setBranchName(""); setCreatingBranch(false); }}>{t("cancel")}</button></form>}<div className="object-list">{branchGroups.map(([name, entries]) => entries.length > 0 && <section className="branch-group" key={name}><header><span>{name}</span><code>{entries.length}</code></header>{entries.map((branch) => <div className="object-action-row" key={`${branch.remote}-${branch.name}`}><button className={branch.current ? "current" : ""} onDoubleClick={() => !branch.remote && !branch.current && onRun({ type: "switchBranch", name: branch.name })}><strong>{branch.current && "● "}{branch.name}</strong><span>{shortOid(branch.oid)} {branch.upstream && `· ${branch.upstream}`}</span></button><RowMenu>{branch.remote ? <button onClick={() => { const [remote, ...parts] = branch.name.split("/"); onRun({ type: "deleteRemoteBranch", remote, branch: parts.join("/") }); }}>{t("deleteRemoteBranch")}</button> : <>{!branch.current && <button onClick={() => onRun({ type: "switchBranch", name: branch.name })}>{t("switch")}</button>}{!branch.current && <button onClick={() => onRun({ type: "merge", reference: branch.name, mode: "normal" })}>{t("merge")}</button>}{!branch.current && <button onClick={() => onRun({ type: "merge", reference: branch.name, mode: "fastForward" })}>{t("fastForward")}</button>}{!branch.current && <button onClick={() => onRun({ type: "merge", reference: branch.name, mode: "squash" })}>{t("squashMerge")}</button>}{!branch.current && <button onClick={() => onRun({ type: "rebase", onto: branch.name })}>{t("rebaseOnto")}</button>}<button onClick={() => renameBranch(branch.name)}>{t("rename")}</button>{!branch.current && <button onClick={() => onRun({ type: "deleteBranch", name: branch.name, force: false })}>{t("delete")}</button>}{!branch.current && <button onClick={() => onRun({ type: "deleteBranch", name: branch.name, force: true })}>{t("forceDelete")}</button>}</>}</RowMenu></div>)}</section>)}</div></>}{section === "tags" && <><div className="pane-title"><span>{t("tags")}</span><button onClick={createTag}>＋</button></div><div className="object-list">{tags.map((tag) => <div className="object-action-row" key={tag.name}><button><strong>{tag.name}</strong><span>{tag.subject || shortOid(tag.oid)}</span></button><RowMenu><button onClick={() => pushTag(tag.name)}>{t("pushTag")}</button><button onClick={() => onRun({ type: "deleteLocalTag", name: tag.name })}>{t("deleteLocalTag")}</button></RowMenu></div>)}</div></>}{section === "remotes" && <><div className="pane-title"><span>{t("remotes")}</span><button onClick={addRemote}>＋</button></div><div className="object-list">{remotes.map((remote) => <div className="object-action-row" key={remote.name}><button><strong>{remote.name}</strong><span>{remote.fetchUrl}</span></button><RowMenu><button onClick={() => editRemote(remote.name, remote.fetchUrl)}>{t("editUrl")}</button><button onClick={() => onRun({ type: "removeRemote", name: remote.name })}>{t("removeRemote")}</button></RowMenu></div>)}</div></>}{section === "submodules" && <><div className="pane-title"><span>{t("submodules")}</span><span><button onClick={() => onRun({ type: "submoduleInit", paths: [], recursive: false })}>{t("init")}</button><button onClick={() => onRun({ type: "submoduleSync", paths: [], recursive: false })}>{t("sync")}</button><button onClick={updateSubmodules}>{t("update")}</button></span></div><div className="object-list">{submodules.map((module) => <button key={module.path}><strong>{module.path}</strong><span>{module.state} · {shortOid(module.oid)}</span></button>)}</div></>}</div>;
 }
 
-function StashesPane({ repositoryId, onRun, onError }: { repositoryId: number; onRun: (request: OperationRequest) => void; onError: (message: string) => void }) {
+function StashesPane({ repositoryId, onRun, onDialog, onError }: { repositoryId: number; onRun: (request: OperationRequest) => void; onDialog: (spec: DialogSpec) => void; onError: (message: string) => void }) {
   const { t } = useI18n();
   const [stashes, setStashes] = useState<StashInfo[]>([]);
   useEffect(() => { api.stashes(repositoryId).then(setStashes).catch((error) => onError(errorMessage(error))); }, [repositoryId, onError]);
-  const create = () => { const message = window.prompt(t("stashMessage")) || undefined; onRun({ type: "stashCreate", message, includeUntracked: window.confirm(t("includeUntracked")) }); };
+  const create = () => onDialog({ title: t("create"), fields: [{ name: "message", label: t("stashMessage") }, { name: "includeUntracked", label: t("includeUntracked"), value: false, type: "checkbox" }], onSubmit: ({ message, includeUntracked }) => onRun({ type: "stashCreate", message: String(message).trim() || undefined, includeUntracked: Boolean(includeUntracked) }) });
   return <div><div className="pane-title"><span>{t("stashes")}</span><button onClick={create}>＋</button></div><div className="object-list">{stashes.map((stash) => <div className="stash-row" key={stash.oid}><button><strong>stash@{`{${stash.index}}`}</strong><span>{stash.subject}</span></button><div><button onClick={() => onRun({ type: "stashApply", index: stash.index, pop: false })}>{t("apply")}</button><button onClick={() => onRun({ type: "stashApply", index: stash.index, pop: true })}>{t("pop")}</button><button onClick={() => onRun({ type: "stashDrop", index: stash.index })}>{t("drop")}</button></div></div>)}</div></div>;
+}
+
+function FormDialog({ spec, onClose }: { spec: DialogSpec; onClose: () => void }) {
+  const { t } = useI18n();
+  const [values, setValues] = useState<Record<string, DialogValue>>(() => Object.fromEntries((spec.fields ?? []).map((field) => [field.name, field.value ?? (field.type === "checkbox" ? false : "")])));
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const valid = (spec.fields ?? []).every((field) => !field.required || String(values[field.name] ?? "").trim());
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!valid || submitting) return;
+    setSubmitting(true); setError("");
+    try { await spec.onSubmit(values); onClose(); }
+    catch (cause) { setError(errorMessage(cause)); setSubmitting(false); }
+  };
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="form-dialog" role="dialog" aria-modal="true" aria-labelledby="form-dialog-title" onSubmit={submit} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}><header><h2 id="form-dialog-title">{spec.title}</h2></header>{spec.message && <p>{spec.message}</p>}{(spec.fields ?? []).map((field, index) => field.type === "checkbox" ? <label className="dialog-checkbox" key={field.name}><input type="checkbox" checked={Boolean(values[field.name])} onChange={(event) => setValues((current) => ({ ...current, [field.name]: event.target.checked }))} /><span>{field.label}</span></label> : <label className="dialog-field" key={field.name}><span>{field.label}</span><input autoFocus={index === 0} value={String(values[field.name] ?? "")} required={field.required} onChange={(event) => setValues((current) => ({ ...current, [field.name]: event.target.value }))} /></label>)}{error && <p className="dialog-error">{error}</p>}<footer><button type="button" onClick={onClose}>{t("cancel")}</button><button className={spec.danger ? "danger" : "primary"} type="submit" disabled={!valid || submitting}>{spec.submitLabel ?? t("confirm")}</button></footer></form></div>;
 }
 
 function ConfirmDialog({ pending, onCancel, onConfirm }: { pending: Pending; onCancel: () => void; onConfirm: () => void }) {

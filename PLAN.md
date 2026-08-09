@@ -1,6 +1,6 @@
 # GitDock v1
 
-GitDock is an English, dark, high-density Git desktop client for individual developers. The first test release targets macOS 14+ on Apple Silicon and ships as an unsigned DMG.
+GitDock is an English, dark, high-density Git desktop client for individual developers. The first test release targets macOS 14+ on Apple Silicon and ships as an unsigned `.app` without a DMG.
 
 ## Stack and boundaries
 
@@ -46,15 +46,17 @@ The backlog is ordered by user risk and observed value. Do not start a lower tie
 
 ### P1 — hardening before a public beta
 
-- Move clone into the asynchronous operation pipeline so it streams progress, supports cancellation, and reports or safely removes a partial destination after failure.
-- Strengthen process cancellation: send a graceful interrupt, wait briefly, then terminate the full process group; always refresh and report any Git operation state left behind.
-- Replace the file watcher's leading-edge throttle with trailing debounce, suppress refresh storms caused by GitDock's own commands, and measure behavior in repositories containing large ignored dependency trees.
-- Finish history pagination in the UI and retain the selected commit while additional pages load.
-- Replace remaining `window.prompt` and ordinary confirmation dialogs with validated in-app forms. Destructive Git operations must continue using the dedicated impact preview.
-- Expand temporary-repository integration tests across every mutating `OperationRequest`, including hook failure, stale hunk rejection, linked-worktree locking, cancellation, merge/rebase/cherry-pick recovery, force-with-lease races, submodules, Trash, and configuration corruption.
-- Add frontend tests for workflow navigation, operation previews, output-panel failure behavior, conflict actions, and close-with-running-operation handling.
-- Run and record the manual macOS smoke checklist on a clean user account: Gatekeeper bypass, Git discovery, Keychain/SSH agent, GPG pinentry, external diff/merge tools, linked worktrees, bare repositories, file permissions, app relaunch, and DMG install/uninstall.
-- Add versioned JSON migration tests and a recoverable backup path before the first configuration schema change.
+Implementation status as of 2026-08-09:
+
+- [x] Move clone into the asynchronous operation pipeline so it streams progress, supports cancellation, and reports or safely removes a partial destination after failure.
+- [x] Strengthen process cancellation: send a graceful interrupt, wait briefly, then terminate the full process group; always refresh and report any Git operation state left behind.
+- [ ] Replace the file watcher's leading-edge throttle with trailing debounce, suppress refresh storms caused by GitDock's own commands, and measure behavior in repositories containing large ignored dependency trees. The implementation and debounce regression test are complete; the large-tree measurement remains part of the clean-account smoke run.
+- [x] Finish history pagination in the UI and retain the selected commit while additional pages load.
+- [x] Replace remaining `window.prompt` and ordinary confirmation dialogs with validated in-app forms. Destructive Git operations must continue using the dedicated impact preview.
+- [ ] Expand temporary-repository integration tests across every mutating `OperationRequest`, including hook failure, stale hunk rejection, linked-worktree locking, cancellation, merge/rebase/cherry-pick recovery, force-with-lease races, submodules, Trash, and configuration corruption. The named Git and configuration scenarios are covered except the macOS Trash integration, which remains in the clean-account smoke run; exhaustive per-variant coverage is still required.
+- [x] Add frontend tests for workflow navigation, operation previews, output-panel failure behavior, conflict actions, and close-with-running-operation handling.
+- [ ] Run and record the manual macOS smoke checklist on a clean user account: Gatekeeper bypass, Git discovery, Keychain/SSH agent, GPG pinentry, external diff/merge tools, linked worktrees, bare repositories, file permissions, app relaunch, and `.app` install/uninstall. The checklist is in `docs/MACOS_SMOKE.md` and has not been run.
+- [x] Add versioned JSON migration tests and a recoverable backup path before the first configuration schema change.
 
 Exit criteria: all automated checks pass, the smoke checklist has no data-loss or dead-end workflow, and clone/push/pull can be cancelled without orphaning child processes.
 

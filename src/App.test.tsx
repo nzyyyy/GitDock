@@ -1,6 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/plugin-dialog";
 import { afterEach, expect, test, vi } from "vitest";
 import App from "./App";
 
@@ -103,6 +106,141 @@ test("renders history topology and ref labels", async () => {
   expect(screen.getByRole("button", { name: /Git output/ })).toHaveClass("output-handle");
 });
 
+test("loads more history without losing the selected commit", async () => {
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    if (command === "get_history" && args && "offset" in args && args.offset === 100) return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Older", refs: [], lane: { column: 0, parentColumns: [] } }], nextOffset: undefined });
+    if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Selected", refs: [], lane: { column: 0, parentColumns: [] } }], nextOffset: 100 });
+    if (command === "get_commit_diff") return Promise.resolve("diff --git a/a b/a");
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  fireEvent.click((await screen.findAllByRole("button", { name: /Selected/ }))[0]);
+  fireEvent.click(await screen.findByRole("button", { name: /Back/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+  expect((await screen.findAllByText("Older")).length).toBeGreaterThan(0);
+  expect(screen.getAllByRole("button", { name: /Selected/ }).some((button) => button.classList.contains("selected") || button.parentElement?.classList.contains("selected"))).toBe(true);
+  expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, offset: 100, limit: 100 });
+});
+
+test("hides pagination when switching to a repository without another page", async () => {
+  const repositories = [
+    { id: 1, path: "/large", name: "Large", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 2, path: "/small", name: "Small", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "bbbbbbbb", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+  ];
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    if (command === "get_history" && args && "repositoryId" in args && args.repositoryId === 2) return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Small history", refs: [], lane: { column: 0, parentColumns: [] } }], nextOffset: null });
+    if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Large history", refs: [], lane: { column: 0, parentColumns: [] } }], nextOffset: 100 });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  expect(await screen.findByRole("button", { name: "Load more" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("option", { name: /Small/ }));
+  expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+  expect((await screen.findAllByText("Small history")).length).toBeGreaterThan(0);
+  expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+  expect(invoke).not.toHaveBeenCalledWith("get_history", expect.objectContaining({ offset: null }));
+});
+
+test("reloads history after leaving during the initial request", async () => {
+  let historyCalls = 0;
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    if (command === "get_history") {
+      historyCalls += 1;
+      if (historyCalls === 1) return new Promise(() => {});
+      return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Reloaded", refs: [], lane: { column: 0, parentColumns: [] } }], nextOffset: undefined });
+    }
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  await waitFor(() => expect(historyCalls).toBe(1));
+  fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+  fireEvent.click(screen.getByRole("button", { name: "History" }));
+  expect((await screen.findAllByText("Reloaded")).length).toBeGreaterThan(0);
+  expect(historyCalls).toBe(2);
+});
+
+test("starts clone from a validated in-app form", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId?: number | null; kind: "started" | "stderr" | "finished"; message: string; outcome?: "failed" } }) => void) | undefined;
+  let resolveClone: ((result: { operationId: number; accepted: boolean }) => void) | undefined;
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(open).mockResolvedValue("/tmp/clone");
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: {}, repositories: [] });
+    if (command === "clone_repository") return new Promise((resolve) => { resolveClone = resolve; });
+    return Promise.resolve([]);
+  });
+  const prompt = vi.spyOn(window, "prompt");
+  const confirm = vi.spyOn(window, "confirm");
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Clone" }));
+  const input = screen.getByRole("textbox", { name: "Remote URL" });
+  const submit = screen.getByRole("dialog").querySelector<HTMLButtonElement>("button[type='submit']")!;
+  expect(submit).toBeDisabled();
+  fireEvent.change(input, { target: { value: " https://example.com/repo.git " } });
+  fireEvent.click(submit);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("clone_repository", { url: "https://example.com/repo.git", destination: "/tmp/clone" }));
+  expect(screen.getByRole("button", { name: /Git output/ })).toBeInTheDocument();
+  await act(async () => operationListener?.({ payload: { operationId: 7, repositoryId: null, kind: "started", message: "Clone repository" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 7, kind: "stderr", message: "Receiving objects" } }));
+  expect(screen.getByRole("button", { name: "Cancel #7" })).toBeInTheDocument();
+  await act(async () => operationListener?.({ payload: { operationId: 7, kind: "finished", message: "Clone failed", outcome: "failed" } }));
+  await act(async () => resolveClone?.({ operationId: 7, accepted: true }));
+  expect(screen.queryByRole("button", { name: "Cancel #7" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Git output/ })).toHaveTextContent("3 lines");
+  expect(prompt).not.toHaveBeenCalled();
+  expect(confirm).not.toHaveBeenCalled();
+});
+
+test("repository list refresh preserves the current selection", async () => {
+  let repositoryListListener: (() => void) | undefined;
+  const repositories = [
+    { id: 1, path: "/alpha", name: "Alpha", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 2, path: "/beta", name: "Beta", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "bbbbbbbb", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+  ];
+  vi.mocked(listen).mockImplementation(((event: string, handler: () => void) => {
+    if (event === "repository-list-changed") repositoryListListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 2, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    if (command === "refresh_repositories") return Promise.resolve(repositories);
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  const alpha = await screen.findByRole("option", { name: /Alpha/ });
+  fireEvent.click(alpha);
+  expect(alpha).toHaveAttribute("aria-selected", "true");
+  await act(async () => repositoryListListener?.());
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("refresh_repositories"));
+  expect(screen.getByRole("option", { name: /Alpha/ })).toHaveAttribute("aria-selected", "true");
+});
+
 test("uses light-dismiss popovers for secondary menus", async () => {
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({
@@ -185,4 +323,60 @@ test("stages and unstages multiple selected files", async () => {
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "unstageFiles", paths: ["staged.ts"] } }));
   expect(screen.queryByRole("checkbox", { name: /conflict\.ts/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: /ignored\.log/ })).not.toBeInTheDocument();
+});
+
+test("routes conflict actions through previews and shows destructive impact", async () => {
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 2, conflictCount: 1, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [
+      { path: "conflict.ts", kind: "Conflicted", staged: false, unstaged: true, conflict: true, ignored: false },
+      { path: "work.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false },
+    ] });
+    if (command === "preview_operation" && args && "request" in args && (args.request as { type: string }).type === "discardTracked") return Promise.resolve({ title: "Discard tracked changes", summary: "", risk: "destructive", affectedPaths: ["work.ts"], affectedRefs: [], recoverable: false, requiresConfirmation: true });
+    if (command === "preview_operation") return Promise.resolve({ title: "Resolve", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
+    if (command === "start_operation") return Promise.resolve({ operationId: 2, accepted: true });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Resolve" }));
+  fireEvent.click(screen.getByRole("button", { name: "Use current target", hidden: true }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_operation", { repositoryId: 1, request: { type: "chooseConflictSide", path: "conflict.ts", side: "ours" }, confirmed: false }));
+  fireEvent.click(screen.getByRole("button", { name: "Discard work.ts" }));
+  expect(await screen.findByRole("alertdialog")).toHaveTextContent("work.ts");
+});
+
+test("opens output on failure and confirms cancellation before close", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId?: number; kind: "started" | "finished"; message: string; exitCode?: number; outcome?: string } }) => void) | undefined;
+  let closeListener: ((event: { preventDefault: () => void }) => void) | undefined;
+  const close = vi.fn(() => Promise.resolve());
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(getCurrentWindow).mockReturnValue({ onCloseRequested: vi.fn((handler) => { closeListener = handler as typeof closeListener; return Promise.resolve(() => {}); }), close } as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await screen.findByRole("option");
+  await act(async () => operationListener?.({ payload: { operationId: 9, repositoryId: 1, kind: "started", message: "Pull" } }));
+  const preventDefault = vi.fn();
+  await act(async () => closeListener?.({ preventDefault }));
+  expect(preventDefault).toHaveBeenCalled();
+  fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("cancel_operation", { operationId: 9 }));
+  expect(close).toHaveBeenCalled();
+
+  await act(async () => operationListener?.({ payload: { operationId: 10, repositoryId: 1, kind: "finished", message: "Failed", exitCode: 1, outcome: "failed" } }));
+  expect(document.querySelector(".output-panel")).toHaveClass("open");
 });

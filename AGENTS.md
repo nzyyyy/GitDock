@@ -12,6 +12,7 @@ GitDock is a Tauri desktop application with a React/TypeScript frontend and a Ru
 
 ## Build, Test, and Development Commands
 
+- Before running Node, npm, or npx commands, load nvm and run `nvm use default`; do not rely on the non-interactive shell's system Node.
 - `npm install`: install the locked Node dependencies. Node 24 or newer is required.
 - `npm run dev`: start the Vite frontend only.
 - `npm run tauri dev`: run the complete desktop app with hot reload.

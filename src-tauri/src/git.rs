@@ -741,6 +741,39 @@ pub fn path_name(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    fn init_repository(git: &Git, path: &Path) {
+        ensure_success(
+            git.run(path, &strings(&["init", "-b", "main"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        for (key, value) in [
+            ("user.name", "GitDock Test"),
+            ("user.email", "test@gitdock.local"),
+        ] {
+            ensure_success(
+                git.run(path, &strings(&["config", key, value]), None)
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    fn commit_file(git: &Git, path: &Path, contents: &str, message: &str) -> String {
+        std::fs::write(path.join("file.txt"), contents).unwrap();
+        ensure_success(
+            git.run(path, &strings(&["add", "--", "file.txt"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(path, &strings(&["commit", "-m", message]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        git.text(path, &["rev-parse", "HEAD"]).unwrap()
+    }
+
     #[test]
     fn parses_zero_delimited_status_and_rename() {
         let input = b"1 M. N... 100644 100644 100644 a a src/a.rs\0? new file.txt\02 R. N... 100644 100644 100644 a a R100 new.rs\0old.rs\0! target/a\0";
@@ -822,6 +855,17 @@ mod tests {
         .unwrap();
         let diff = git.diff(dir.path(), "hello world.txt", false, 3).unwrap();
         assert!(!diff.hunks.is_empty());
+        std::fs::write(
+            dir.path().join("hello world.txt"),
+            "changed after snapshot\n",
+        )
+        .unwrap();
+        assert_ne!(
+            git.diff(dir.path(), "hello world.txt", false, 3)
+                .unwrap()
+                .patch,
+            diff.patch
+        );
         let history = git.history(dir.path(), 0, 20).unwrap();
         assert_eq!(history.commits[0].subject, "initial");
     }
@@ -836,5 +880,261 @@ mod tests {
         )
         .unwrap();
         assert!(git.inspect_repository(dir.path()).unwrap().bare);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reports_commit_hook_failures_without_creating_a_commit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "initial\n", "initial");
+        std::fs::write(dir.path().join("file.txt"), "changed\n").unwrap();
+        ensure_success(
+            git.run(dir.path(), &strings(&["add", "--", "file.txt"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        let hook = dir.path().join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho hook failed >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        let output = git
+            .run(dir.path(), &strings(&["commit", "-m", "blocked"]), None)
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(error_text(&output).contains("hook failed"));
+        assert_eq!(
+            git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn linked_worktrees_share_a_common_git_directory() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let linked = dir.path().join("linked");
+        let main = dir.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        init_repository(&git, &main);
+        commit_file(&git, &main, "initial\n", "initial");
+        ensure_success(
+            git.run(
+                &main,
+                &[
+                    "worktree".into(),
+                    "add".into(),
+                    linked.to_string_lossy().into(),
+                ],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            git.inspect_repository(&main).unwrap().common_git_dir,
+            git.inspect_repository(&linked).unwrap().common_git_dir
+        );
+    }
+
+    #[test]
+    fn merge_and_cherry_pick_conflicts_can_be_aborted() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "base\n", "base");
+        ensure_success(
+            git.run(dir.path(), &strings(&["switch", "-c", "feature"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        let feature = commit_file(&git, dir.path(), "feature\n", "feature");
+        ensure_success(
+            git.run(dir.path(), &strings(&["switch", "main"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        commit_file(&git, dir.path(), "main\n", "main");
+
+        assert!(!git
+            .run(dir.path(), &strings(&["merge", "feature"]), None)
+            .unwrap()
+            .status
+            .success());
+        assert!(dir.path().join(".git/MERGE_HEAD").exists());
+        ensure_success(
+            git.run(dir.path(), &strings(&["merge", "--abort"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!git
+            .run(dir.path(), &strings(&["cherry-pick", &feature]), None,)
+            .unwrap()
+            .status
+            .success());
+        assert!(dir.path().join(".git/CHERRY_PICK_HEAD").exists());
+        ensure_success(
+            git.run(dir.path(), &strings(&["cherry-pick", "--abort"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!dir.path().join(".git/CHERRY_PICK_HEAD").exists());
+
+        assert!(!git
+            .run(dir.path(), &strings(&["rebase", "feature"]), None)
+            .unwrap()
+            .status
+            .success());
+        assert!(
+            dir.path().join(".git/rebase-merge").exists()
+                || dir.path().join(".git/rebase-apply").exists()
+        );
+        ensure_success(
+            git.run(dir.path(), &strings(&["rebase", "--abort"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn initializes_and_reads_a_direct_submodule() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("child");
+        let parent = dir.path().join("parent");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        init_repository(&git, &child);
+        commit_file(&git, &child, "child\n", "child");
+        init_repository(&git, &parent);
+        commit_file(&git, &parent, "parent\n", "parent");
+        ensure_success(
+            git.run(
+                &parent,
+                &[
+                    "-c".into(),
+                    "protocol.file.allow=always".into(),
+                    "submodule".into(),
+                    "add".into(),
+                    child.to_string_lossy().into(),
+                    "deps/child".into(),
+                ],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(
+                &parent,
+                &strings(&["submodule", "sync", "--", "deps/child"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let modules = git.submodules(&parent).unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].path, "deps/child");
+        assert!(modules[0].initialized);
+    }
+
+    #[test]
+    fn force_with_lease_rejects_a_remote_race() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let seed = dir.path().join("seed");
+        let first = dir.path().join("first");
+        let stale = dir.path().join("stale");
+        std::fs::create_dir(&remote).unwrap();
+        std::fs::create_dir(&seed).unwrap();
+        ensure_success(
+            git.run(&remote, &strings(&["init", "--bare"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        init_repository(&git, &seed);
+        commit_file(&git, &seed, "base\n", "base");
+        ensure_success(
+            git.run(
+                &seed,
+                &[
+                    "remote".into(),
+                    "add".into(),
+                    "origin".into(),
+                    remote.to_string_lossy().into(),
+                ],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(&seed, &strings(&["push", "-u", "origin", "main"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(
+                &remote,
+                &strings(&["symbolic-ref", "HEAD", "refs/heads/main"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for target in [&first, &stale] {
+            ensure_success(
+                git.run(
+                    dir.path(),
+                    &[
+                        "clone".into(),
+                        remote.to_string_lossy().into(),
+                        target.to_string_lossy().into(),
+                    ],
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            for (key, value) in [
+                ("user.name", "GitDock Test"),
+                ("user.email", "test@gitdock.local"),
+            ] {
+                ensure_success(
+                    git.run(target, &strings(&["config", key, value]), None)
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+        }
+        let expected = git
+            .text(&stale, &["rev-parse", "refs/remotes/origin/main"])
+            .unwrap();
+        commit_file(&git, &first, "first\n", "first");
+        ensure_success(
+            git.run(&first, &strings(&["push", "origin", "main"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        commit_file(&git, &stale, "stale\n", "stale");
+        let output = git
+            .run(
+                &stale,
+                &[
+                    "push".into(),
+                    format!("--force-with-lease=refs/heads/main:{expected}"),
+                    "origin".into(),
+                    "HEAD:refs/heads/main".into(),
+                ],
+                None,
+            )
+            .unwrap();
+        assert!(!output.status.success());
     }
 }

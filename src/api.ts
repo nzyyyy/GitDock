@@ -22,14 +22,15 @@ export interface WorkingTreeSnapshot { id: number; repositoryId: number; headOid
 export interface DiffHunk { id: string; header: string; patch: string }
 export interface DiffFile { path: string; staged: boolean; binary: boolean; tooLarge: boolean; patch: string; hunks: DiffHunk[] }
 export interface CommitInfo { oid: string; parents: string[]; author: string; authoredAt: string; subject: string; refs: string[]; lane: { column: number; parentColumns: number[] } }
-export interface CommitPage { commits: CommitInfo[]; nextOffset?: number }
+export interface CommitPage { commits: CommitInfo[]; nextOffset?: number | null }
 export interface BranchInfo { name: string; oid: string; current: boolean; remote: boolean; upstream?: string }
 export interface TagInfo { name: string; oid: string; subject: string }
 export interface RemoteInfo { name: string; fetchUrl: string; pushUrl: string }
 export interface StashInfo { index: number; oid: string; subject: string }
 export interface SubmoduleInfo { path: string; oid: string; initialized: boolean; state: string }
 export interface OperationPreview { title: string; summary: string; risk: RiskLevel; affectedPaths: string[]; affectedRefs: string[]; recoverable: boolean; requiresConfirmation: boolean }
-export interface OperationEvent { operationId: number; repositoryId: number; kind: "started" | "stdout" | "stderr" | "finished"; message: string; exitCode?: number }
+export interface OperationEvent { operationId: number; repositoryId?: number | null; kind: "started" | "stdout" | "stderr" | "finished"; message: string; exitCode?: number; outcome?: "succeeded" | "failed" | "cancelled" }
+export interface OperationResult { operationId: number; accepted: boolean }
 export type OperationRequest = { type: string; [key: string]: unknown };
 
 export const api = {
@@ -37,7 +38,7 @@ export const api = {
   refreshRepositories: () => invoke<RepositorySummary[]>("refresh_repositories"),
   addRepository: (path: string) => invoke<RepositorySummary>("add_repository", { path }),
   initRepository: (path: string) => invoke<RepositorySummary>("initialize_repository", { path }),
-  cloneRepository: (url: string, destination: string) => invoke<RepositorySummary>("clone_repository", { url, destination }),
+  cloneRepository: (url: string, destination: string) => invoke<OperationResult>("clone_repository", { url, destination }),
   removeRepository: (repositoryId: number) => invoke<void>("remove_repository", { repositoryId }),
   relocateRepository: (repositoryId: number, path: string) => invoke<RepositorySummary>("relocate_repository", { repositoryId, path }),
   updateRepository: (repository: RepositoryRecord) => invoke<void>("update_repository", { repository }),
@@ -57,6 +58,6 @@ export const api = {
   stashes: (repositoryId: number) => invoke<StashInfo[]>("get_stashes", { repositoryId }),
   submodules: (repositoryId: number) => invoke<SubmoduleInfo[]>("get_submodules", { repositoryId }),
   preview: (repositoryId: number, request: OperationRequest) => invoke<OperationPreview>("preview_operation", { repositoryId, request }),
-  start: (repositoryId: number, request: OperationRequest, confirmed = false) => invoke<{ operationId: number; accepted: boolean }>("start_operation", { repositoryId, request, confirmed }),
+  start: (repositoryId: number, request: OperationRequest, confirmed = false) => invoke<OperationResult>("start_operation", { repositoryId, request, confirmed }),
   cancel: (operationId: number) => invoke<void>("cancel_operation", { operationId }),
 };

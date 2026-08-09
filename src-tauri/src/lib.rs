@@ -11,15 +11,15 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
-    io::{BufRead, BufReader, Write},
+    io::{BufReader, Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
     },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
@@ -31,6 +31,7 @@ pub struct AppState {
     next_snapshot_id: AtomicU64,
     next_operation_id: AtomicU64,
     write_locks: Mutex<HashSet<PathBuf>>,
+    mutating_repositories: Mutex<HashSet<RepositoryId>>,
     running: Mutex<HashMap<OperationId, RunningOperation>>,
     watcher: Mutex<Option<RecommendedWatcher>>,
 }
@@ -52,6 +53,17 @@ struct CachedHunk {
 
 struct RunningOperation {
     pid: u32,
+    cancelled: Arc<AtomicBool>,
+}
+
+enum OperationContext {
+    Repository {
+        repository_id: RepositoryId,
+        common_git_dir: PathBuf,
+    },
+    Clone {
+        destination: PathBuf,
+    },
 }
 
 #[derive(Serialize, Clone)]
@@ -183,6 +195,14 @@ fn add_repository(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<RepositorySummary, String> {
+    register_repository(path, &state, &app)
+}
+
+fn register_repository(
+    path: String,
+    state: &AppState,
+    app: &AppHandle,
+) -> Result<RepositorySummary, String> {
     let git = state.git()?;
     let inspection = git.inspect_repository(Path::new(&path))?;
     let canonical = inspection.root.to_string_lossy().to_string();
@@ -234,7 +254,7 @@ fn clone_repository(
     destination: String,
     state: State<'_, AppState>,
     app: AppHandle,
-) -> Result<RepositorySummary, String> {
+) -> Result<OperationResult, String> {
     if url.trim().is_empty() {
         return Err("Remote URL is required".into());
     }
@@ -242,19 +262,35 @@ fn clone_repository(
     let destination_path = PathBuf::from(&destination);
     let parent = destination_path
         .parent()
-        .ok_or("Choose a destination directory")?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    ensure_success(git.run(
-        parent,
-        &[
-            "clone".into(),
-            "--".into(),
-            url,
-            destination_path.to_string_lossy().into(),
-        ],
-        None,
-    )?)?;
-    add_repository(destination, state, app)
+        .ok_or("Choose a destination directory")?
+        .to_path_buf();
+    std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+    let operation_id = state.next_operation_id.fetch_add(1, Ordering::Relaxed);
+    spawn_git_operation(
+        &git,
+        &parent,
+        CommandSpec {
+            args: vec![
+                "clone".into(),
+                "--progress".into(),
+                "--".into(),
+                url,
+                destination_path.to_string_lossy().into(),
+            ],
+            input: None,
+        },
+        operation_id,
+        "Clone repository",
+        OperationContext::Clone {
+            destination: destination_path,
+        },
+        &state,
+        app,
+    )?;
+    Ok(OperationResult {
+        operation_id,
+        accepted: true,
+    })
 }
 
 #[tauri::command]
@@ -339,27 +375,39 @@ fn watch_repository(
 ) -> Result<(), String> {
     let record = state.record(repository_id)?;
     let path = PathBuf::from(record.path);
-    let last_emit = std::sync::Arc::new(AtomicU64::new(0));
+    let (events, pending) = mpsc::channel();
+    let watch_app = app.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_err() {
-            return;
-        }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let previous = last_emit.load(Ordering::Relaxed);
-        if now.saturating_sub(previous) >= 300 {
-            last_emit.store(now, Ordering::Relaxed);
-            let _ = app.emit("repository-changed", RepositoryChanged { repository_id });
+        let suppressed = watch_app
+            .state::<AppState>()
+            .mutating_repositories
+            .lock()
+            .map(|repositories| repositories.contains(&repository_id))
+            .unwrap_or(true);
+        if event.is_ok() && !suppressed {
+            let _ = events.send(());
         }
     })
     .map_err(|e| e.to_string())?;
+    let event_app = app.clone();
+    thread::spawn(move || {
+        while wait_for_quiet(&pending) {
+            let _ = event_app.emit("repository-changed", RepositoryChanged { repository_id });
+        }
+    });
     watcher
         .watch(&path, RecursiveMode::Recursive)
         .map_err(|e| e.to_string())?;
     *state.watcher.lock().map_err(|_| "File watcher is busy")? = Some(watcher);
     Ok(())
+}
+
+fn wait_for_quiet(events: &mpsc::Receiver<()>) -> bool {
+    if events.recv().is_err() {
+        return false;
+    }
+    while events.recv_timeout(Duration::from_millis(300)).is_ok() {}
+    true
 }
 
 #[tauri::command]
@@ -635,15 +683,17 @@ fn start_operation(
     let operation_id = state.next_operation_id.fetch_add(1, Ordering::Relaxed);
     if let OperationRequest::TrashUntracked { paths } = request {
         acquire_lock(&state, &inspection.common_git_dir)?;
+        suppress_watch(&state, repository_id);
         let root = inspection.root.clone();
         let common = inspection.common_git_dir.clone();
         thread::spawn(move || {
             emit(
                 &app,
                 operation_id,
-                repository_id,
+                Some(repository_id),
                 OperationEventKind::Started,
                 "Move untracked files to Trash",
+                None,
                 None,
             );
             let result = paths
@@ -657,19 +707,25 @@ fn start_operation(
                 emit(
                     &app,
                     operation_id,
-                    repository_id,
+                    Some(repository_id),
                     OperationEventKind::Stderr,
                     &message,
+                    None,
                     None,
                 );
             }
             emit(
                 &app,
                 operation_id,
-                repository_id,
+                Some(repository_id),
                 OperationEventKind::Finished,
                 &message,
                 Some(code),
+                Some(if code == 0 {
+                    OperationOutcome::Succeeded
+                } else {
+                    OperationOutcome::Failed
+                }),
             );
             finish_operation(&app, operation_id, repository_id, &common);
         });
@@ -681,102 +737,25 @@ fn start_operation(
 
     let spec = command_spec(&state, repository_id, &inspection.root, &request)?;
     acquire_lock(&state, &inspection.common_git_dir)?;
-    let mut command = Command::new(&git.path);
-    command
-        .current_dir(&inspection.root)
-        .args(&spec.args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_EDITOR", "true")
-        .stdin(if spec.input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command.spawn().map_err(|e| {
-        release_lock(&state, &inspection.common_git_dir);
-        format!("Cannot start Git: {e}")
-    })?;
-    if let Some(input) = spec.input {
-        child
-            .stdin
-            .take()
-            .ok_or("Cannot open Git stdin")?
-            .write_all(&input)
-            .map_err(|e| e.to_string())?;
-    }
-    let pid = child.id();
-    state
-        .running
-        .lock()
-        .map_err(|_| "Operation registry is busy")?
-        .insert(operation_id, RunningOperation { pid });
-    emit(
-        &app,
+    suppress_watch(&state, repository_id);
+    spawn_git_operation(
+        &git,
+        &inspection.root,
+        spec,
         operation_id,
-        repository_id,
-        OperationEventKind::Started,
         &preview.title,
-        None,
-    );
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_app = app.clone();
-    let stderr_app = app.clone();
-    let stdout_thread = thread::spawn(move || {
-        stream(
-            stdout,
-            &stdout_app,
-            operation_id,
+        OperationContext::Repository {
             repository_id,
-            OperationEventKind::Stdout,
-        )
-    });
-    let stderr_thread = thread::spawn(move || {
-        stream(
-            stderr,
-            &stderr_app,
-            operation_id,
-            repository_id,
-            OperationEventKind::Stderr,
-        )
-    });
-    let common = inspection.common_git_dir;
-    thread::spawn(move || {
-        let status = child.wait();
-        let _ = stdout_thread.join();
-        let _ = stderr_thread.join();
-        match status {
-            Ok(status) => emit(
-                &app,
-                operation_id,
-                repository_id,
-                OperationEventKind::Finished,
-                if status.success() {
-                    "Operation completed"
-                } else {
-                    "Git operation failed"
-                },
-                status.code(),
-            ),
-            Err(error) => emit(
-                &app,
-                operation_id,
-                repository_id,
-                OperationEventKind::Finished,
-                &error.to_string(),
-                Some(1),
-            ),
-        }
-        finish_operation(&app, operation_id, repository_id, &common);
-    });
+            common_git_dir: inspection.common_git_dir.clone(),
+        },
+        &state,
+        app,
+    )
+    .map_err(|error| {
+        release_lock(&state, &inspection.common_git_dir);
+        resume_watch(&state, repository_id);
+        error
+    })?;
     Ok(OperationResult {
         operation_id,
         accepted: true,
@@ -785,19 +764,17 @@ fn start_operation(
 
 #[tauri::command]
 fn cancel_operation(operation_id: OperationId, state: State<'_, AppState>) -> Result<(), String> {
-    let pid = state
+    let (pid, cancelled) = state
         .running
         .lock()
         .map_err(|_| "Operation registry is busy")?
         .get(&operation_id)
-        .map(|r| r.pid)
+        .map(|r| (r.pid, r.cancelled.clone()))
         .ok_or("Operation is not running")?;
+    cancelled.store(true, Ordering::Relaxed);
     #[cfg(unix)]
     {
-        let result = unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
-        if result != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
+        terminate_process_group(pid)?;
     }
     Ok(())
 }
@@ -1331,6 +1308,207 @@ fn release_lock(state: &State<'_, AppState>, common: &Path) {
     }
 }
 
+fn suppress_watch(state: &State<'_, AppState>, repository_id: RepositoryId) {
+    if let Ok(mut repositories) = state.mutating_repositories.lock() {
+        repositories.insert(repository_id);
+    }
+}
+
+fn resume_watch(state: &State<'_, AppState>, repository_id: RepositoryId) {
+    if let Ok(mut repositories) = state.mutating_repositories.lock() {
+        repositories.remove(&repository_id);
+    }
+}
+
+fn spawn_git_operation(
+    git: &Git,
+    cwd: &Path,
+    spec: CommandSpec,
+    operation_id: OperationId,
+    title: &str,
+    context: OperationContext,
+    state: &State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let repository_id = match &context {
+        OperationContext::Repository { repository_id, .. } => Some(*repository_id),
+        OperationContext::Clone { .. } => None,
+    };
+    let mut command = Command::new(&git.path);
+    command
+        .current_dir(cwd)
+        .args(&spec.args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .stdin(if spec.input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Cannot start Git: {e}"))?;
+    if let Some(input) = spec.input {
+        if let Err(error) = child
+            .stdin
+            .take()
+            .ok_or("Cannot open Git stdin")?
+            .write_all(&input)
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error.to_string());
+        }
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut running = match state.running.lock() {
+        Ok(running) => running,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Operation registry is busy".into());
+        }
+    };
+    running.insert(
+        operation_id,
+        RunningOperation {
+            pid: child.id(),
+            cancelled: cancelled.clone(),
+        },
+    );
+    drop(running);
+    emit(
+        &app,
+        operation_id,
+        repository_id,
+        OperationEventKind::Started,
+        title,
+        None,
+        None,
+    );
+
+    let stdout_app = app.clone();
+    let stderr_app = app.clone();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_thread = thread::spawn(move || {
+        stream(
+            stdout,
+            &stdout_app,
+            operation_id,
+            repository_id,
+            OperationEventKind::Stdout,
+        )
+    });
+    let stderr_thread = thread::spawn(move || {
+        stream(
+            stderr,
+            &stderr_app,
+            operation_id,
+            repository_id,
+            OperationEventKind::Stderr,
+        )
+    });
+    thread::spawn(move || {
+        let status = child.wait();
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+        let was_cancelled = cancelled.load(Ordering::Relaxed);
+        let success = status.as_ref().is_ok_and(|status| status.success()) && !was_cancelled;
+        let mut final_repository_id = repository_id;
+        let (message, exit_code, outcome) = if was_cancelled {
+            let message = match &context {
+                OperationContext::Clone { destination } => format!(
+                    "Clone cancelled. Partial destination was kept at {}",
+                    destination.display()
+                ),
+                OperationContext::Repository { repository_id, .. } => {
+                    cancelled_repository_message(&app, *repository_id)
+                }
+            };
+            (
+                message,
+                status.ok().and_then(|status| status.code()),
+                OperationOutcome::Cancelled,
+            )
+        } else if success {
+            match &context {
+                OperationContext::Clone { destination } => {
+                    match register_repository(
+                        destination.to_string_lossy().into_owned(),
+                        &app.state::<AppState>(),
+                        &app,
+                    ) {
+                        Ok(repository) => {
+                            final_repository_id = Some(repository.id);
+                            (
+                                "Clone completed".into(),
+                                Some(0),
+                                OperationOutcome::Succeeded,
+                            )
+                        }
+                        Err(error) => (
+                            format!(
+                                "Clone completed at {}, but registration failed: {error}",
+                                destination.display()
+                            ),
+                            Some(1),
+                            OperationOutcome::Failed,
+                        ),
+                    }
+                }
+                OperationContext::Repository { .. } => (
+                    "Operation completed".into(),
+                    Some(0),
+                    OperationOutcome::Succeeded,
+                ),
+            }
+        } else {
+            let message = match (&context, status.as_ref()) {
+                (OperationContext::Clone { destination }, _) => format!(
+                    "Clone failed. Partial destination was kept at {}",
+                    destination.display()
+                ),
+                (_, Err(error)) => error.to_string(),
+                _ => "Git operation failed".into(),
+            };
+            (
+                message,
+                status.ok().and_then(|status| status.code()).or(Some(1)),
+                OperationOutcome::Failed,
+            )
+        };
+        emit(
+            &app,
+            operation_id,
+            final_repository_id,
+            OperationEventKind::Finished,
+            &message,
+            exit_code,
+            Some(outcome),
+        );
+        match context {
+            OperationContext::Repository {
+                repository_id,
+                common_git_dir,
+            } => finish_operation(&app, operation_id, repository_id, &common_git_dir),
+            OperationContext::Clone { .. } => {
+                if let Ok(mut running) = app.state::<AppState>().running.lock() {
+                    running.remove(&operation_id);
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
 fn finish_operation(
     app: &AppHandle,
     operation_id: OperationId,
@@ -1341,6 +1519,7 @@ fn finish_operation(
     if let Ok(mut running) = state.running.lock() {
         running.remove(&operation_id);
     }
+    resume_watch(&state, repository_id);
     release_lock(&state, common);
     if let Ok(mut snapshots) = state.snapshots.lock() {
         snapshots.retain(|_, s| s.repository_id != repository_id);
@@ -1352,11 +1531,11 @@ fn stream<R: std::io::Read>(
     reader: Option<R>,
     app: &AppHandle,
     operation_id: OperationId,
-    repository_id: RepositoryId,
+    repository_id: Option<RepositoryId>,
     kind: OperationEventKind,
 ) {
     let Some(reader) = reader else { return };
-    for line in BufReader::new(reader).lines().map_while(Result::ok) {
+    read_stream_frames(reader, |line| {
         emit(
             app,
             operation_id,
@@ -1364,17 +1543,36 @@ fn stream<R: std::io::Read>(
             kind.clone(),
             &git::redact_url(&line),
             None,
+            None,
         );
+    });
+}
+
+fn read_stream_frames<R: Read>(reader: R, mut on_frame: impl FnMut(&str)) {
+    let mut frame = Vec::new();
+    for byte in BufReader::new(reader).bytes().map_while(Result::ok) {
+        if byte == b'\r' || byte == b'\n' {
+            if !frame.is_empty() {
+                on_frame(&String::from_utf8_lossy(&frame));
+                frame.clear();
+            }
+        } else {
+            frame.push(byte);
+        }
+    }
+    if !frame.is_empty() {
+        on_frame(&String::from_utf8_lossy(&frame));
     }
 }
 
 fn emit(
     app: &AppHandle,
     operation_id: OperationId,
-    repository_id: RepositoryId,
+    repository_id: Option<RepositoryId>,
     kind: OperationEventKind,
     message: &str,
     exit_code: Option<i32>,
+    outcome: Option<OperationOutcome>,
 ) {
     let _ = app.emit(
         "operation-event",
@@ -1384,8 +1582,66 @@ fn emit(
             kind,
             message: message.into(),
             exit_code,
+            outcome,
         },
     );
+}
+
+#[cfg(unix)]
+fn signal_process_group(pid: u32, signal: i32) -> Result<(), String> {
+    let result = unsafe { libc::kill(-(pid as i32), signal) };
+    if result == 0 {
+        Ok(())
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            Err(error.to_string())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_process_group(pid: u32, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if unsafe { libc::kill(-(pid as i32), 0) } != 0 {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+fn cancelled_repository_message(app: &AppHandle, repository_id: RepositoryId) -> String {
+    let state = app.state::<AppState>();
+    let ongoing = state
+        .record(repository_id)
+        .ok()
+        .and_then(|record| state.git().ok().map(|git| git.summary(&record)))
+        .and_then(|summary| summary.ongoing);
+    match ongoing.map(|state| state.kind) {
+        Some(OngoingKind::Merge) => "Operation cancelled. Repository remains in a merge state.",
+        Some(OngoingKind::Rebase) => "Operation cancelled. Repository remains in a rebase state.",
+        Some(OngoingKind::CherryPick) => {
+            "Operation cancelled. Repository remains in a cherry-pick state."
+        }
+        Some(OngoingKind::Revert) => "Operation cancelled. Repository remains in a revert state.",
+        None => "Operation cancelled.",
+    }
+    .into()
+}
+
+#[cfg(unix)]
+fn terminate_process_group(pid: u32) -> Result<(), String> {
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGKILL] {
+        signal_process_group(pid, signal)?;
+        if !wait_for_process_group(pid, Duration::from_millis(500)) {
+            return Ok(());
+        }
+    }
+    Err("Git process group did not exit after cancellation".into())
 }
 
 fn with_paths(prefix: &[&str], paths: &[String]) -> Vec<String> {
@@ -1496,6 +1752,7 @@ pub fn run() {
                 next_snapshot_id: AtomicU64::new(1),
                 next_operation_id: AtomicU64::new(1),
                 write_locks: Mutex::new(HashSet::new()),
+                mutating_repositories: Mutex::new(HashSet::new()),
                 running: Mutex::new(HashMap::new()),
                 watcher: Mutex::new(None),
             });
@@ -1563,5 +1820,49 @@ mod tests {
         assert!(validate_relative_path("../secret").is_err());
         assert!(validate_relative_path("/tmp/secret").is_err());
         assert!(validate_relative_path("src/main.rs").is_ok());
+    }
+
+    #[test]
+    fn watcher_waits_until_the_event_burst_is_quiet() {
+        let (sender, receiver) = mpsc::channel();
+        let burst = sender.clone();
+        let started = std::time::Instant::now();
+        thread::spawn(move || {
+            burst.send(()).unwrap();
+            thread::sleep(Duration::from_millis(100));
+            burst.send(()).unwrap();
+            thread::sleep(Duration::from_millis(100));
+            burst.send(()).unwrap();
+        });
+        assert!(wait_for_quiet(&receiver));
+        assert!(started.elapsed() >= Duration::from_millis(450));
+        drop(sender);
+    }
+
+    #[test]
+    fn stream_frames_split_carriage_return_progress() {
+        let mut frames = Vec::new();
+        read_stream_frames(
+            std::io::Cursor::new(b"Counting 1\rCounting 2\r\nDone\nTail"),
+            |frame| frames.push(frame.to_string()),
+        );
+        assert_eq!(frames, ["Counting 1", "Counting 2", "Done", "Tail"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_terminates_the_full_process_group() {
+        use std::os::unix::process::CommandExt;
+
+        let mut child = Command::new("sh")
+            .args(["-c", "trap '' INT TERM; while :; do sleep 1; done"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let waiter = thread::spawn(move || child.wait().unwrap());
+        thread::sleep(Duration::from_millis(100));
+        terminate_process_group(pid).unwrap();
+        assert!(!waiter.join().unwrap().success());
     }
 }
