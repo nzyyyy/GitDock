@@ -11,12 +11,14 @@ GitDock is a macOS Git desktop client built with Tauri, React, TypeScript, and R
 - Stage or unstage files and hunks, create commits, and resolve conflicts
 - Select multiple files to stage or unstage them in one operation
 - Switch between English and Simplified Chinese with a remembered preference
-- Browse the paginated commit topology graph with branch and tag refs, inspect commit diffs, cherry-pick, and revert
+- Scroll through a windowed commit topology graph whose lanes continue across pages, inspect commit diffs, cherry-pick, and revert
+- Organize repositories with collapsible groups, a pinned Favorites group, drag sorting, and keyboard ordering within a group
 - Browse local and remote branches in separate groups, then create, switch, merge, rebase, rename, and delete branches
 - Manage tags, remotes, stashes, and submodules
 - Fetch, pull, push, and force-push with lease
 - Review affected paths and refs before sensitive Git operations run
 - Enter Git operation details in validated in-app forms instead of browser prompts
+- Explicitly export the bounded current-session Git log with URL credential redaction and no automatic persistence
 
 ## Requirements
 
@@ -45,6 +47,14 @@ npm test
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 ```
+
+The 100,000-commit and 100,000-ignored-file performance checks are skipped by default and can be run explicitly:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml benchmarks_ -- --ignored --nocapture
+```
+
+Recorded benchmark results are in `docs/PERFORMANCE.md`.
 
 ## Packaging
 

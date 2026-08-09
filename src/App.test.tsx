@@ -23,7 +23,7 @@ Object.defineProperties(HTMLElement.prototype, {
   showPopover: { configurable: true, value: showPopover },
   hidePopover: { configurable: true, value: hidePopover },
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 test("shows actionable first-run state", async () => {
   render(<App />);
@@ -114,8 +114,8 @@ test("loads more history without losing the selected commit", async () => {
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
-    if (command === "get_history" && args && "offset" in args && args.offset === 100) return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Older", refs: [], lane: { column: 0, parentColumns: [] } }], nextOffset: undefined });
-    if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Selected", refs: [], lane: { column: 0, parentColumns: [] } }], nextOffset: 100 });
+    if (command === "get_history" && args && "cursor" in args && args.cursor && (args.cursor as { offset: number }).offset === 100) return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Older", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: undefined });
+    if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Selected", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: { offset: 100, activeLanes: [] } });
     if (command === "get_commit_diff") return Promise.resolve("diff --git a/a b/a");
     return Promise.resolve([]);
   });
@@ -127,7 +127,7 @@ test("loads more history without losing the selected commit", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Load more" }));
   expect((await screen.findAllByText("Older")).length).toBeGreaterThan(0);
   expect(screen.getAllByRole("button", { name: /Selected/ }).some((button) => button.classList.contains("selected") || button.parentElement?.classList.contains("selected"))).toBe(true);
-  expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, offset: 100, limit: 100 });
+  expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 100, activeLanes: [] }, limit: 100 });
 });
 
 test("hides pagination when switching to a repository without another page", async () => {
@@ -138,8 +138,8 @@ test("hides pagination when switching to a repository without another page", asy
   vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
-    if (command === "get_history" && args && "repositoryId" in args && args.repositoryId === 2) return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Small history", refs: [], lane: { column: 0, parentColumns: [] } }], nextOffset: null });
-    if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Large history", refs: [], lane: { column: 0, parentColumns: [] } }], nextOffset: 100 });
+    if (command === "get_history" && args && "repositoryId" in args && args.repositoryId === 2) return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Small history", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: null });
+    if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Large history", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: { offset: 100, activeLanes: [] } });
     return Promise.resolve([]);
   });
 
@@ -150,7 +150,7 @@ test("hides pagination when switching to a repository without another page", asy
   expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
   expect((await screen.findAllByText("Small history")).length).toBeGreaterThan(0);
   expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
-  expect(invoke).not.toHaveBeenCalledWith("get_history", expect.objectContaining({ offset: null }));
+  expect(invoke).not.toHaveBeenCalledWith("get_history", expect.objectContaining({ cursor: null }));
 });
 
 test("reloads history after leaving during the initial request", async () => {
@@ -218,11 +218,13 @@ test("starts clone from a validated in-app form", async () => {
 test("repository list refresh preserves the current selection", async () => {
   let repositoryListListener: (() => void) | undefined;
   const repositories = [
-    { id: 1, path: "/alpha", name: "Alpha", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
-    { id: 2, path: "/beta", name: "Beta", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "bbbbbbbb", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 1, path: "/alpha", name: "Alpha", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 2, path: "/beta", name: "Beta", favorite: false, order: 1, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "bbbbbbbb", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
   ];
-  vi.mocked(listen).mockImplementation(((event: string, handler: () => void) => {
+  let repositorySummaryListener: ((event: { payload: (typeof repositories)[number] }) => void) | undefined;
+  vi.mocked(listen).mockImplementation(((event: string, handler: (...args: never[]) => void) => {
     if (event === "repository-list-changed") repositoryListListener = handler;
+    if (event === "repository-summary-refreshed") repositorySummaryListener = handler as typeof repositorySummaryListener;
     return Promise.resolve(() => {});
   }) as never);
   vi.mocked(invoke).mockImplementation((command: string) => {
@@ -236,8 +238,10 @@ test("repository list refresh preserves the current selection", async () => {
   const alpha = await screen.findByRole("option", { name: /Alpha/ });
   fireEvent.click(alpha);
   expect(alpha).toHaveAttribute("aria-selected", "true");
+  await act(async () => repositorySummaryListener?.({ payload: { ...repositories[0], changedCount: 3 } }));
+  expect(screen.getByRole("option", { name: /Alpha/ })).toHaveTextContent("±3");
   await act(async () => repositoryListListener?.());
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("refresh_repositories"));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("refresh_repositories", { activeRepositoryId: 1 }));
   expect(screen.getByRole("option", { name: /Alpha/ })).toHaveAttribute("aria-selected", "true");
 });
 
@@ -255,7 +259,7 @@ test("uses light-dismiss popovers for secondary menus", async () => {
 
   render(<App />);
   const more = await screen.findByRole("button", { name: "More" });
-  const menu = document.querySelector<HTMLDivElement>(".row-menu-popover")!;
+  const menu = more.nextElementSibling as HTMLDivElement;
   Object.defineProperty(menu, "scrollHeight", { value: 120 });
   expect(document.querySelector("details")).not.toBeInTheDocument();
   expect(menu).toHaveAttribute("popover", "auto");
@@ -575,4 +579,73 @@ test("does not reload branch data for unrelated operation events", async () => {
   await act(async () => operationListener?.({ payload: { operationId: 3, repositoryId: 1, kind: "started", message: "Fetch" } }));
   await act(async () => operationListener?.({ payload: { operationId: 3, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
   expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_branches")).toHaveLength(1);
+});
+
+test("automatically loads history at the sentinel and keeps the DOM windowed", async () => {
+  let observe: ((entries: Array<{ isIntersecting: boolean }>) => void) | undefined;
+  class TestIntersectionObserver {
+    constructor(callback: typeof observe) { observe = callback; }
+    observe() { observe?.([{ isIntersecting: true }]); }
+    disconnect() {}
+  }
+  vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
+  const oid = (index: number) => index.toString(16).padStart(40, "0");
+  const commits = Array.from({ length: 600 }, (_, index) => ({ oid: oid(index), parents: index === 0 ? [oid(599)] : [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: `Commit ${index}`, refs: [], lane: { column: 0, parentColumns: index === 0 ? [0] : [] } }));
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: commits[0].oid, changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, files: [] });
+    if (command === "get_history" && args && "cursor" in args && args.cursor) return Promise.resolve({ commits: commits.slice(1), nextCursor: null });
+    if (command === "get_history") return Promise.resolve({ commits: commits.slice(0, 1), nextCursor: { offset: 1, activeLanes: [] } });
+    return Promise.resolve(undefined);
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 1, activeLanes: [] }, limit: 100 }));
+  await screen.findByText("600 commits loaded");
+  expect(document.querySelectorAll(".graph-row").length).toBeLessThan(60);
+  expect(document.querySelectorAll(".history-pane .object-action-row").length).toBeLessThan(60);
+  const graph = document.querySelector<HTMLElement>(".graph-list")!;
+  graph.scrollTop = 300 * 34;
+  fireEvent.scroll(graph);
+  await waitFor(() => expect(document.querySelectorAll(".graph-edge")).toHaveLength(1));
+  vi.unstubAllGlobals();
+});
+
+test("groups repositories, moves one into favorites, and disables drag while searching", async () => {
+  const repositories = [
+    { id: 1, path: "/alpha", name: "Alpha", group: "Work", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 2, path: "/beta", name: "Beta", group: "Work", favorite: false, order: 1, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+  ];
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, files: [] });
+    return Promise.resolve(undefined);
+  });
+  render(<App />);
+  const search = await screen.findByRole("textbox", { name: "Search repositories" });
+  fireEvent.change(search, { target: { value: "a" } });
+  const filteredAlpha = await screen.findByRole("option", { name: /Alpha/ });
+  expect(filteredAlpha).toHaveAttribute("draggable", "false");
+  expect([...filteredAlpha.querySelectorAll<HTMLButtonElement>(".row-menu-popover button")].every((button) => button.disabled)).toBe(true);
+  fireEvent.change(search, { target: { value: "" } });
+  const alpha = await screen.findByRole("option", { name: /Alpha/ });
+  const favorites = screen.getByRole("button", { name: /Favorites0/ }).closest("section")!;
+  fireEvent.dragStart(alpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn() } });
+  fireEvent.drop(favorites, { dataTransfer: { getData: () => "1" } });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("reorder_repositories", { placements: expect.arrayContaining([expect.objectContaining({ id: 1, favorite: true, group: "Work" })]) }));
+  expect(screen.getByRole("button", { name: /Favorites1/ })).toBeInTheDocument();
+});
+
+test("exports the retained session log only after an explicit save choice", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "stderr"; message: string } }) => void) | undefined;
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => command === "bootstrap" ? Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: {}, repositories: [] }) : Promise.resolve(true));
+  render(<App />);
+  await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "stderr", message: "https://user:token@example.com/repo" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "stderr", message: "x".repeat(5 * 1024 * 1024) } }));
+  fireEvent.click(await screen.findByRole("button", { name: "Export log" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_session_log", { fileName: expect.stringMatching(/^gitdock-session-.+\.log$/), lines: [expect.objectContaining({ kind: "stderr", message: "https://user:token@example.com/repo", timestamp: expect.any(String) })] }));
 });

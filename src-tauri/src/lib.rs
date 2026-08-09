@@ -11,6 +11,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     io::{BufReader, Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
@@ -22,6 +23,7 @@ use std::{
     time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 pub struct AppState {
@@ -125,17 +127,22 @@ fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
 }
 
 #[tauri::command]
-fn refresh_repositories(state: State<'_, AppState>) -> Result<Vec<RepositorySummary>, String> {
+fn refresh_repositories(
+    active_repository_id: Option<RepositoryId>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Vec<RepositorySummary>, String> {
     let git = state.git()?;
-    let records = state
+    let mut records = state
         .store
         .lock()
         .map_err(|_| "Settings are busy")?
         .config
         .repositories
         .clone();
+    prioritize_repository(&mut records, active_repository_id);
     let mut summaries = Vec::with_capacity(records.len());
-    for chunk in records.chunks(4) {
+    for (index, chunk) in records.chunks(4).enumerate() {
         let batch = thread::scope(|scope| {
             chunk
                 .iter()
@@ -148,9 +155,27 @@ fn refresh_repositories(state: State<'_, AppState>) -> Result<Vec<RepositorySumm
                 .map(|handle| handle.join().expect("repository refresh worker panicked"))
                 .collect::<Vec<_>>()
         });
+        if index == 0 {
+            if let Some(summary) =
+                active_repository_id.and_then(|id| batch.iter().find(|summary| summary.id == id))
+            {
+                let _ = app.emit("repository-summary-refreshed", summary.clone());
+            }
+        }
         summaries.extend(batch);
     }
     Ok(summaries)
+}
+
+fn prioritize_repository(
+    records: &mut [RepositoryRecord],
+    active_repository_id: Option<RepositoryId>,
+) {
+    if let Some(index) =
+        active_repository_id.and_then(|id| records.iter().position(|record| record.id == id))
+    {
+        records.swap(0, index);
+    }
 }
 
 #[tauri::command]
@@ -360,6 +385,80 @@ fn update_repository(
 }
 
 #[tauri::command]
+fn reorder_repositories(
+    placements: Vec<RepositoryPlacement>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
+    persist_repository_placements(&mut store, &placements)?;
+    let _ = app.emit("repository-list-changed", RepositoryListChanged);
+    Ok(())
+}
+
+fn persist_repository_placements(
+    store: &mut ConfigStore,
+    placements: &[RepositoryPlacement],
+) -> Result<(), String> {
+    let previous = store.config.repositories.clone();
+    apply_repository_placements(&mut store.config.repositories, placements)?;
+    if let Err(error) = store.save() {
+        store.config.repositories = previous;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn apply_repository_placements(
+    repositories: &mut [RepositoryRecord],
+    placements: &[RepositoryPlacement],
+) -> Result<(), String> {
+    if placements.len() != repositories.len() {
+        return Err("Repository order must include every registered repository".into());
+    }
+    let ids = placements
+        .iter()
+        .map(|placement| placement.id)
+        .collect::<HashSet<_>>();
+    let orders = placements
+        .iter()
+        .map(|placement| placement.order)
+        .collect::<HashSet<_>>();
+    if ids.len() != placements.len()
+        || orders.len() != placements.len()
+        || !placements
+            .iter()
+            .all(|placement| repositories.iter().any(|record| record.id == placement.id))
+        || !(0..placements.len() as u32).all(|order| orders.contains(&order))
+    {
+        return Err("Repository order is incomplete or contains duplicates".into());
+    }
+    if placements.iter().any(|placement| {
+        placement
+            .group
+            .as_deref()
+            .is_some_and(|group| group.len() > 100 || group.chars().any(char::is_control))
+    }) {
+        return Err("Repository group must be at most 100 characters".into());
+    }
+    for placement in placements {
+        let repository = repositories
+            .iter_mut()
+            .find(|repository| repository.id == placement.id)
+            .expect("placement IDs were validated");
+        repository.group = placement
+            .group
+            .as_deref()
+            .map(str::trim)
+            .filter(|group| !group.is_empty())
+            .map(Into::into);
+        repository.favorite = placement.favorite;
+        repository.order = placement.order;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn remove_repository(
     repository_id: RepositoryId,
     state: State<'_, AppState>,
@@ -492,13 +591,128 @@ fn get_diff(
 #[tauri::command]
 fn get_history(
     repository_id: RepositoryId,
-    offset: usize,
+    cursor: Option<HistoryCursor>,
     limit: usize,
     state: State<'_, AppState>,
 ) -> Result<CommitPage, String> {
+    validate_history_cursor(&cursor)?;
     let git = state.git()?;
     let record = state.record(repository_id)?;
-    git.history(Path::new(&record.path), offset, limit.clamp(1, 200))
+    git.history(Path::new(&record.path), cursor, limit.clamp(1, 200))
+}
+
+fn validate_history_cursor(cursor: &Option<HistoryCursor>) -> Result<(), String> {
+    if cursor.as_ref().is_some_and(|cursor| {
+        cursor.offset > 10_000_000
+            || cursor.active_lanes.len() > 512
+            || cursor.active_lanes.iter().any(|oid| {
+                !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+    }) {
+        Err("History cursor is invalid".into())
+    } else {
+        Ok(())
+    }
+}
+
+const MAX_EXPORTED_LOG_LINES: usize = 10_000;
+const MAX_EXPORTED_LOG_BYTES: usize = 5 * 1024 * 1024;
+
+#[tauri::command]
+async fn export_session_log(
+    file_name: String,
+    lines: Vec<SessionLogLine>,
+    app: AppHandle,
+) -> Result<bool, String> {
+    validate_log_file_name(&file_name)?;
+    let dialog = app.clone();
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        dialog
+            .dialog()
+            .file()
+            .add_filter("Log", &["log"])
+            .set_file_name(file_name)
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let Some(path) = path else { return Ok(false) };
+    let path = path.into_path().map_err(|error| error.to_string())?;
+    write_session_log(&path, lines)?;
+    Ok(true)
+}
+
+fn validate_log_file_name(file_name: &str) -> Result<(), String> {
+    if file_name.len() > 160
+        || !file_name.ends_with(".log")
+        || file_name.chars().any(char::is_control)
+        || Path::new(file_name)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(file_name)
+    {
+        Err("Session log file name is invalid".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn write_session_log(path: &Path, lines: Vec<SessionLogLine>) -> Result<(), String> {
+    if !path.is_absolute() || !path.parent().is_some_and(Path::is_dir) || path.is_dir() {
+        return Err("Choose a valid absolute log file path".into());
+    }
+    if lines.len() > MAX_EXPORTED_LOG_LINES {
+        return Err("Session log is too large to export".into());
+    }
+    let mut output = String::new();
+    for line in lines {
+        if line.timestamp.len() > 64
+            || line.timestamp.chars().any(char::is_whitespace)
+            || !matches!(
+                line.kind.as_str(),
+                "started" | "stdout" | "stderr" | "finished" | "error"
+            )
+        {
+            return Err("Session log contains an invalid entry".into());
+        }
+        let message = git::redact_url(&line.message.replace(['\r', '\n'], " "));
+        output.push_str(&format!("{} {} {}\n", line.timestamp, line.kind, message));
+        if output.len() > MAX_EXPORTED_LOG_BYTES {
+            return Err("Session log is too large to export".into());
+        }
+    }
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("log");
+    let (temporary, mut file) = (0..100)
+        .find_map(|attempt| {
+            let temporary = path.with_extension(format!(
+                "{extension}.{}.{}.tmp",
+                std::process::id(),
+                attempt
+            ));
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => Some(Ok((temporary, file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error.to_string())),
+            }
+        })
+        .ok_or("Cannot create a temporary log file")??;
+    let result = (|| {
+        file.write_all(output.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|error| error.to_string())?;
+        fs::rename(&temporary, &path).map_err(|error| error.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 #[tauri::command]
@@ -921,7 +1135,7 @@ fn preview(
 }
 
 fn command_spec(
-    state: &State<'_, AppState>,
+    state: &AppState,
     repository_id: RepositoryId,
     cwd: &Path,
     request: &OperationRequest,
@@ -1273,7 +1487,7 @@ fn validate_undo(git: &Git, cwd: &Path) -> Result<(), String> {
 fn cached_hunk(
     git: &Git,
     cwd: &Path,
-    state: &State<'_, AppState>,
+    state: &AppState,
     repository_id: RepositoryId,
     snapshot_id: u64,
     hunk_id: &str,
@@ -1299,7 +1513,7 @@ fn cached_hunk(
     Ok(hunk.patch.clone())
 }
 
-fn acquire_lock(state: &State<'_, AppState>, common: &Path) -> Result<(), String> {
+fn acquire_lock(state: &AppState, common: &Path) -> Result<(), String> {
     let mut locks = state
         .write_locks
         .lock()
@@ -1310,7 +1524,7 @@ fn acquire_lock(state: &State<'_, AppState>, common: &Path) -> Result<(), String
         Ok(())
     }
 }
-fn release_lock(state: &State<'_, AppState>, common: &Path) {
+fn release_lock(state: &AppState, common: &Path) {
     if let Ok(mut locks) = state.write_locks.lock() {
         locks.remove(common);
     }
@@ -1778,11 +1992,13 @@ pub fn run() {
             clone_repository,
             relocate_repository,
             update_repository,
+            reorder_repositories,
             remove_repository,
             watch_repository,
             get_status,
             get_diff,
             get_history,
+            export_session_log,
             get_commit_diff,
             compare_branches,
             open_repository_file,
@@ -1803,6 +2019,20 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    fn test_state(git: Git, config_path: PathBuf) -> AppState {
+        AppState {
+            store: Mutex::new(ConfigStore::load(config_path).unwrap()),
+            git: Mutex::new(Ok(git)),
+            snapshots: Mutex::new(HashMap::new()),
+            next_snapshot_id: AtomicU64::new(1),
+            next_operation_id: AtomicU64::new(1),
+            write_locks: Mutex::new(HashSet::new()),
+            mutating_repositories: Mutex::new(HashSet::new()),
+            running: Mutex::new(HashMap::new()),
+            watcher: Mutex::new(None),
+        }
+    }
+
     #[test]
     fn destructive_actions_always_require_confirmation() {
         let record = RepositoryRecord {
@@ -1822,6 +2052,186 @@ mod tests {
         .unwrap();
         assert_eq!(preview.risk, RiskLevel::Destructive);
         assert!(preview.requires_confirmation);
+    }
+
+    #[test]
+    fn command_specs_cover_every_non_special_operation_variant() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ensure_success(git.run(dir.path(), &strings(&["init"]), None).unwrap()).unwrap();
+        let state = test_state(git, dir.path().join("config.json"));
+        let requests = vec![
+            OperationRequest::StageFiles {
+                paths: vec!["a".into()],
+            },
+            OperationRequest::UnstageFiles {
+                paths: vec!["a".into()],
+            },
+            OperationRequest::DiscardTracked {
+                paths: vec!["a".into()],
+            },
+            OperationRequest::Commit {
+                message: "message".into(),
+                amend: false,
+                signoff: true,
+            },
+            OperationRequest::Fetch {
+                remote: Some("origin".into()),
+                prune: true,
+            },
+            OperationRequest::Pull {
+                strategy: Some(PullStrategy::FastForwardOnly),
+            },
+            OperationRequest::Push {
+                remote: Some("origin".into()),
+                branch: Some("main".into()),
+            },
+            OperationRequest::ForcePushWithLease {
+                remote: "origin".into(),
+                branch: "main".into(),
+                expected_oid: "a".repeat(40),
+            },
+            OperationRequest::SetUpstream {
+                remote: "origin".into(),
+                branch: "main".into(),
+            },
+            OperationRequest::AddRemote {
+                name: "origin".into(),
+                url: "https://example.test/repo".into(),
+            },
+            OperationRequest::SetRemoteUrl {
+                name: "origin".into(),
+                url: "https://example.test/next".into(),
+            },
+            OperationRequest::RemoveRemote {
+                name: "origin".into(),
+            },
+            OperationRequest::DeleteRemoteBranch {
+                remote: "origin".into(),
+                branch: "old".into(),
+            },
+            OperationRequest::CreateBranch {
+                name: "feature".into(),
+                start_point: None,
+                checkout: true,
+            },
+            OperationRequest::SwitchBranch {
+                name: "main".into(),
+            },
+            OperationRequest::RenameBranch {
+                old_name: "old".into(),
+                new_name: "new".into(),
+            },
+            OperationRequest::DeleteBranch {
+                name: "old".into(),
+                force: false,
+            },
+            OperationRequest::Merge {
+                reference: "feature".into(),
+                mode: MergeMode::Squash,
+            },
+            OperationRequest::Rebase {
+                onto: "main".into(),
+            },
+            OperationRequest::CherryPick {
+                commits: vec!["a".repeat(40)],
+            },
+            OperationRequest::Continue {
+                kind: OngoingKind::Merge,
+            },
+            OperationRequest::Skip {
+                kind: OngoingKind::Rebase,
+            },
+            OperationRequest::Abort {
+                kind: OngoingKind::Revert,
+            },
+            OperationRequest::ChooseConflictSide {
+                path: "a".into(),
+                side: ConflictSide::Ours,
+            },
+            OperationRequest::MarkResolved {
+                paths: vec!["a".into()],
+            },
+            OperationRequest::StashCreate {
+                message: Some("save".into()),
+                include_untracked: true,
+            },
+            OperationRequest::StashApply {
+                index: 0,
+                pop: false,
+            },
+            OperationRequest::StashDrop { index: 0 },
+            OperationRequest::CreateTag {
+                name: "v1".into(),
+                target: None,
+                message: Some("release".into()),
+            },
+            OperationRequest::DeleteLocalTag { name: "v1".into() },
+            OperationRequest::PushTag {
+                remote: "origin".into(),
+                name: "v1".into(),
+            },
+            OperationRequest::SubmoduleInit {
+                paths: vec!["module".into()],
+                recursive: false,
+            },
+            OperationRequest::SubmoduleUpdate {
+                paths: vec!["module".into()],
+                recursive: true,
+            },
+            OperationRequest::SubmoduleSync {
+                paths: vec!["module".into()],
+                recursive: false,
+            },
+            OperationRequest::Revert {
+                oid: "a".repeat(40),
+            },
+            OperationRequest::RunDifftool {
+                path: "a".into(),
+                staged: false,
+            },
+            OperationRequest::RunMergetool {
+                path: Some("a".into()),
+            },
+        ];
+        assert_eq!(requests.len(), 37);
+        for request in requests {
+            let spec = command_spec(&state, 1, dir.path(), &request).unwrap();
+            assert!(!spec.args.is_empty(), "missing command for {request:?}");
+        }
+        for request in [
+            OperationRequest::StageHunk {
+                snapshot_id: 1,
+                hunk_id: "missing".into(),
+            },
+            OperationRequest::UnstageHunk {
+                snapshot_id: 1,
+                hunk_id: "missing".into(),
+            },
+        ] {
+            assert!(command_spec(&state, 1, dir.path(), &request)
+                .err()
+                .unwrap()
+                .contains("stale"));
+        }
+        let record = RepositoryRecord {
+            id: 1,
+            path: dir.path().to_string_lossy().into(),
+            name: "repo".into(),
+            group: None,
+            favorite: false,
+            order: 0,
+        };
+        assert!(
+            preview(
+                &record,
+                &OperationRequest::TrashUntracked {
+                    paths: vec!["a".into()]
+                }
+            )
+            .unwrap()
+            .requires_confirmation
+        );
     }
 
     #[test]
@@ -1856,6 +2266,223 @@ mod tests {
             |frame| frames.push(frame.to_string()),
         );
         assert_eq!(frames, ["Counting 1", "Counting 2", "Done", "Tail"]);
+    }
+
+    #[test]
+    fn prioritizes_the_active_repository_in_a_fifty_repository_refresh() {
+        let mut records = (0..50)
+            .map(|id| RepositoryRecord {
+                id,
+                path: format!("/tmp/{id}"),
+                name: id.to_string(),
+                group: None,
+                favorite: false,
+                order: id as u32,
+            })
+            .collect::<Vec<_>>();
+        prioritize_repository(&mut records, Some(37));
+        assert_eq!(records[0].id, 37);
+        assert_eq!(records.len(), 50);
+    }
+
+    #[test]
+    fn repository_placements_are_complete_and_atomic() {
+        let original = vec![
+            RepositoryRecord {
+                id: 1,
+                path: "a".into(),
+                name: "a".into(),
+                group: None,
+                favorite: false,
+                order: 0,
+            },
+            RepositoryRecord {
+                id: 2,
+                path: "b".into(),
+                name: "b".into(),
+                group: Some("Work".into()),
+                favorite: false,
+                order: 1,
+            },
+        ];
+        let mut repositories = original.clone();
+        assert!(apply_repository_placements(
+            &mut repositories,
+            &[RepositoryPlacement {
+                id: 1,
+                group: None,
+                favorite: true,
+                order: 0
+            }],
+        )
+        .is_err());
+        assert_eq!(repositories, original);
+
+        apply_repository_placements(
+            &mut repositories,
+            &[
+                RepositoryPlacement {
+                    id: 2,
+                    group: Some("Team".into()),
+                    favorite: false,
+                    order: 0,
+                },
+                RepositoryPlacement {
+                    id: 1,
+                    group: None,
+                    favorite: true,
+                    order: 1,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(repositories[0].order, 1);
+        assert!(repositories[0].favorite);
+        assert_eq!(repositories[1].group.as_deref(), Some("Team"));
+    }
+
+    #[test]
+    fn repository_placements_roll_back_when_saving_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = ConfigStore::load(path.clone()).unwrap();
+        store.config.repositories = vec![RepositoryRecord {
+            id: 1,
+            path: "a".into(),
+            name: "a".into(),
+            group: None,
+            favorite: false,
+            order: 0,
+        }];
+        store.save().unwrap();
+        fs::write(path, "damaged").unwrap();
+        let previous = store.config.repositories.clone();
+        assert!(persist_repository_placements(
+            &mut store,
+            &[RepositoryPlacement {
+                id: 1,
+                group: Some("Team".into()),
+                favorite: true,
+                order: 0,
+            }],
+        )
+        .is_err());
+        assert_eq!(store.config.repositories, previous);
+    }
+
+    #[test]
+    fn rejects_untrusted_history_lane_state() {
+        assert!(validate_history_cursor(&Some(HistoryCursor {
+            offset: 100,
+            active_lanes: vec!["not-an-oid".into()],
+        }))
+        .is_err());
+        assert!(validate_history_cursor(&Some(HistoryCursor {
+            offset: 100,
+            active_lanes: vec!["a".repeat(40)],
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn shared_git_directory_lock_rejects_a_second_writer() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(git, dir.path().join("config.json"));
+        let common = dir.path().join("common.git");
+        acquire_lock(&state, &common).unwrap();
+        assert!(acquire_lock(&state, &common).is_err());
+        release_lock(&state, &common);
+        acquire_lock(&state, &common).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_hunk_when_the_displayed_diff_changed() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ensure_success(git.run(dir.path(), &strings(&["init"]), None).unwrap()).unwrap();
+        for (key, value) in [
+            ("user.name", "GitDock Test"),
+            ("user.email", "test@gitdock.local"),
+        ] {
+            ensure_success(
+                git.run(dir.path(), &strings(&["config", key, value]), None)
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+        fs::write(dir.path().join("file.txt"), "one\n").unwrap();
+        ensure_success(
+            git.run(dir.path(), &strings(&["add", "file.txt"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(dir.path(), &strings(&["commit", "-m", "initial"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        fs::write(dir.path().join("file.txt"), "two\n").unwrap();
+        let state = test_state(git, dir.path().join("config.json"));
+        state.snapshots.lock().unwrap().insert(
+            1,
+            SnapshotCache {
+                repository_id: 1,
+                head_oid: None,
+                hunks: HashMap::from([(
+                    "hunk".into(),
+                    CachedHunk {
+                        path: "file.txt".into(),
+                        staged: false,
+                        patch: b"invalid".to_vec(),
+                        source_diff: "previous diff".into(),
+                    },
+                )]),
+            },
+        );
+        let error = command_spec(
+            &state,
+            1,
+            dir.path(),
+            &OperationRequest::StageHunk {
+                snapshot_id: 1,
+                hunk_id: "hunk".into(),
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("changed after it was displayed"));
+    }
+
+    #[test]
+    fn exports_a_bounded_redacted_session_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.log");
+        write_session_log(
+            &path,
+            vec![SessionLogLine {
+                timestamp: "2026-08-09T08:00:00.000Z".into(),
+                kind: "stderr".into(),
+                message: "https://user:token@example.com/repo".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "2026-08-09T08:00:00.000Z stderr https://***@example.com/repo\n"
+        );
+        assert!(write_session_log(
+            &dir.path().join("invalid.log"),
+            vec![SessionLogLine {
+                timestamp: "2026-08-09T08:00:00.000Z".into(),
+                kind: "untrusted".into(),
+                message: "message".into(),
+            }],
+        )
+        .is_err());
+        assert!(write_session_log(Path::new("relative.log"), Vec::new()).is_err());
+        assert!(validate_log_file_name("../session.log").is_err());
+        assert!(validate_log_file_name("session.log").is_ok());
     }
 
     #[cfg(unix)]

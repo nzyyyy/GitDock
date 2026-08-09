@@ -147,6 +147,7 @@ impl Git {
             name: record.name.clone(),
             group: record.group.clone(),
             favorite: record.favorite,
+            order: record.order,
             kind: RepositoryKind::Missing,
             capabilities: capabilities(RepositoryKind::Missing),
             branch: None,
@@ -200,6 +201,7 @@ impl Git {
             name: record.name.clone(),
             group: record.group.clone(),
             favorite: record.favorite,
+            order: record.order,
             kind: kind.clone(),
             capabilities: capabilities(kind),
             branch,
@@ -272,7 +274,19 @@ impl Git {
         })
     }
 
-    pub fn history(&self, cwd: &Path, offset: usize, limit: usize) -> Result<CommitPage, String> {
+    pub fn history(
+        &self,
+        cwd: &Path,
+        cursor: Option<HistoryCursor>,
+        limit: usize,
+    ) -> Result<CommitPage, String> {
+        let HistoryCursor {
+            offset,
+            active_lanes,
+        } = cursor.unwrap_or(HistoryCursor {
+            offset: 0,
+            active_lanes: Vec::new(),
+        });
         let format = "%H%x1f%P%x1f%an%x1f%aI%x1f%D%x1f%s%x1e";
         let args = vec![
             "log".into(),
@@ -289,10 +303,13 @@ impl Git {
         let mut commits = parse_history(&String::from_utf8_lossy(&output.stdout));
         let has_more = commits.len() > limit;
         commits.truncate(limit);
-        assign_lanes(&mut commits);
+        let active_lanes = assign_lanes(&mut commits, active_lanes);
         Ok(CommitPage {
             commits,
-            next_offset: has_more.then_some(offset + limit),
+            next_cursor: has_more.then_some(HistoryCursor {
+                offset: offset.saturating_add(limit),
+                active_lanes,
+            }),
         })
     }
 
@@ -598,8 +615,7 @@ fn parse_history(text: &str) -> Vec<CommitInfo> {
         .collect()
 }
 
-fn assign_lanes(commits: &mut [CommitInfo]) {
-    let mut active: Vec<String> = Vec::new();
+fn assign_lanes(commits: &mut [CommitInfo], mut active: Vec<String>) -> Vec<String> {
     for commit in commits {
         let column = active
             .iter()
@@ -610,9 +626,10 @@ fn assign_lanes(commits: &mut [CommitInfo]) {
             });
         active.remove(column);
         for (offset, parent) in commit.parents.iter().enumerate() {
-            if !active.contains(parent) {
-                active.insert((column + offset).min(active.len()), parent.clone());
+            if active.contains(parent) {
+                continue;
             }
+            active.insert((column + offset).min(active.len()), parent.clone());
         }
         commit.lane = GraphLane {
             column,
@@ -623,6 +640,7 @@ fn assign_lanes(commits: &mut [CommitInfo]) {
                 .collect(),
         };
     }
+    active
 }
 
 pub fn ongoing_state(git_dir: &Path) -> Option<OngoingGitState> {
@@ -678,14 +696,26 @@ pub fn error_text(output: &Output) -> String {
 }
 
 pub fn redact_url(value: &str) -> String {
-    let Some(scheme) = value.find("://") else {
-        return value.into();
-    };
-    let rest = scheme + 3;
-    let Some(at) = value[rest..].find('@') else {
-        return value.into();
-    };
-    format!("{}***@{}", &value[..rest], &value[rest + at + 1..])
+    let mut output = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(scheme) = remaining.find("://") {
+        let credentials = scheme + 3;
+        output.push_str(&remaining[..credentials]);
+        let authority_end = remaining[credentials..]
+            .find(|character: char| character == '/' || character.is_whitespace())
+            .map(|offset| credentials + offset)
+            .unwrap_or(remaining.len());
+        let authority = &remaining[credentials..authority_end];
+        if let Some(at) = authority.rfind('@') {
+            output.push_str("***@");
+            output.push_str(&authority[at + 1..]);
+        } else {
+            output.push_str(authority);
+        }
+        remaining = &remaining[authority_end..];
+    }
+    output.push_str(remaining);
+    output
 }
 
 fn resolve_git_path(root: &Path, value: &str) -> PathBuf {
@@ -801,7 +831,153 @@ mod tests {
             redact_url("https://user:token@example.com/repo"),
             "https://***@example.com/repo"
         );
+        assert_eq!(
+            redact_url("from https://a:b@one.test/x to https://c:d@two.test/y"),
+            "from https://***@one.test/x to https://***@two.test/y"
+        );
         assert_eq!(redact_url("git@example.com:repo"), "git@example.com:repo");
+    }
+
+    #[test]
+    fn lanes_continue_across_pages_and_compact_wide_merges() {
+        let commit = |oid: &str, parents: &[&str]| CommitInfo {
+            oid: oid.into(),
+            parents: parents.iter().map(|parent| (*parent).into()).collect(),
+            author: String::new(),
+            authored_at: String::new(),
+            subject: String::new(),
+            refs: Vec::new(),
+            lane: GraphLane {
+                column: 0,
+                parent_columns: Vec::new(),
+            },
+        };
+        let mut first = vec![commit("merge", &["a", "b", "c"]), commit("a", &["d"])];
+        let active = assign_lanes(&mut first, Vec::new());
+        assert_eq!(first[0].lane.parent_columns, [0, 1, 2]);
+        assert_eq!(active, ["d", "b", "c"]);
+
+        let mut second = vec![commit("b", &["d"]), commit("c", &["d"]), commit("d", &[])];
+        let active = assign_lanes(&mut second, active);
+        assert_eq!(
+            second
+                .iter()
+                .map(|item| item.lane.column)
+                .collect::<Vec<_>>(),
+            [1, 1, 0]
+        );
+        assert!(active.is_empty());
+    }
+
+    #[test]
+    #[ignore = "performance benchmark: creates 100,000 commits"]
+    fn benchmarks_history_on_one_hundred_thousand_commits() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        let mut stream = String::with_capacity(16_000_000);
+        for index in 1..=100_000 {
+            let subject = format!("commit {index}");
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{index}\nauthor GitDock Test <test@gitdock.local> {index} +0000\ncommitter GitDock Test <test@gitdock.local> {index} +0000\ndata {}\n{subject}\n",
+                subject.len()
+            ));
+            if index > 1 {
+                stream.push_str(&format!("from :{}\n", index - 1));
+            }
+            stream.push('\n');
+        }
+        for branch in 0..8 {
+            let mark = 100_001 + branch;
+            let subject = format!("wide branch {branch}");
+            stream.push_str(&format!(
+                "commit refs/heads/wide-{branch}\nmark :{mark}\nauthor GitDock Test <test@gitdock.local> {mark} +0000\ncommitter GitDock Test <test@gitdock.local> {mark} +0000\ndata {}\n{subject}\nfrom :100000\n\n",
+                subject.len()
+            ));
+        }
+        let subject = "wide octopus merge";
+        stream.push_str(&format!(
+            "commit refs/heads/main\nmark :100009\nauthor GitDock Test <test@gitdock.local> 100009 +0000\ncommitter GitDock Test <test@gitdock.local> 100009 +0000\ndata {}\n{subject}\nfrom :100000\n",
+            subject.len()
+        ));
+        for mark in 100_001..=100_008 {
+            stream.push_str(&format!("merge :{mark}\n"));
+        }
+        stream.push('\n');
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["fast-import", "--quiet"]),
+                Some(stream.as_bytes()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let measure = |cursor| {
+            let started = std::time::Instant::now();
+            let page = git.history(dir.path(), cursor, 100).unwrap();
+            assert_eq!(page.commits.len(), 100);
+            started.elapsed()
+        };
+        let mut first = (0..10).map(|_| measure(None)).collect::<Vec<_>>();
+        let deep_cursor = HistoryCursor {
+            offset: 50_000,
+            active_lanes: Vec::new(),
+        };
+        let mut deep = (0..10)
+            .map(|_| measure(Some(deep_cursor.clone())))
+            .collect::<Vec<_>>();
+        first.sort();
+        deep.sort();
+        println!(
+            "history-100k first-page-p95-ms={} deep-page-p95-ms={}",
+            first[9].as_millis(),
+            deep[9].as_millis()
+        );
+        assert!(first[9] < std::time::Duration::from_secs(1));
+        assert!(deep[9] < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    #[ignore = "performance benchmark: creates 100,000 ignored files"]
+    fn benchmarks_status_with_a_large_ignored_tree() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        std::fs::write(dir.path().join(".gitignore"), "dependencies/\n").unwrap();
+        ensure_success(
+            git.run(dir.path(), &strings(&["add", ".gitignore"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["commit", "-m", "ignore dependencies"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for directory in 0..100 {
+            let path = dir.path().join("dependencies").join(directory.to_string());
+            std::fs::create_dir_all(&path).unwrap();
+            for file in 0..1_000 {
+                std::fs::write(path.join(file.to_string()), b"x").unwrap();
+            }
+        }
+        let mut samples = (0..10)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let status = git.status(1, dir.path(), false, 0).unwrap();
+                assert!(status.files.is_empty());
+                started.elapsed()
+            })
+            .collect::<Vec<_>>();
+        samples.sort();
+        println!("ignored-tree-100k status-p95-ms={}", samples[9].as_millis());
+        assert!(samples[9] < std::time::Duration::from_secs(1));
     }
 
     #[test]
@@ -866,7 +1042,7 @@ mod tests {
                 .patch,
             diff.patch
         );
-        let history = git.history(dir.path(), 0, 20).unwrap();
+        let history = git.history(dir.path(), None, 20).unwrap();
         assert_eq!(history.commits[0].subject, "initial");
     }
 
@@ -998,6 +1174,41 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn rebase_conflict_can_be_aborted() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "base\n", "base");
+        ensure_success(
+            git.run(dir.path(), &strings(&["switch", "-c", "feature"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        commit_file(&git, dir.path(), "feature\n", "feature");
+        ensure_success(
+            git.run(dir.path(), &strings(&["switch", "main"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        commit_file(&git, dir.path(), "main\n", "main");
+        let output = git
+            .run(dir.path(), &strings(&["rebase", "feature"]), None)
+            .unwrap();
+        assert!(!output.status.success());
+        let inspection = git.inspect_repository(dir.path()).unwrap();
+        assert_eq!(
+            ongoing_state(&inspection.git_dir).unwrap().kind,
+            OngoingKind::Rebase
+        );
+        ensure_success(
+            git.run(dir.path(), &strings(&["rebase", "--abort"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(ongoing_state(&inspection.git_dir).is_none());
     }
 
     #[test]

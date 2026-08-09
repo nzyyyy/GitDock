@@ -2,11 +2,13 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, type BranchInfo, type CommitInfo, type DiffFile, type FileChange, type GitInfo, type Language, type OperationEvent, type OperationPreview, type OperationRequest, type RemoteInfo, type RepositorySummary, type StashInfo, type SubmoduleInfo, type TagInfo, type WorkingTreeSnapshot } from "./api";
+import { api, type BranchInfo, type CommitInfo, type DiffFile, type FileChange, type GitInfo, type HistoryCursor, type Language, type OperationEvent, type OperationPreview, type OperationRequest, type RemoteInfo, type RepositorySummary, type SessionLogLine, type StashInfo, type SubmoduleInfo, type TagInfo, type WorkingTreeSnapshot } from "./api";
 import { I18nProvider, translate, useI18n } from "./i18n";
 
 type Tab = "changes" | "history" | "branches" | "stashes";
-type LogLine = { id: number; kind: OperationEvent["kind"] | "error"; message: string };
+type LogLine = SessionLogLine & { id: number; bytes: number };
+type LogBuffer = { entries: Array<LogLine | undefined>; start: number; length: number; bytes: number };
+type RepositoryGroup = { key: string; label: string; repositories: RepositorySummary[] };
 type OperationOutcome = NonNullable<OperationEvent["outcome"]>;
 type OperationFinished = (outcome: OperationOutcome) => void;
 type RunOperation = (request: OperationRequest, onFinished?: OperationFinished) => void | Promise<void>;
@@ -17,6 +19,33 @@ type DialogSpec = { title: string; message?: string; submitLabel?: string; dange
 
 const shortOid = (oid?: string) => oid?.slice(0, 8) ?? "—";
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
+const FAVORITES_GROUP = "\0favorites";
+const UNGROUPED_GROUP = "\0ungrouped";
+const LOG_LIMIT = 10_000;
+const LOG_BYTE_LIMIT = 5 * 1024 * 1024;
+const GRAPH_EDGE_BUCKET_ROWS = 256;
+const textEncoder = new TextEncoder();
+
+const newLogBuffer = (): LogBuffer => ({ entries: [], start: 0, length: 0, bytes: 0 });
+
+const appendLog = (buffer: LogBuffer, line: Omit<LogLine, "bytes">) => {
+  const bytes = textEncoder.encode(`${line.timestamp} ${line.kind} ${line.message}\n`).byteLength;
+  if (bytes > LOG_BYTE_LIMIT) return false;
+  while (buffer.length && (buffer.length >= LOG_LIMIT || buffer.bytes + bytes > LOG_BYTE_LIMIT)) {
+    buffer.bytes -= buffer.entries[buffer.start]!.bytes;
+    buffer.entries[buffer.start] = undefined;
+    buffer.start = (buffer.start + 1) % LOG_LIMIT;
+    buffer.length -= 1;
+  }
+  const index = (buffer.start + buffer.length) % LOG_LIMIT;
+  buffer.entries[index] = { ...line, bytes };
+  buffer.length += 1;
+  buffer.bytes += bytes;
+  return true;
+};
+
+const readLogs = (buffer: LogBuffer) => Array.from({ length: buffer.length }, (_, index) => buffer.entries[(buffer.start + index) % LOG_LIMIT]!);
+const lastLog = (buffer: LogBuffer) => buffer.length ? buffer.entries[(buffer.start + buffer.length - 1) % LOG_LIMIT] : undefined;
 
 export default function App() {
   const [git, setGit] = useState<GitInfo>({ supported: false });
@@ -26,15 +55,18 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<WorkingTreeSnapshot>();
   const [diff, setDiff] = useState<DiffFile>();
   const [commits, setCommits] = useState<CommitInfo[]>([]);
-  const [nextHistoryOffset, setNextHistoryOffset] = useState<number>();
+  const [nextHistoryCursor, setNextHistoryCursor] = useState<HistoryCursor>();
   const [selectedCommit, setSelectedCommit] = useState<string>();
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [logs, setLogs] = useState<LogLine[]>([]);
+  const logBuffer = useRef<LogBuffer>(newLogBuffer());
+  const [, setLogRevision] = useState(0);
   const [outputOpen, setOutputOpen] = useState(false);
   const [pending, setPending] = useState<Pending>();
   const [dialog, setDialog] = useState<DialogSpec>();
   const [busyOperations, setBusyOperations] = useState<number[]>([]);
   const [filter, setFilter] = useState("");
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  const [draggingRepositoryId, setDraggingRepositoryId] = useState<number>();
   const [leftWidth, setLeftWidth] = useState(240);
   const [rightWidth, setRightWidth] = useState(360);
   const [outputHeight, setOutputHeight] = useState(190);
@@ -53,11 +85,13 @@ export default function App() {
 
   const selected = repositories.find((repository) => repository.id === selectedId);
   const pushLog = useCallback((kind: LogLine["kind"], message: string) => {
-    setLogs((current) => [...current.slice(-299), { id: Date.now() + Math.random(), kind, message }]);
+    if (appendLog(logBuffer.current, { id: Date.now() + Math.random(), timestamp: new Date().toISOString(), kind, message })) {
+      setLogRevision((current) => current + 1);
+    }
   }, []);
 
   const refreshRepositories = useCallback(async () => {
-    try { setRepositories(await api.refreshRepositories()); }
+    try { setRepositories(await api.refreshRepositories(selectedIdRef.current)); }
     catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
   }, [pushLog]);
 
@@ -115,25 +149,25 @@ export default function App() {
     let current = true;
     let settled = false;
     historyRepository.current = selectedId;
-    setCommits([]); setNextHistoryOffset(undefined); setSelectedCommit(undefined); setHistoryLoading(true);
+    setCommits([]); setNextHistoryCursor(undefined); setSelectedCommit(undefined); setHistoryLoading(true);
     api.history(selectedId).then((page) => {
-      if (current) { setCommits(page.commits); setNextHistoryOffset(page.nextOffset ?? undefined); }
+      if (current) { setCommits(page.commits); setNextHistoryCursor(page.nextCursor ?? undefined); }
     }).catch((error) => { if (current) { historyRepository.current = undefined; pushLog("error", errorMessage(error)); setOutputOpen(true); } }).finally(() => { settled = true; if (current) setHistoryLoading(false); });
     return () => { current = false; if (!settled && historyRepository.current === selectedId) historyRepository.current = undefined; };
   }, [selectedId, tab, pushLog]);
 
   const loadMoreHistory = useCallback(async () => {
-    if (!selectedId || historyRepository.current !== selectedId || nextHistoryOffset === undefined || historyLoading) return;
+    if (!selectedId || historyRepository.current !== selectedId || nextHistoryCursor === undefined || historyLoading) return;
     const repositoryId = selectedId;
     setHistoryLoading(true);
     try {
-      const page = await api.history(repositoryId, nextHistoryOffset);
+      const page = await api.history(repositoryId, nextHistoryCursor);
       if (historyRepository.current !== repositoryId) return;
       setCommits((current) => [...new Map([...current, ...page.commits].map((commit) => [commit.oid, commit])).values()]);
-      setNextHistoryOffset(page.nextOffset ?? undefined);
+      setNextHistoryCursor(page.nextCursor ?? undefined);
     } catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
     finally { if (historyRepository.current === repositoryId) setHistoryLoading(false); }
-  }, [selectedId, nextHistoryOffset, historyLoading, pushLog]);
+  }, [selectedId, nextHistoryCursor, historyLoading, pushLog]);
 
   const openCommit = useCallback(async (oid: string) => {
     if (!selectedId) return;
@@ -175,6 +209,9 @@ export default function App() {
       listen<{ repositoryId: number }>("repository-changed", ({ payload }) => {
         refreshRepository(payload.repositoryId);
         if (payload.repositoryId === selectedIdRef.current) refreshStatus(payload.repositoryId);
+      }),
+      listen<RepositorySummary>("repository-summary-refreshed", ({ payload }) => {
+        setRepositories((current) => current.map((repository) => repository.id === payload.id ? payload : repository));
       }),
       listen("repository-list-changed", refreshRepositories),
     ]);
@@ -248,7 +285,7 @@ export default function App() {
   const updateSelected = async (changes: Partial<{ name: string; group: string; favorite: boolean }>) => {
     if (!selected) return;
     try {
-      await api.updateRepository({ id: selected.id, path: selected.path, name: changes.name ?? selected.name, group: changes.group ?? selected.group, favorite: changes.favorite ?? selected.favorite, order: repositories.findIndex((item) => item.id === selected.id) });
+      await api.updateRepository({ id: selected.id, path: selected.path, name: changes.name ?? selected.name, group: changes.group ?? selected.group, favorite: changes.favorite ?? selected.favorite, order: selected.order });
       await refreshRepositories();
     } catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
   };
@@ -312,13 +349,90 @@ export default function App() {
   const reportError = useCallback((message: string) => pushLog("error", message), [pushLog]);
   const showBranchDiff = useCallback((value: string) => setDiff({ path: translate(language, "branchComparison"), staged: false, binary: false, tooLarge: false, patch: value, hunks: [] }), [language]);
 
-  const visibleRepositories = useMemo(() => repositories.filter((repo) => `${repo.name} ${repo.path} ${repo.group ?? ""}`.toLowerCase().includes(filter.toLowerCase())).sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.name.localeCompare(b.name)), [repositories, filter]);
+  const repositoryGroups = useMemo<RepositoryGroup[]>(() => {
+    const query = filter.trim().toLowerCase();
+    const visible = repositories
+      .filter((repository) => `${repository.name} ${repository.path} ${repository.group ?? ""}`.toLowerCase().includes(query))
+      .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
+    const favorites = visible.filter((repository) => repository.favorite);
+    const grouped = new Map<string, RepositorySummary[]>();
+    for (const repository of visible.filter((item) => !item.favorite)) {
+      const key = repository.group?.trim() || UNGROUPED_GROUP;
+      grouped.set(key, [...(grouped.get(key) ?? []), repository]);
+    }
+    const named = [...grouped.entries()]
+      .filter(([key]) => key !== UNGROUPED_GROUP)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, items]) => ({ key, label: key, repositories: items }));
+    return [
+      { key: FAVORITES_GROUP, label: t("favorites"), repositories: favorites },
+      ...named,
+      { key: UNGROUPED_GROUP, label: t("ungrouped"), repositories: grouped.get(UNGROUPED_GROUP) ?? [] },
+    ];
+  }, [repositories, filter, language]);
+
+  const persistRepositoryLayout = useCallback(async (ordered: RepositorySummary[]) => {
+    const previous = repositories;
+    const next = ordered.map((repository, order) => ({ ...repository, order }));
+    setRepositories(next);
+    try {
+      await api.reorderRepositories(next.map(({ id, group, favorite, order }) => ({ id, group, favorite, order })));
+    } catch (error) {
+      setRepositories(previous); pushLog("error", errorMessage(error)); setOutputOpen(true);
+    }
+  }, [repositories, pushLog]);
+
+  const moveRepository = useCallback((repositoryId: number, targetGroup: string, targetId?: number) => {
+    if (filter.trim() || repositoryId === targetId) return;
+    const groups = repositoryGroups.map((group) => ({ ...group, repositories: [...group.repositories] }));
+    let moving: RepositorySummary | undefined;
+    for (const group of groups) {
+      const index = group.repositories.findIndex((repository) => repository.id === repositoryId);
+      if (index >= 0) moving = group.repositories.splice(index, 1)[0];
+    }
+    const target = groups.find((group) => group.key === targetGroup);
+    if (!moving || !target) return;
+    moving = targetGroup === FAVORITES_GROUP
+      ? { ...moving, favorite: true }
+      : { ...moving, favorite: false, group: targetGroup === UNGROUPED_GROUP ? undefined : targetGroup };
+    const index = targetId ? target.repositories.findIndex((repository) => repository.id === targetId) : -1;
+    target.repositories.splice(index < 0 ? target.repositories.length : index, 0, moving);
+    void persistRepositoryLayout(groups.flatMap((group) => group.repositories));
+  }, [filter, repositoryGroups, persistRepositoryLayout]);
+
+  const moveRepositoryBy = useCallback((repositoryId: number, direction: -1 | 1) => {
+    if (filter.trim()) return;
+    const groups = repositoryGroups.map((group) => ({ ...group, repositories: [...group.repositories] }));
+    const group = groups.find((item) => item.repositories.some((repository) => repository.id === repositoryId));
+    if (!group) return;
+    const index = group.repositories.findIndex((repository) => repository.id === repositoryId);
+    const target = index + direction;
+    if (target < 0 || target >= group.repositories.length) return;
+    [group.repositories[index], group.repositories[target]] = [group.repositories[target], group.repositories[index]];
+    void persistRepositoryLayout(groups.flatMap((item) => item.repositories));
+  }, [filter, repositoryGroups, persistRepositoryLayout]);
+
+  const updateGroup = useCallback((group: string, replacement?: string) => {
+    const ordered = [...repositories].sort((left, right) => left.order - right.order).map((repository) => repository.group === group ? { ...repository, group: replacement } : repository);
+    void persistRepositoryLayout(ordered);
+  }, [repositories, persistRepositoryLayout]);
+
+  const exportLogs = useCallback(async () => {
+    try {
+      const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "Z");
+      await api.exportSessionLog(`gitdock-session-${stamp}.log`, readLogs(logBuffer.current).map(({ timestamp, kind, message }) => ({ timestamp, kind, message })));
+    } catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
+  }, [pushLog]);
+
+  const clearLogs = () => { logBuffer.current = newLogBuffer(); setLogRevision((current) => current + 1); };
+  const logCount = logBuffer.current.length;
+
   const outputPanel = <section className={`output-panel ${outputOpen ? "open" : ""}`}>
-    <button className="output-handle" onClick={() => setOutputOpen((value) => !value)}><span>{t("gitOutput")}</span><span>{busyOperations.length ? `${busyOperations.length} ${t("running")}` : `${logs.length} ${t("lines")}`} {outputOpen ? "⌄" : "⌃"}</span></button>
-    {outputOpen && <><div className="resize-handle resize-output" onPointerDown={(event) => beginResize("output", event)} /><div className="log" style={{ height: outputHeight }}><div className="log-toolbar">{busyOperations.map((id) => <button key={id} onClick={() => api.cancel(id)}>{t("cancel")} #{id}</button>)}<button onClick={() => setLogs([])}>{t("clear")}</button></div>{logs.map((line) => <div key={line.id} className={`log-${line.kind}`}>{line.message}</div>)}</div></>}
+    <button className="output-handle" onClick={() => setOutputOpen((value) => !value)}><span>{t("gitOutput")}</span><span>{busyOperations.length ? `${busyOperations.length} ${t("running")}` : `${logCount} ${t("lines")}`} {outputOpen ? "⌄" : "⌃"}</span></button>
+    {outputOpen && <><div className="resize-handle resize-output" onPointerDown={(event) => beginResize("output", event)} /><div className="log" style={{ height: outputHeight }}><div className="log-toolbar">{busyOperations.map((id) => <button key={id} onClick={() => api.cancel(id)}>{t("cancel")} #{id}</button>)}<button disabled={!logCount} onClick={exportLogs}>{t("exportLog")}</button><button onClick={clearLogs}>{t("clear")}</button></div>{readLogs(logBuffer.current).map((line) => <div key={line.id} className={`log-${line.kind}`}><time>{line.timestamp}</time> {line.message}</div>)}</div></>}
   </section>;
 
-  if (!repositories.length) return <I18nProvider language={language}><><main className="empty-workspace"><EmptyState git={git} onAdd={register} onClone={clone} onInit={initialize} onSelectGit={selectGit} onToggleLanguage={toggleLanguage} logs={logs} />{outputPanel}</main>{dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}</></I18nProvider>;
+  if (!repositories.length) return <I18nProvider language={language}><><main className="empty-workspace"><EmptyState git={git} onAdd={register} onClone={clone} onInit={initialize} onSelectGit={selectGit} onToggleLanguage={toggleLanguage} lastLog={lastLog(logBuffer.current)} />{outputPanel}</main>{dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}</></I18nProvider>;
 
   return (
     <I18nProvider language={language}><div className="app-shell" style={{ gridTemplateColumns: `${leftWidth}px 1fr` }}>
@@ -326,7 +440,10 @@ export default function App() {
         <header className="brand"><RailMark /><div><strong>GitDock</strong><span>{git.supported ? `Git ${git.version}` : t("gitUnavailable")}</span></div></header>
         <label className="search"><span>⌕</span><input aria-label={t("searchRepositories")} placeholder={t("findRepository")} value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
         <div className="repo-list" role="listbox" aria-label={t("repositories")}>
-          {visibleRepositories.map((repository) => <MemoRepositoryRow key={repository.id} repository={repository} selected={repository.id === selectedId} onSelect={selectRepository} />)}
+          {repositoryGroups.map((group) => <section role="group" aria-label={group.label} className="repo-group" key={group.key} onDragOver={(event) => { if (!filter.trim()) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); const repositoryId = Number(event.dataTransfer.getData("text/plain")) || draggingRepositoryId; if (repositoryId) moveRepository(repositoryId, group.key); setDraggingRepositoryId(undefined); }}>
+            <header><button aria-expanded={!collapsedGroups.has(group.key)} onClick={() => setCollapsedGroups((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span>{collapsedGroups.has(group.key) ? "▸" : "▾"} {group.label}</span><code>{group.repositories.length}</code></button>{group.key !== FAVORITES_GROUP && group.key !== UNGROUPED_GROUP && <RowMenu><button onClick={() => showDialog({ title: t("renameGroup"), fields: [{ name: "group", label: t("group"), value: group.label, required: true }], onSubmit: ({ group: value }) => updateGroup(group.key, String(value).trim()) })}>{t("rename")}</button><button onClick={() => updateGroup(group.key)}>{t("ungroup")}</button></RowMenu>}</header>
+            {!collapsedGroups.has(group.key) && group.repositories.map((repository, index) => <MemoRepositoryRow key={repository.id} repository={repository} selected={repository.id === selectedId} draggable={!filter.trim()} canMoveUp={!filter.trim() && index > 0} canMoveDown={!filter.trim() && index < group.repositories.length - 1} onSelect={selectRepository} onMove={(direction) => moveRepositoryBy(repository.id, direction)} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(repository.id)); setDraggingRepositoryId(repository.id); }} onDragEnd={() => setDraggingRepositoryId(undefined)} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const repositoryId = Number(event.dataTransfer.getData("text/plain")) || draggingRepositoryId; if (repositoryId) moveRepository(repositoryId, group.key, repository.id); setDraggingRepositoryId(undefined); }} />)}
+          </section>)}
         </div>
         <footer className="sidebar-actions"><button onClick={register}>{t("add")}</button><button onClick={clone}>{t("clone")}</button><button onClick={initialize}>{t("init")}</button><button onClick={toggleLanguage}>{t("language")}</button></footer><div className="resize-handle resize-left" onPointerDown={(event) => beginResize("left", event)} />
       </aside>
@@ -344,7 +461,7 @@ export default function App() {
           </section>
           <aside className="tool-pane"><div className="resize-handle resize-right" onPointerDown={(event) => beginResize("right", event)} />
             {tab === "changes" && <MemoChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={openRepositoryFile} onLoadIgnored={loadIgnored} onRun={run} />}
-            {tab === "history" && <MemoHistoryPane commits={commits} selectedOid={selectedCommit} loading={historyLoading} hasMore={historyRepository.current === selectedId && nextHistoryOffset !== undefined} onLoadMore={loadMoreHistory} onSelect={openCommit} onRun={run} />}
+            {tab === "history" && <MemoHistoryPane commits={commits} selectedOid={selectedCommit} loading={historyLoading} hasMore={historyRepository.current === selectedId && nextHistoryCursor !== undefined} onLoadMore={loadMoreHistory} onSelect={openCommit} onRun={run} />}
             {tab === "branches" && <MemoBranchesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onDiff={showBranchDiff} onError={reportError} />}
             {tab === "stashes" && <MemoStashesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onError={reportError} />}
           </aside>
@@ -359,17 +476,17 @@ export default function App() {
   );
 }
 
-function EmptyState({ git, onAdd, onClone, onInit, onSelectGit, onToggleLanguage, logs }: { git: GitInfo; onAdd: () => void; onClone: () => void; onInit: () => void; onSelectGit: () => void; onToggleLanguage: () => void; logs: LogLine[] }) {
+function EmptyState({ git, onAdd, onClone, onInit, onSelectGit, onToggleLanguage, lastLog }: { git: GitInfo; onAdd: () => void; onClone: () => void; onInit: () => void; onSelectGit: () => void; onToggleLanguage: () => void; lastLog?: LogLine }) {
   const { t } = useI18n();
-  return <main className="empty-state"><div className="empty-brand"><RailMark /><span>GITDOCK / WORKSPACE</span></div><h1>{t("emptyTitle1")}<br />{t("emptyTitle2")}</h1><p>{t("emptyDescription")}</p><div className="empty-actions"><button className="primary" disabled={!git.supported} onClick={onAdd}>{t("addRepository")}</button><button disabled={!git.supported} onClick={onClone}>{t("clone")}</button><button disabled={!git.supported} onClick={onInit}>{t("initialize")}</button>{!git.supported && <button onClick={onSelectGit}>{t("selectGit")}</button>}<button onClick={onToggleLanguage}>{t("language")}</button></div><div className={`git-check ${git.supported ? "ok" : "bad"}`}><span>{git.supported ? "●" : "×"}</span><div><strong>{git.supported ? `Git ${git.version}` : t("gitRequired")}</strong><small>{git.path ?? git.error}</small></div></div>{logs.at(-1) && <p className="empty-error">{logs.at(-1)?.message}</p>}</main>;
+  return <main className="empty-state"><div className="empty-brand"><RailMark /><span>GITDOCK / WORKSPACE</span></div><h1>{t("emptyTitle1")}<br />{t("emptyTitle2")}</h1><p>{t("emptyDescription")}</p><div className="empty-actions"><button className="primary" disabled={!git.supported} onClick={onAdd}>{t("addRepository")}</button><button disabled={!git.supported} onClick={onClone}>{t("clone")}</button><button disabled={!git.supported} onClick={onInit}>{t("initialize")}</button>{!git.supported && <button onClick={onSelectGit}>{t("selectGit")}</button>}<button onClick={onToggleLanguage}>{t("language")}</button></div><div className={`git-check ${git.supported ? "ok" : "bad"}`}><span>{git.supported ? "●" : "×"}</span><div><strong>{git.supported ? `Git ${git.version}` : t("gitRequired")}</strong><small>{git.path ?? git.error}</small></div></div>{lastLog && <p className="empty-error">{lastLog.message}</p>}</main>;
 }
 
 function RailMark() { return <svg className="rail-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M9 4v18a6 6 0 0 0 6 6h3" /><path d="M23 4v7a5 5 0 0 1-5 5H9" /><circle cx="9" cy="4" r="2.5" /><circle cx="23" cy="4" r="2.5" /><circle cx="20" cy="28" r="2.5" /></svg>; }
 
-function RepositoryRow({ repository, selected, onSelect }: { repository: RepositorySummary; selected: boolean; onSelect: (repositoryId: number) => void }) {
+function RepositoryRow({ repository, selected, draggable, canMoveUp, canMoveDown, onSelect, onMove, onDragStart, onDragEnd, onDrop }: { repository: RepositorySummary; selected: boolean; draggable: boolean; canMoveUp: boolean; canMoveDown: boolean; onSelect: (repositoryId: number) => void; onMove: (direction: -1 | 1) => void; onDragStart: React.DragEventHandler<HTMLDivElement>; onDragEnd: () => void; onDrop: React.DragEventHandler<HTMLDivElement> }) {
   const { t } = useI18n();
   const state = repository.kind === "missing" ? "missing" : repository.conflictCount ? "conflict" : repository.changedCount ? "changed" : "clean";
-  return <button role="option" aria-selected={selected} className={`repo-row ${selected ? "selected" : ""}`} onClick={() => onSelect(repository.id)}><span className={`status-rail ${state}`} /><span className="repo-copy"><span className="repo-name">{repository.favorite && "★ "}{repository.name}<i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button>;
+  return <div role="option" tabIndex={0} aria-selected={selected} className="repo-row-shell" draggable={draggable} onClick={() => onSelect(repository.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(repository.id); } }} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragOver={(event) => { if (draggable) event.preventDefault(); }} onDrop={onDrop}><button className={`repo-row ${selected ? "selected" : ""}`} tabIndex={-1}><span className={`status-rail ${state}`} /><span className="repo-copy"><span className="repo-name">{repository.favorite && "★ "}{repository.name}<i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button><RowMenu><button disabled={!canMoveUp} onClick={() => onMove(-1)}>{t("moveUp")}</button><button disabled={!canMoveDown} onClick={() => onMove(1)}>{t("moveDown")}</button></RowMenu></div>;
 }
 
 function ChangesOverview({ repository, snapshot }: { repository?: RepositorySummary; snapshot?: WorkingTreeSnapshot }) {
@@ -452,22 +569,75 @@ function DiffView({ diff, snapshotId, onBack, onRun }: { diff: DiffFile; snapsho
   return <div className="diff-view"><header className="canvas-header"><button onClick={onBack}>← {t("back")}</button><strong>{diff.path}</strong><span>{diff.staged ? "INDEX ↔ HEAD" : "WORKTREE ↔ INDEX"}</span></header><div className="diff-lines">{lines.map((line, index) => <div key={index} className={line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "delete" : line.startsWith("@@") ? "hunk" : line.startsWith("diff ") ? "file-header" : "context"}><span>{index + 1}</span><code>{line || " "}</code>{line.startsWith("@@") && snapshotId && <button onClick={() => { const hunk = diff.hunks.find((item) => item.header === line); if (hunk) onRun({ type: diff.staged ? "unstageHunk" : "stageHunk", snapshotId, hunkId: hunk.id }); }}>{diff.staged ? t("unstageHunk") : t("stageHunk")}</button>}</div>)}</div></div>;
 }
 
+function useVirtualRows(count: number, rowHeight: number, overscan = 12) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [range, setRange] = useState({ start: 0, end: Math.min(count, 40) });
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const update = () => {
+      const height = container.clientHeight || 680;
+      const start = Math.max(0, Math.floor(container.scrollTop / rowHeight) - overscan);
+      const end = Math.min(count, Math.ceil((container.scrollTop + height) / rowHeight) + overscan);
+      setRange((current) => current.start === start && current.end === end ? current : { start, end });
+    };
+    update();
+    container.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    return () => { container.removeEventListener("scroll", update); window.removeEventListener("resize", update); };
+  }, [count, rowHeight, overscan]);
+  return { containerRef, ...range, totalHeight: count * rowHeight };
+}
+
 function HistoryCanvas({ commits, selectedOid, onSelect }: { commits: CommitInfo[]; selectedOid?: string; onSelect: (oid: string) => void }) {
   const { t } = useI18n();
   const rowHeight = 34; const laneGap = 14;
-  const commitRows = new Map(commits.map((commit, index) => [commit.oid, index]));
-  const maxLane = Math.max(0, ...commits.flatMap((commit) => [commit.lane.column, ...commit.lane.parentColumns]));
+  const { containerRef, start, end, totalHeight } = useVirtualRows(commits.length, rowHeight);
+  const commitRows = useMemo(() => new Map(commits.map((commit, index) => [commit.oid, index])), [commits]);
+  const maxLane = commits.reduce((maximum, commit) => Math.max(maximum, commit.lane.column, ...commit.lane.parentColumns), 0);
   const graphWidth = Math.max(44, 24 + maxLane * laneGap);
   const laneX = (column: number) => 12 + column * laneGap;
-  return <div className="history-canvas"><header className="canvas-header"><strong>{t("repositoryGraph")}</strong><span>{commits.length} {t("commitsLoaded")}</span></header><div className="graph-list" style={{ "--graph-width": `${graphWidth}px` } as React.CSSProperties}><svg className="commit-graph" width={graphWidth} height={commits.length * rowHeight} aria-label={t("repositoryGraph")}>
-    {commits.flatMap((commit, row) => commit.parents.map((parent, parentIndex) => { const targetRow = commitRows.get(parent); const targetColumn = targetRow === undefined ? commit.lane.parentColumns[parentIndex] ?? commit.lane.column : commits[targetRow].lane.column; const startX = laneX(commit.lane.column); const startY = row * rowHeight + rowHeight / 2; const endX = laneX(targetColumn); const endY = targetRow === undefined ? commits.length * rowHeight : targetRow * rowHeight + rowHeight / 2; return <path className={`graph-edge lane-${targetColumn % 5}`} key={`${commit.oid}-${parent}`} d={`M ${startX} ${startY} C ${startX} ${startY + 12}, ${endX} ${Math.max(startY + 12, endY - 12)}, ${endX} ${endY}`} />; }))}
-    {commits.map((commit, row) => <circle className={`graph-node lane-${commit.lane.column % 5}`} key={commit.oid} cx={laneX(commit.lane.column)} cy={row * rowHeight + rowHeight / 2} r="4" />)}
-  </svg>{commits.map((commit) => <button className={`graph-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid} onClick={() => onSelect(commit.oid)}><span /><code>{shortOid(commit.oid)}</code><div className="graph-subject"><strong>{commit.subject}</strong>{commit.refs.map((reference) => <span className={`ref-label ${reference.startsWith("tag: ") ? "tag" : ""}`} key={reference}>{reference}</span>)}</div><span>{commit.author}</span><time>{commit.authoredAt.slice(0, 10)}</time></button>)}</div></div>;
+  const edgeBuckets = useMemo(() => {
+    const buckets = new Map<number, Array<{ key: string; row: number; targetRow: number; column: number; targetColumn: number }>>();
+    commits.forEach((commit, row) => commit.parents.forEach((parent, parentIndex) => {
+      const targetRow = commitRows.get(parent) ?? commits.length;
+      const targetColumn = targetRow === commits.length ? commit.lane.parentColumns[parentIndex] ?? commit.lane.column : commits[targetRow].lane.column;
+      const edge = { key: `${commit.oid}-${parent}`, row, targetRow, column: commit.lane.column, targetColumn };
+      for (let bucket = Math.floor(row / GRAPH_EDGE_BUCKET_ROWS); bucket <= Math.floor(targetRow / GRAPH_EDGE_BUCKET_ROWS); bucket += 1) {
+        const entries = buckets.get(bucket);
+        if (entries) entries.push(edge); else buckets.set(bucket, [edge]);
+      }
+    }));
+    return buckets;
+  }, [commits, commitRows]);
+  const visibleEdges = useMemo(() => {
+    const edges = new Map<string, NonNullable<ReturnType<typeof edgeBuckets.get>>[number]>();
+    const first = Math.floor(start / GRAPH_EDGE_BUCKET_ROWS);
+    const last = Math.floor(Math.max(start, end - 1) / GRAPH_EDGE_BUCKET_ROWS);
+    for (let bucket = first; bucket <= last; bucket += 1) {
+      for (const edge of edgeBuckets.get(bucket) ?? []) if (edge.row < end && edge.targetRow >= start) edges.set(edge.key, edge);
+    }
+    return [...edges.values()];
+  }, [edgeBuckets, start, end]);
+  return <div className="history-canvas"><header className="canvas-header"><strong>{t("repositoryGraph")}</strong><span>{commits.length} {t("commitsLoaded")}</span></header><div ref={containerRef} className="graph-list" style={{ "--graph-width": `${graphWidth}px` } as React.CSSProperties}><div className="virtual-history" style={{ height: totalHeight }}><svg className="commit-graph" width={graphWidth} height={totalHeight} aria-label={t("repositoryGraph")}>
+    {visibleEdges.map((edge) => { const startX = laneX(edge.column); const startY = edge.row * rowHeight + rowHeight / 2; const endX = laneX(edge.targetColumn); const endY = edge.targetRow * rowHeight + rowHeight / 2; return <path className={`graph-edge lane-${edge.targetColumn % 5}`} key={edge.key} d={`M ${startX} ${startY} C ${startX} ${startY + 12}, ${endX} ${Math.max(startY + 12, endY - 12)}, ${endX} ${endY}`} />; })}
+    {commits.slice(start, end).map((commit, index) => { const row = start + index; return <circle className={`graph-node lane-${commit.lane.column % 5}`} key={commit.oid} cx={laneX(commit.lane.column)} cy={row * rowHeight + rowHeight / 2} r="4" />; })}
+  </svg>{commits.slice(start, end).map((commit, index) => <button style={{ position: "absolute", top: (start + index) * rowHeight }} className={`graph-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid} onClick={() => onSelect(commit.oid)}><span /><code>{shortOid(commit.oid)}</code><div className="graph-subject"><strong>{commit.subject}</strong>{commit.refs.map((reference) => <span className={`ref-label ${reference.startsWith("tag: ") ? "tag" : ""}`} key={reference}>{reference}</span>)}</div><span>{commit.author}</span><time>{commit.authoredAt.slice(0, 10)}</time></button>)}</div></div></div>;
 }
 
 function HistoryPane({ commits, selectedOid, loading, hasMore, onLoadMore, onSelect, onRun }: { commits: CommitInfo[]; selectedOid?: string; loading: boolean; hasMore: boolean; onLoadMore: () => void; onSelect: (oid: string) => void; onRun: RunOperation }) {
   const { t } = useI18n();
-  return <div><div className="pane-title"><span>{t("commits")}</span><code>{commits.length}</code></div><div className="object-list">{commits.map((commit) => <div className={`object-action-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid}><button onClick={() => onSelect(commit.oid)}><strong>{commit.subject}</strong><span>{commit.author} · {shortOid(commit.oid)}</span></button><RowMenu><button onClick={() => onRun({ type: "cherryPick", commits: [commit.oid] })}>{t("cherryPick")}</button>{commit.parents.length === 1 && <button onClick={() => onRun({ type: "revert", oid: commit.oid })}>{t("revert")}</button>}</RowMenu></div>)}{hasMore && <button className="load-more" disabled={loading} onClick={onLoadMore}>{t("loadMore")}</button>}</div></div>;
+  const rowHeight = 45;
+  const { containerRef, start, end, totalHeight } = useVirtualRows(commits.length, rowHeight);
+  const loadMoreRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const target = loadMoreRef.current;
+    if (!target || !hasMore || !("IntersectionObserver" in window)) return;
+    const observer = new IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) onLoadMore(); }, { root: containerRef.current, rootMargin: "180px" });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasMore, onLoadMore, containerRef]);
+  return <div className="history-pane"><div className="pane-title"><span>{t("commits")}</span><code>{commits.length}</code></div><div ref={containerRef} className="object-list"><div className="virtual-history" style={{ height: totalHeight + (hasMore ? 45 : 0) }}>{commits.slice(start, end).map((commit, index) => <div style={{ position: "absolute", top: (start + index) * rowHeight, width: "100%", height: rowHeight }} className={`object-action-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid}><button onClick={() => onSelect(commit.oid)}><strong>{commit.subject}</strong><span>{commit.author} · {shortOid(commit.oid)}</span></button><RowMenu><button onClick={() => onRun({ type: "cherryPick", commits: [commit.oid] })}>{t("cherryPick")}</button>{commit.parents.length === 1 && <button onClick={() => onRun({ type: "revert", oid: commit.oid })}>{t("revert")}</button>}</RowMenu></div>)}{hasMore && <button ref={loadMoreRef} style={{ position: "absolute", top: totalHeight }} className="load-more" disabled={loading} onClick={onLoadMore}>{t("loadMore")}</button>}</div></div></div>;
 }
 
 function BranchCanvas({ repository }: { repository?: RepositorySummary }) { const { t } = useI18n(); return <div className="canvas-empty"><div className="branch-hero"><RailMark /><code>{repository?.branch ?? t("detachedHead")}</code></div><h2>{t("refsIntegration")}</h2><p>{t("branchHint")}</p></div>; }

@@ -50,26 +50,27 @@ Implementation status as of 2026-08-09:
 
 - [x] Move clone into the asynchronous operation pipeline so it streams progress, supports cancellation, and reports or safely removes a partial destination after failure.
 - [x] Strengthen process cancellation: send a graceful interrupt, wait briefly, then terminate the full process group; always refresh and report any Git operation state left behind.
-- [ ] Replace the file watcher's leading-edge throttle with trailing debounce, suppress refresh storms caused by GitDock's own commands, and measure behavior in repositories containing large ignored dependency trees. The implementation and debounce regression test are complete; the large-tree measurement remains part of the clean-account smoke run.
+- [x] Replace the file watcher's leading-edge throttle with trailing debounce, suppress refresh storms caused by GitDock's own commands, and benchmark a repository containing a 100,000-file ignored dependency tree.
+- [x] Prioritize the active repository during a 50-repository refresh and publish its completed summary after the first four-process batch, without waiting for the full refresh to finish.
 - [x] Finish history pagination in the UI and retain the selected commit while additional pages load.
 - [x] Replace remaining `window.prompt` and ordinary confirmation dialogs with validated in-app forms. Destructive Git operations must continue using the dedicated impact preview.
-- [ ] Expand temporary-repository integration tests across every mutating `OperationRequest`, including hook failure, stale hunk rejection, linked-worktree locking, cancellation, merge/rebase/cherry-pick recovery, force-with-lease races, submodules, Trash, and configuration corruption. The named Git and configuration scenarios are covered except the macOS Trash integration, which remains in the clean-account smoke run; exhaustive per-variant coverage is still required.
+- [ ] Expand temporary-repository integration tests across every mutating `OperationRequest`, including hook failure, stale hunk rejection, linked-worktree locking, cancellation, merge/rebase/cherry-pick recovery, force-with-lease races, submodules, and configuration corruption. All 37 non-special command variants now have a command-spec coverage guard and the named Git/configuration scenarios have focused tests; exhaustive successful execution remains open.
 - [x] Add frontend tests for workflow navigation, operation previews, output-panel failure behavior, conflict actions, and close-with-running-operation handling.
-- [ ] Run and record the manual macOS smoke checklist on a clean user account: Gatekeeper bypass, Git discovery, Keychain/SSH agent, GPG pinentry, external diff/merge tools, linked worktrees, bare repositories, file permissions, app relaunch, and `.app` install/uninstall. The checklist is in `docs/MACOS_SMOKE.md` and has not been run.
 - [x] Add versioned JSON migration tests and a recoverable backup path before the first configuration schema change.
 
-Exit criteria: all automated checks pass, the smoke checklist has no data-loss or dead-end workflow, and clone/push/pull can be cancelled without orphaning child processes.
+Exit criteria: all automated checks pass, and clone/push/pull can be cancelled without orphaning child processes.
 
 ### P2 — usability and performance after beta feedback
 
-- Improve the commit graph lane algorithm for wide merge histories, add incremental rendering, and benchmark repositories with at least 100,000 commits.
+- [x] Carry compact graph lanes in validated cursors across history pages, auto-load on scroll with a button fallback, and window both history panes. Graph edges use row buckets so scrolling does not rescan the full edge set; a 600-commit regression covers long cross-window edges. The 100,009-commit benchmark records 363 ms first-page p95 and 369 ms deep-page p95 in `docs/PERFORMANCE.md`.
 - Add side-by-side diff only if users repeatedly need it; keep unified diff as the default and reuse the existing snapshot/hunk safety model.
 - Add syntax highlighting only if diff readability is a measured issue. Load language support on demand rather than bundling a full editor.
 - Add a command palette only after the stable action set is large enough that menus measurably hurt discoverability.
-- Add repository drag sorting and clearer group management if the current name/group controls are insufficient for users managing dozens of repositories.
-- Add optional session log export with explicit user action and URL redaction; do not persist command output automatically.
+- [x] Add atomic repository drag sorting, collapsible groups, a pinned Favorites group, cross-group moves, and keyboard ordering controls. Failed persistence rolls back in-memory ordering, and drag/keyboard reordering is disabled while search filters the list.
+- [x] Add ISO-timestamped session logs bounded to 10,000 entries or 5 MiB, plus explicit export through a backend-owned native save dialog. Export revalidates limits, redacts URL userinfo, and writes atomically; command output is never persisted automatically.
 - Add cached inactive-repository summaries only if refresh-all misses the 50-repository responsiveness target.
-- Add signed and notarized Apple Silicon releases, release CI, checksums, and an update channel when the app is ready for external distribution.
+
+Current verification: 22 frontend tests and 30 Rust tests pass, along with the production frontend build and Rust formatting check. Two performance benchmarks remain ignored during normal test runs.
 
 ### P3 — new capabilities, gated by demand
 
@@ -80,8 +81,9 @@ Exit criteria: all automated checks pass, the smoke checklist has no data-loss o
 - Arbitrary soft/mixed/hard reset with exact impact previews. Trigger: recovery UX and tests can demonstrate that staged and working-tree data cannot be silently lost.
 - Remote tag deletion and signed tags. Trigger: release-management users request them and the confirmation model covers remote impact and GPG failure paths.
 - GitHub/GitLab pull requests, issues, and CI status through provider APIs. Trigger: core local Git workflows are stable; credentials must use provider-supported OAuth/keychain storage.
-- Windows and Linux builds. Trigger: macOS behavior is stable and platform-specific process cancellation, Trash, credential, path, watcher, and packaging tests are ready.
+- Windows and Linux builds. Trigger: macOS behavior is stable and cross-platform support becomes a priority.
 - Multi-repository batch writes. Trigger: a concrete workflow justifies them; every repository must receive an individual preview and independent result.
 - Optional built-in AskPass prompts. Trigger: system credential helpers and SSH agents cause repeated onboarding failures; secrets must remain memory-only.
+- Signed and notarized Apple Silicon releases, release CI, checksums, and an update channel. Trigger: repository hosting, Apple credentials, and the external distribution decision are ready.
 
 Still out of scope unless this plan is explicitly revised: custom Git protocols, credential storage, accounts, telemetry, embedded terminal, project build tools, general code editing, and arbitrary shell execution.

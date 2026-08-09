@@ -11,12 +11,14 @@ GitDock 是一款面向 macOS 的 Git 桌面客户端，使用 Tauri、React、T
 - 暂存或取消暂存文件与 hunk，提交更改，处理冲突
 - 多选文件后批量暂存或取消暂存
 - 在英文和简体中文界面之间切换，并记住语言选择
-- 分页浏览带分支、标签引用的提交拓扑图，查看提交差异，执行 cherry-pick 与 revert
+- 滚动浏览跨页连续且窗口化渲染的提交拓扑图，查看提交差异，执行 cherry-pick 与 revert
+- 通过可折叠分组、置顶收藏组和拖拽排序管理仓库；键盘操作可完成同组排序
 - 分组查看本地与远程分支，并创建、切换、合并、变基、重命名和删除分支
 - 管理标签、远程仓库、stash 与 submodule
 - Fetch、Pull、Push，以及带 lease 的强制推送
 - 在执行敏感 Git 操作前显示影响范围与确认信息
 - 使用应用内校验表单完成 Git 操作输入，不依赖浏览器 prompt
+- 显式导出当前会话的有界 Git 日志；导出时再次脱敏 URL 凭据且不会自动持久化
 
 ## 环境要求
 
@@ -45,6 +47,14 @@ npm test
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 ```
+
+100,000 提交及 100,000 ignored 文件的性能检查默认跳过，可显式运行：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml benchmarks_ -- --ignored --nocapture
+```
+
+基准结果记录在 `docs/PERFORMANCE.md`。
 
 ## 打包
 

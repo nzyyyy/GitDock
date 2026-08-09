@@ -82,6 +82,7 @@ pub struct RepositorySummary {
     pub name: String,
     pub group: Option<String>,
     pub favorite: bool,
+    pub order: u32,
     pub kind: RepositoryKind,
     pub capabilities: RepositoryCapabilities,
     pub branch: Option<String>,
@@ -93,6 +94,15 @@ pub struct RepositorySummary {
     pub last_commit: Option<String>,
     pub ongoing: Option<OngoingGitState>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryPlacement {
+    pub id: RepositoryId,
+    pub group: Option<String>,
+    pub favorite: bool,
+    pub order: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,9 +191,24 @@ pub struct CommitInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct HistoryCursor {
+    pub offset: usize,
+    pub active_lanes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CommitPage {
     pub commits: Vec<CommitInfo>,
-    pub next_offset: Option<usize>,
+    pub next_cursor: Option<HistoryCursor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLogLine {
+    pub timestamp: String,
+    pub kind: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
