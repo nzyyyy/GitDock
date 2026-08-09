@@ -104,3 +104,50 @@ test("uses light-dismiss popovers for secondary menus", async () => {
   expect(hidePopover).toHaveBeenCalledOnce();
   expect(more).toHaveAttribute("aria-expanded", "false");
 });
+
+test("switches language and persists the choice", async () => {
+  vi.mocked(invoke).mockImplementation((command: string) => command === "bootstrap" ? Promise.resolve({
+    git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+    settings: { language: "zh-CN" }, repositories: [],
+  }) : Promise.resolve(undefined));
+
+  render(<App />);
+  expect(await screen.findByRole("button", { name: "添加仓库" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "EN" }));
+  expect(screen.getByRole("button", { name: "Add repository" })).toBeEnabled();
+  expect(document.documentElement.lang).toBe("en");
+  expect(invoke).toHaveBeenCalledWith("save_language", { language: "en" });
+});
+
+test("stages and unstages multiple selected files", async () => {
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190, language: "en" },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 6, conflictCount: 1, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [
+      { path: "staged.ts", kind: "Modified", staged: true, unstaged: false, conflict: false, ignored: false },
+      { path: "one.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false },
+      { path: "two.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false },
+      { path: "new.ts", kind: "Untracked", staged: false, unstaged: true, conflict: false, ignored: false },
+      { path: "conflict.ts", kind: "Conflicted", staged: false, unstaged: true, conflict: true, ignored: false },
+      { path: "ignored.log", kind: "Ignored", staged: false, unstaged: false, conflict: false, ignored: true },
+    ] });
+    if (command === "preview_operation") return Promise.resolve({ title: "Operation", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
+    if (command === "start_operation") return Promise.resolve({ operationId: 1, accepted: true });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Select all Unstaged" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage new.ts" }));
+  fireEvent.click(screen.getByRole("button", { name: "Stage selected (3)" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "stageFiles", paths: ["one.ts", "two.ts", "new.ts"] } }));
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to unstage staged.ts" }));
+  fireEvent.click(screen.getByRole("button", { name: "Unstage selected (1)" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "unstageFiles", paths: ["staged.ts"] } }));
+  expect(screen.queryByRole("checkbox", { name: /conflict\.ts/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: /ignored\.log/ })).not.toBeInTheDocument();
+});

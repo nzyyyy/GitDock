@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type RepositoryKind = "workTree" | "bare" | "missing";
+export type Language = "en" | "zh-CN";
 export type RiskLevel = "normal" | "caution" | "destructive";
 
 export interface GitInfo { path?: string; version?: string; supported: boolean; error?: string }
@@ -12,7 +13,7 @@ export interface RepositorySummary {
   ahead: number; behind: number; lastCommit?: string; ongoing?: OngoingGitState; error?: string;
 }
 export interface RepositoryRecord { id: number; path: string; name: string; group?: string; favorite: boolean; order: number }
-export interface Bootstrap { git: GitInfo; settings: { selectedRepositoryId?: number; leftWidth: number; rightWidth: number; outputHeight: number }; repositories: RepositorySummary[] }
+export interface Bootstrap { git: GitInfo; settings: { selectedRepositoryId?: number; leftWidth: number; rightWidth: number; outputHeight: number; language?: Language }; repositories: RepositorySummary[] }
 export interface FileChange {
   path: string; originalPath?: string; kind: string; indexStatus?: string; worktreeStatus?: string;
   staged: boolean; unstaged: boolean; conflict: boolean; ignored: boolean;
@@ -42,6 +43,7 @@ export const api = {
   updateRepository: (repository: RepositoryRecord) => invoke<void>("update_repository", { repository }),
   setGitPath: (path?: string) => invoke<GitInfo>("set_git_path", { path }),
   saveLayout: (leftWidth: number, rightWidth: number, outputHeight: number) => invoke<void>("save_layout", { leftWidth, rightWidth, outputHeight }),
+  saveLanguage: (language: Language) => invoke<void>("save_language", { language }),
   watchRepository: (repositoryId: number) => invoke<void>("watch_repository", { repositoryId }),
   status: (repositoryId: number, includeIgnored = false) => invoke<WorkingTreeSnapshot>("get_status", { repositoryId, includeIgnored }),
   diff: (repositoryId: number, snapshotId: number, path: string, staged: boolean) => invoke<DiffFile>("get_diff", { repositoryId, snapshotId, path, staged }),

@@ -20,6 +20,17 @@ pub struct Settings {
     pub left_width: u16,
     pub right_width: u16,
     pub output_height: u16,
+    #[serde(default)]
+    pub language: Language,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Language {
+    #[default]
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "zh-CN")]
+    SimplifiedChinese,
 }
 
 impl Default for Settings {
@@ -30,6 +41,7 @@ impl Default for Settings {
             left_width: 240,
             right_width: 360,
             output_height: 190,
+            language: Language::English,
         }
     }
 }

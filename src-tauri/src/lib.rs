@@ -171,6 +171,13 @@ fn save_layout(
 }
 
 #[tauri::command]
+fn save_language(language: Language, state: State<'_, AppState>) -> Result<(), String> {
+    let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
+    store.config.settings.language = language;
+    store.save()
+}
+
+#[tauri::command]
 fn add_repository(
     path: String,
     state: State<'_, AppState>,
@@ -1499,6 +1506,7 @@ pub fn run() {
             refresh_repositories,
             set_git_path,
             save_layout,
+            save_language,
             add_repository,
             initialize_repository,
             clone_repository,

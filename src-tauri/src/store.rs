@@ -65,4 +65,16 @@ mod tests {
         assert!(ConfigStore::load(path.clone()).is_err());
         assert_eq!(fs::read(path).unwrap(), b"not json");
     }
+
+    #[test]
+    fn defaults_legacy_config_to_english() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, br#"{"version":1,"nextRepositoryId":1,"settings":{"gitPath":null,"selectedRepositoryId":null,"leftWidth":240,"rightWidth":360,"outputHeight":190},"repositories":[]}"#).unwrap();
+        let store = ConfigStore::load(path).unwrap();
+        assert_eq!(
+            store.config.settings.language,
+            crate::models::Language::English
+        );
+    }
 }
