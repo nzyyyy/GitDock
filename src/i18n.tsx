@@ -35,7 +35,8 @@ const en = {
   updateNested: "Update nested submodules recursively?", stashMessage: "Stash message (optional)", includeUntracked: "Include untracked files?", apply: "Apply", pop: "Pop", drop: "Drop",
   irreversible: "IRREVERSIBLE CHANGE", reviewOperation: "REVIEW OPERATION", affectedPaths: "Affected paths", affectedRefs: "Affected refs",
   recoverable: "Git can usually recover this change.", unrecoverable: "GitDock cannot recover this change.", closeOperations: "Git operation(s) are still running. Cancel them and quit?",
-  removeRepositoryConfirm: "from GitDock? Files on disk are not changed.", fetchBeforeForce: "before force pushing.",
+  removeRepositoryConfirm: "from GitDock? Files on disk are not changed.", fetchBeforeForce: "before force pushing.", operationSucceeded: "Succeeded",
+  operationFailed: "Failed", operationCancelled: "Cancelled", dismissNotification: "Dismiss notification",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -73,7 +74,8 @@ const zh: Record<MessageKey, string> = {
   updateNested: "递归更新嵌套子模块？", stashMessage: "贮藏信息（可选）", includeUntracked: "包含未跟踪文件？", apply: "应用", pop: "弹出", drop: "删除",
   irreversible: "不可逆更改", reviewOperation: "检查操作", affectedPaths: "受影响路径", affectedRefs: "受影响引用",
   recoverable: "Git 通常可以恢复此更改。", unrecoverable: "GitDock 无法恢复此更改。", closeOperations: "个 Git 操作仍在运行。取消并退出？",
-  removeRepositoryConfirm: "从 GitDock 移除？磁盘文件不会改变。", fetchBeforeForce: "后再强制推送。",
+  removeRepositoryConfirm: "从 GitDock 移除？磁盘文件不会改变。", fetchBeforeForce: "后再强制推送。", operationSucceeded: "操作成功",
+  operationFailed: "操作失败", operationCancelled: "操作已取消", dismissNotification: "关闭通知",
 };
 
 const dictionaries: Record<Language, Record<MessageKey, string>> = { en, "zh-CN": zh };

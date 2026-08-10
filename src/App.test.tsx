@@ -23,7 +23,7 @@ Object.defineProperties(HTMLElement.prototype, {
   showPopover: { configurable: true, value: showPopover },
   hidePopover: { configurable: true, value: hidePopover },
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 test("shows actionable first-run state", async () => {
   render(<App />);
@@ -413,6 +413,38 @@ test("opens output on failure and confirms cancellation before close", async () 
   expect(document.querySelector(".output-panel")).toHaveClass("open");
 });
 
+test("shows at most three dismissible operation results for three seconds", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" | "failed" | "cancelled" } }) => void) | undefined;
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await screen.findByRole("option");
+  vi.useFakeTimers();
+  for (const [operationId, title, outcome] of [[1, "Fetch", "succeeded"], [2, "Pull", "failed"], [3, "Push", "cancelled"], [4, "Create commit", "succeeded"]] as const) {
+    await act(async () => operationListener?.({ payload: { operationId, repositoryId: 1, kind: "started", message: title } }));
+    await act(async () => operationListener?.({ payload: { operationId, repositoryId: 1, kind: "finished", message: `${title} result`, outcome } }));
+  }
+  const toastStack = document.querySelector(".toast-stack")!;
+  expect(toastStack).not.toHaveTextContent("Fetch");
+  expect(toastStack.querySelectorAll(".operation-toast")).toHaveLength(3);
+  expect(toastStack.querySelector(".toast-failed")).toHaveTextContent("Pull");
+  fireEvent.click(screen.getAllByRole("button", { name: "Dismiss notification" })[0]);
+  expect(document.querySelectorAll(".operation-toast")).toHaveLength(2);
+  act(() => { vi.advanceTimersByTime(3_000); });
+  expect(document.querySelectorAll(".operation-toast")).toHaveLength(0);
+});
+
 test("clears the commit message only after a successful early completion event", async () => {
   let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" } }) => void) | undefined;
   let resolveStart: ((result: { operationId: number; accepted: boolean }) => void) | undefined;
@@ -501,6 +533,67 @@ test("keeps the commit message after failed and cancelled operations", async () 
     expect(message).toHaveValue("Keep me");
     expect(screen.getByRole("button", { name: "Commit staged changes" })).toBeEnabled();
   }
+});
+
+test("refreshes both history views after a successful commit only", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" | "failed" } }) => void) | undefined;
+  let historyCalls = 0;
+  let freshHistoryCalls = 0;
+  let resolveStalePage: ((value: unknown) => void) | undefined;
+  let operationId = 0;
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "src/file.ts", kind: "Modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
+    if (command === "get_history") {
+      historyCalls += 1;
+      if (args && "cursor" in args && args.cursor) return new Promise((resolve) => { resolveStalePage = resolve; });
+      freshHistoryCalls += 1;
+      const initial = freshHistoryCalls === 1;
+      return Promise.resolve({
+        commits: [{ oid: initial ? "aaaaaaaa" : "bbbbbbbb", parents: [], author: "Ada", authoredAt: "2026-08-10T00:00:00Z", subject: initial ? "Old commit" : "New commit", refs: [], lane: { column: 0, parentColumns: [] } }],
+        nextCursor: initial ? { offset: 100, activeLanes: [] } : null,
+      });
+    }
+    if (command === "preview_operation") return Promise.resolve({ title: "Commit", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
+    if (command === "start_operation") return Promise.resolve({ operationId: ++operationId, accepted: true });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  expect((await screen.findAllByText("Old commit"))).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+  await waitFor(() => expect(resolveStalePage).toBeDefined());
+  fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+  const message = await screen.findByRole("textbox", { name: "Commit message" });
+  const fileMain = document.querySelector(".file-main")!;
+  expect(fileMain.querySelector("b")?.nextElementSibling).toHaveTextContent("src");
+  fireEvent.change(message, { target: { value: "Ship it" } });
+  fireEvent.click(screen.getByRole("button", { name: "Commit staged changes" }));
+  await waitFor(() => expect(operationId).toBe(1));
+  await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "started", message: "Create commit" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
+  await waitFor(() => expect(historyCalls).toBe(3));
+  fireEvent.click(screen.getByRole("button", { name: "History" }));
+  expect((await screen.findAllByText("New commit"))).toHaveLength(2);
+  await act(async () => resolveStalePage?.({ commits: [{ oid: "cccccccc", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Stale page", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: { offset: 200, activeLanes: [] } }));
+  expect(screen.queryByText("Stale page")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+  fireEvent.change(await screen.findByRole("textbox", { name: "Commit message" }), { target: { value: "Try again" } });
+  fireEvent.click(screen.getByRole("button", { name: "Commit staged changes" }));
+  await waitFor(() => expect(operationId).toBe(2));
+  await act(async () => operationListener?.({ payload: { operationId: 2, repositoryId: 1, kind: "started", message: "Create commit" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 2, repositoryId: 1, kind: "finished", message: "Failed", outcome: "failed" } }));
+  expect(historyCalls).toBe(3);
 });
 
 test("refreshes only the changed repository and status for the selected repository", async () => {
@@ -633,15 +726,19 @@ test("automatically loads history at the sentinel and keeps the DOM windowed", a
   expect(document.querySelectorAll(".graph-row").length).toBeLessThan(60);
   expect(document.querySelectorAll(".history-pane .object-action-row").length).toBeLessThan(60);
   const graph = document.querySelector<HTMLElement>(".graph-list")!;
+  const requestFrame = vi.spyOn(window, "requestAnimationFrame");
   graph.scrollTop = 300 * 34;
   fireEvent.scroll(graph);
+  fireEvent.scroll(graph);
+  fireEvent.scroll(graph);
+  expect(requestFrame).toHaveBeenCalledTimes(1);
   await waitFor(() => expect(document.querySelectorAll(".graph-edge")).toHaveLength(1));
   vi.unstubAllGlobals();
 });
 
 test("groups repositories, moves one into favorites, and disables drag while searching", async () => {
   const repositories = [
-    { id: 1, path: "/alpha", name: "Alpha", group: "Work", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 1, path: "/alpha", name: "Alpha", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
     { id: 2, path: "/beta", name: "Beta", group: "Work", favorite: false, order: 1, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
   ];
   vi.mocked(invoke).mockImplementation((command: string) => {
@@ -658,10 +755,15 @@ test("groups repositories, moves one into favorites, and disables drag while sea
   fireEvent.change(search, { target: { value: "" } });
   const alpha = await screen.findByRole("option", { name: /Alpha/ });
   const favorites = screen.getByRole("button", { name: /Favorites0/ }).closest("section")!;
+  expect(favorites).toHaveClass("empty");
   fireEvent.dragStart(alpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn() } });
-  fireEvent.drop(favorites, { dataTransfer: { getData: () => "1" } });
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("reorder_repositories", { placements: expect.arrayContaining([expect.objectContaining({ id: 1, favorite: true, group: "Work" })]) }));
+  const dataTransfer = { dropEffect: "none", getData: () => "" };
+  expect(fireEvent.dragOver(favorites, { dataTransfer })).toBe(false);
+  expect(dataTransfer.dropEffect).toBe("move");
+  fireEvent.drop(favorites, { dataTransfer });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("reorder_repositories", { placements: expect.arrayContaining([expect.objectContaining({ id: 1, favorite: true, group: undefined })]) }));
   expect(screen.getByRole("button", { name: /Favorites1/ })).toBeInTheDocument();
+  expect(favorites).not.toHaveClass("empty");
 });
 
 test("exports the retained session log only after an explicit save choice", async () => {

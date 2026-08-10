@@ -11,6 +11,7 @@ type LogLine = SessionLogLine & { id: number; bytes: number };
 type LogBuffer = { entries: Array<LogLine | undefined>; start: number; length: number; bytes: number };
 type RepositoryGroup = { key: string; label: string; repositories: RepositorySummary[] };
 type OperationOutcome = NonNullable<OperationEvent["outcome"]>;
+type OperationToast = { id: number; title: string; message: string; outcome: OperationOutcome };
 type OperationFinished = (outcome: OperationOutcome) => void;
 type RunOperation = (request: OperationRequest, onFinished?: OperationFinished) => void | Promise<void>;
 type Pending = { repositoryId: number; request: OperationRequest; preview: OperationPreview; onFinished?: OperationFinished };
@@ -67,9 +68,10 @@ export default function App() {
   const [pending, setPending] = useState<Pending>();
   const [dialog, setDialog] = useState<DialogSpec>();
   const [busyOperations, setBusyOperations] = useState<number[]>([]);
+  const [toasts, setToasts] = useState<OperationToast[]>([]);
   const [filter, setFilter] = useState("");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
-  const [draggingRepositoryId, setDraggingRepositoryId] = useState<number>();
+  const draggingRepositoryId = useRef<number | undefined>(undefined);
   const [leftWidth, setLeftWidth] = useState(240);
   const [rightWidth, setRightWidth] = useState(360);
   const [outputHeight, setOutputHeight] = useState(190);
@@ -78,6 +80,7 @@ export default function App() {
   const allowClose = useRef(false);
   const cloneOperations = useRef(new Set<number>());
   const historyRepository = useRef<number | undefined>(undefined);
+  const historyRequest = useRef(0);
   const selectedIdRef = useRef<number | undefined>(undefined);
   const statusRequest = useRef(0);
   const repositoryListRequest = useRef(0);
@@ -85,9 +88,11 @@ export default function App() {
   const streamedSummaries = useRef(new Map<number, RepositorySummary>());
   const operationCallbacks = useRef(new Map<number, OperationFinished>());
   const earlyCompletions = useRef(new Map<number, OperationOutcome>());
+  const operationTitles = useRef(new Map<number, string>());
   selectedIdRef.current = selectedId;
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
   const showDialog = useCallback((spec: DialogSpec) => setDialog(spec), []);
+  const dismissToast = useCallback((id: number) => setToasts((current) => current.filter((toast) => toast.id !== id)), []);
 
   const selected = repositories.find((repository) => repository.id === selectedId);
   const pushLog = useCallback((kind: LogLine["kind"], message: string) => {
@@ -132,6 +137,22 @@ export default function App() {
     }
   }, [pushLog]);
 
+  const refreshHistory = useCallback(async (repositoryId: number) => {
+    const request = ++historyRequest.current;
+    historyRepository.current = repositoryId;
+    setCommits([]); setNextHistoryCursor(undefined); setSelectedCommit(undefined); setHistoryLoading(true);
+    try {
+      const page = await api.history(repositoryId);
+      if (request !== historyRequest.current || repositoryId !== selectedIdRef.current) return;
+      setCommits(page.commits); setNextHistoryCursor(page.nextCursor ?? undefined);
+    } catch (error) {
+      if (request !== historyRequest.current || repositoryId !== selectedIdRef.current) return;
+      historyRepository.current = undefined; pushLog("error", errorMessage(error)); setOutputOpen(true);
+    } finally {
+      if (request === historyRequest.current && repositoryId === selectedIdRef.current) setHistoryLoading(false);
+    }
+  }, [pushLog]);
+
   useEffect(() => {
     api.bootstrap().then((value) => {
       setGit(value.git); setRepositories(value.repositories);
@@ -168,27 +189,31 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedId || tab !== "history" || historyRepository.current === selectedId) return;
-    let current = true;
     let settled = false;
-    historyRepository.current = selectedId;
-    setCommits([]); setNextHistoryCursor(undefined); setSelectedCommit(undefined); setHistoryLoading(true);
-    api.history(selectedId).then((page) => {
-      if (current) { setCommits(page.commits); setNextHistoryCursor(page.nextCursor ?? undefined); }
-    }).catch((error) => { if (current) { historyRepository.current = undefined; pushLog("error", errorMessage(error)); setOutputOpen(true); } }).finally(() => { settled = true; if (current) setHistoryLoading(false); });
-    return () => { current = false; if (!settled && historyRepository.current === selectedId) historyRepository.current = undefined; };
-  }, [selectedId, tab, pushLog]);
+    void refreshHistory(selectedId).finally(() => { settled = true; });
+    return () => {
+      if (!settled && historyRepository.current === selectedId) {
+        historyRequest.current += 1; historyRepository.current = undefined; setHistoryLoading(false);
+      }
+    };
+  }, [selectedId, tab, refreshHistory]);
 
   const loadMoreHistory = useCallback(async () => {
     if (!selectedId || historyRepository.current !== selectedId || nextHistoryCursor === undefined || historyLoading) return;
     const repositoryId = selectedId;
+    const request = historyRequest.current;
     setHistoryLoading(true);
     try {
       const page = await api.history(repositoryId, nextHistoryCursor);
-      if (historyRepository.current !== repositoryId) return;
+      if (request !== historyRequest.current || historyRepository.current !== repositoryId) return;
       setCommits((current) => [...new Map([...current, ...page.commits].map((commit) => [commit.oid, commit])).values()]);
       setNextHistoryCursor(page.nextCursor ?? undefined);
-    } catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
-    finally { if (historyRepository.current === repositoryId) setHistoryLoading(false); }
+    } catch (error) {
+      if (request !== historyRequest.current || historyRepository.current !== repositoryId) return;
+      pushLog("error", errorMessage(error)); setOutputOpen(true);
+    } finally {
+      if (request === historyRequest.current && historyRepository.current === repositoryId) setHistoryLoading(false);
+    }
   }, [selectedId, nextHistoryCursor, historyLoading, pushLog]);
 
   const openCommit = useCallback(async (oid: string) => {
@@ -207,13 +232,17 @@ export default function App() {
       listen<OperationEvent>("operation-event", ({ payload }) => {
         pushLog(payload.kind, payload.message);
         if (payload.kind === "started") {
+          operationTitles.current.set(payload.operationId, payload.message);
           if (payload.repositoryId == null) cloneOperations.current.add(payload.operationId);
           setBusyOperations((ids) => ids.includes(payload.operationId) ? ids : [...ids, payload.operationId]);
         }
         if (payload.kind === "finished") {
+          const outcome = payload.outcome ?? "failed";
+          const title = operationTitles.current.get(payload.operationId) ?? "Git";
+          operationTitles.current.delete(payload.operationId);
+          setToasts((current) => [...current, { id: payload.operationId, title, message: payload.message, outcome }].slice(-3));
           const callback = operationCallbacks.current.get(payload.operationId);
           operationCallbacks.current.delete(payload.operationId);
-          const outcome = payload.outcome ?? "failed";
           if (callback) callback(outcome);
           else {
             earlyCompletions.current.set(payload.operationId, outcome);
@@ -265,12 +294,18 @@ export default function App() {
 
   const startOperation = useCallback(async (repositoryId: number, request: OperationRequest, confirmed: boolean, onFinished?: OperationFinished) => {
     const result = await api.start(repositoryId, request, confirmed);
-    if (onFinished) {
+    const finished = onFinished || request.type === "commit" ? (outcome: OperationOutcome) => {
+      if (outcome === "succeeded" && request.type === "commit" && historyRepository.current === repositoryId) {
+        if (selectedIdRef.current === repositoryId) void refreshHistory(repositoryId); else historyRepository.current = undefined;
+      }
+      onFinished?.(outcome);
+    } : undefined;
+    if (finished) {
       const outcome = earlyCompletions.current.get(result.operationId);
-      if (outcome) { earlyCompletions.current.delete(result.operationId); onFinished(outcome); }
-      else operationCallbacks.current.set(result.operationId, onFinished);
+      if (outcome) { earlyCompletions.current.delete(result.operationId); finished(outcome); }
+      else operationCallbacks.current.set(result.operationId, finished);
     }
-  }, []);
+  }, [refreshHistory]);
 
   const run = useCallback(async (request: OperationRequest, onFinished?: OperationFinished) => {
     if (!selectedId) { onFinished?.("failed"); return; }
@@ -440,6 +475,11 @@ export default function App() {
     void persistRepositoryLayout(ordered);
   }, [repositories, persistRepositoryLayout]);
 
+  const acceptRepositoryDrop = useCallback((event: React.DragEvent) => {
+    if (filter.trim()) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = "move";
+  }, [filter]);
+
   const exportLogs = useCallback(async () => {
     try {
       const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "Z");
@@ -478,8 +518,9 @@ export default function App() {
     <button className="output-handle" onClick={() => setOutputOpen((value) => !value)}><span>{t("gitOutput")}</span><span>{busyOperations.length ? `${busyOperations.length} ${t("running")}` : `${logCount} ${t("lines")}`} {outputOpen ? "⌄" : "⌃"}</span></button>
     {outputOpen && <><div className="resize-handle resize-output" onPointerDown={(event) => beginResize("output", event)} /><div className="log" style={{ height: outputHeight }}><div className="log-toolbar">{busyOperations.map((id) => <button key={id} onClick={() => api.cancel(id)}>{t("cancel")} #{id}</button>)}<button disabled={!logCount} onClick={exportLogs}>{t("exportLog")}</button><button onClick={clearLogs}>{t("clear")}</button></div>{readLogs(logBuffer.current).map((line) => <div key={line.id} className={`log-${line.kind}`}><time>{line.timestamp}</time> {line.message}</div>)}</div></>}
   </section>;
+  const toastStack = <ToastStack toasts={toasts} onDismiss={dismissToast} />;
 
-  if (!repositories.length) return <I18nProvider language={language}><><main className="empty-workspace"><EmptyState git={git} onAdd={register} onClone={clone} onInit={initialize} onSelectGit={selectGit} onToggleLanguage={toggleLanguage} lastLog={lastLog(logBuffer.current)} />{outputPanel}</main>{paletteOpen && <CommandPalette items={commands} onClose={() => setPaletteOpen(false)} />}{dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}</></I18nProvider>;
+  if (!repositories.length) return <I18nProvider language={language}><><main className="empty-workspace"><EmptyState git={git} onAdd={register} onClone={clone} onInit={initialize} onSelectGit={selectGit} onToggleLanguage={toggleLanguage} lastLog={lastLog(logBuffer.current)} />{outputPanel}</main>{toastStack}{paletteOpen && <CommandPalette items={commands} onClose={() => setPaletteOpen(false)} />}{dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}</></I18nProvider>;
 
   return (
     <I18nProvider language={language}><div className="app-shell" style={{ gridTemplateColumns: `${leftWidth}px 1fr` }}>
@@ -487,9 +528,9 @@ export default function App() {
         <header className="brand"><RailMark /><div><strong>GitDock</strong><span>{git.supported ? `Git ${git.version}` : t("gitUnavailable")}</span></div></header>
         <label className="search"><span>⌕</span><input aria-label={t("searchRepositories")} placeholder={t("findRepository")} value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
         <div className="repo-list" role="listbox" aria-label={t("repositories")}>
-          {repositoryGroups.map((group) => <section role="group" aria-label={group.label} className="repo-group" key={group.key} onDragOver={(event) => { if (!filter.trim()) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); const repositoryId = Number(event.dataTransfer.getData("text/plain")) || draggingRepositoryId; if (repositoryId) moveRepository(repositoryId, group.key); setDraggingRepositoryId(undefined); }}>
+          {repositoryGroups.map((group) => <section role="group" aria-label={group.label} className={`repo-group ${!collapsedGroups.has(group.key) && !group.repositories.length ? "empty" : ""}`} key={group.key} onDragEnter={acceptRepositoryDrop} onDragOver={acceptRepositoryDrop} onDrop={(event) => { event.preventDefault(); const repositoryId = Number(event.dataTransfer.getData("text/plain")) || draggingRepositoryId.current; if (repositoryId) moveRepository(repositoryId, group.key); draggingRepositoryId.current = undefined; }}>
             <header><button aria-expanded={!collapsedGroups.has(group.key)} onClick={() => setCollapsedGroups((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span>{collapsedGroups.has(group.key) ? "▸" : "▾"} {group.label}</span><code>{group.repositories.length}</code></button>{group.key !== FAVORITES_GROUP && group.key !== UNGROUPED_GROUP && <RowMenu><button onClick={() => showDialog({ title: t("renameGroup"), fields: [{ name: "group", label: t("group"), value: group.label, required: true }], onSubmit: ({ group: value }) => updateGroup(group.key, String(value).trim()) })}>{t("rename")}</button><button onClick={() => updateGroup(group.key)}>{t("ungroup")}</button></RowMenu>}</header>
-            {!collapsedGroups.has(group.key) && group.repositories.map((repository, index) => <MemoRepositoryRow key={repository.id} repository={repository} selected={repository.id === selectedId} draggable={!filter.trim()} canMoveUp={!filter.trim() && index > 0} canMoveDown={!filter.trim() && index < group.repositories.length - 1} onSelect={selectRepository} onMove={(direction) => moveRepositoryBy(repository.id, direction)} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(repository.id)); setDraggingRepositoryId(repository.id); }} onDragEnd={() => setDraggingRepositoryId(undefined)} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const repositoryId = Number(event.dataTransfer.getData("text/plain")) || draggingRepositoryId; if (repositoryId) moveRepository(repositoryId, group.key, repository.id); setDraggingRepositoryId(undefined); }} />)}
+            {!collapsedGroups.has(group.key) && group.repositories.map((repository, index) => <MemoRepositoryRow key={repository.id} repository={repository} selected={repository.id === selectedId} draggable={!filter.trim()} canMoveUp={!filter.trim() && index > 0} canMoveDown={!filter.trim() && index < group.repositories.length - 1} onSelect={selectRepository} onMove={(direction) => moveRepositoryBy(repository.id, direction)} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(repository.id)); draggingRepositoryId.current = repository.id; }} onDragEnd={() => { draggingRepositoryId.current = undefined; }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const repositoryId = Number(event.dataTransfer.getData("text/plain")) || draggingRepositoryId.current; if (repositoryId) moveRepository(repositoryId, group.key, repository.id); draggingRepositoryId.current = undefined; }} />)}
           </section>)}
         </div>
         <footer className="sidebar-actions"><button onClick={register}>{t("add")}</button><button onClick={clone}>{t("clone")}</button><button onClick={initialize}>{t("init")}</button><button onClick={toggleLanguage}>{t("language")}</button></footer><div className="resize-handle resize-left" onPointerDown={(event) => beginResize("left", event)} />
@@ -518,10 +559,22 @@ export default function App() {
       </main>
 
       {pending && <ConfirmDialog pending={pending} onCancel={() => { pending.onFinished?.("cancelled"); setPending(undefined); }} onConfirm={confirmPending} />}
+      {toastStack}
       {paletteOpen && <CommandPalette items={commands} onClose={() => setPaletteOpen(false)} />}
       {dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}
     </div></I18nProvider>
   );
+}
+
+function ToastStack({ toasts, onDismiss }: { toasts: OperationToast[]; onDismiss: (id: number) => void }) {
+  return <div className="toast-stack">{toasts.map((toast) => <OperationToastView key={toast.id} toast={toast} onDismiss={onDismiss} />)}</div>;
+}
+
+function OperationToastView({ toast, onDismiss }: { toast: OperationToast; onDismiss: (id: number) => void }) {
+  const { t } = useI18n();
+  useEffect(() => { const timer = window.setTimeout(() => onDismiss(toast.id), 3_000); return () => window.clearTimeout(timer); }, [toast.id, onDismiss]);
+  const result = toast.outcome === "succeeded" ? t("operationSucceeded") : toast.outcome === "cancelled" ? t("operationCancelled") : t("operationFailed");
+  return <div className={`operation-toast toast-${toast.outcome}`} role={toast.outcome === "failed" ? "alert" : "status"}><span><strong>{toast.title}</strong><small>{result}{toast.outcome === "failed" && toast.message ? ` · ${toast.message}` : ""}</small></span><button aria-label={t("dismissNotification")} onClick={() => onDismiss(toast.id)}>×</button></div>;
 }
 
 function EmptyState({ git, onAdd, onClone, onInit, onSelectGit, onToggleLanguage, lastLog }: { git: GitInfo; onAdd: () => void; onClone: () => void; onInit: () => void; onSelectGit: () => void; onToggleLanguage: () => void; lastLog?: LogLine }) {
@@ -534,7 +587,7 @@ function RailMark() { return <svg className="rail-mark" viewBox="0 0 32 32" aria
 function RepositoryRow({ repository, selected, draggable, canMoveUp, canMoveDown, onSelect, onMove, onDragStart, onDragEnd, onDrop }: { repository: RepositorySummary; selected: boolean; draggable: boolean; canMoveUp: boolean; canMoveDown: boolean; onSelect: (repositoryId: number) => void; onMove: (direction: -1 | 1) => void; onDragStart: React.DragEventHandler<HTMLDivElement>; onDragEnd: () => void; onDrop: React.DragEventHandler<HTMLDivElement> }) {
   const { t } = useI18n();
   const state = repository.kind === "missing" ? "missing" : repository.conflictCount ? "conflict" : repository.changedCount ? "changed" : "clean";
-  return <div role="option" tabIndex={0} aria-selected={selected} className="repo-row-shell" draggable={draggable} onClick={() => onSelect(repository.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(repository.id); } }} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragOver={(event) => { if (draggable) event.preventDefault(); }} onDrop={onDrop}><button className={`repo-row ${selected ? "selected" : ""}`} tabIndex={-1}><span className={`status-rail ${state}`} /><span className="repo-copy"><span className="repo-name">{repository.favorite && "★ "}{repository.name}<i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button><RowMenu><button disabled={!canMoveUp} onClick={() => onMove(-1)}>{t("moveUp")}</button><button disabled={!canMoveDown} onClick={() => onMove(1)}>{t("moveDown")}</button></RowMenu></div>;
+  return <div role="option" tabIndex={0} aria-selected={selected} className="repo-row-shell" draggable={draggable} onClick={() => onSelect(repository.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(repository.id); } }} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragOver={(event) => { if (draggable) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={onDrop}><button className={`repo-row ${selected ? "selected" : ""}`} tabIndex={-1}><span className={`status-rail ${state}`} /><span className="repo-copy"><span className="repo-name">{repository.favorite && "★ "}{repository.name}<i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button><RowMenu><button disabled={!canMoveUp} onClick={() => onMove(-1)}>{t("moveUp")}</button><button disabled={!canMoveDown} onClick={() => onMove(1)}>{t("moveDown")}</button></RowMenu></div>;
 }
 
 function ChangesOverview({ repository, snapshot }: { repository?: RepositorySummary; snapshot?: WorkingTreeSnapshot }) {
@@ -616,16 +669,19 @@ function useVirtualRows(count: number, rowHeight: number, overscan = 12) {
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+    let frame: number | undefined;
     const update = () => {
+      frame = undefined;
       const height = container.clientHeight || 680;
       const start = Math.max(0, Math.floor(container.scrollTop / rowHeight) - overscan);
       const end = Math.min(count, Math.ceil((container.scrollTop + height) / rowHeight) + overscan);
       setRange((current) => current.start === start && current.end === end ? current : { start, end });
     };
+    const scheduleUpdate = () => { if (frame === undefined) frame = window.requestAnimationFrame(update); };
     update();
-    container.addEventListener("scroll", update, { passive: true });
-    window.addEventListener("resize", update);
-    return () => { container.removeEventListener("scroll", update); window.removeEventListener("resize", update); };
+    container.addEventListener("scroll", scheduleUpdate, { passive: true });
+    window.addEventListener("resize", scheduleUpdate);
+    return () => { container.removeEventListener("scroll", scheduleUpdate); window.removeEventListener("resize", scheduleUpdate); if (frame !== undefined) window.cancelAnimationFrame(frame); };
   }, [count, rowHeight, overscan]);
   return { containerRef, ...range, totalHeight: count * rowHeight };
 }
@@ -635,8 +691,7 @@ function HistoryCanvas({ commits, selectedOid, onSelect }: { commits: CommitInfo
   const rowHeight = 34; const laneGap = 14;
   const { containerRef, start, end, totalHeight } = useVirtualRows(commits.length, rowHeight);
   const commitRows = useMemo(() => new Map(commits.map((commit, index) => [commit.oid, index])), [commits]);
-  const maxLane = commits.reduce((maximum, commit) => Math.max(maximum, commit.lane.column, ...commit.lane.parentColumns), 0);
-  const graphWidth = Math.max(44, 24 + maxLane * laneGap);
+  const graphWidth = useMemo(() => Math.max(44, 24 + commits.reduce((maximum, commit) => Math.max(maximum, commit.lane.column, ...commit.lane.parentColumns), 0) * laneGap), [commits]);
   const laneX = (column: number) => 12 + column * laneGap;
   const edgeBuckets = useMemo(() => {
     const buckets = new Map<number, Array<{ key: string; row: number; targetRow: number; column: number; targetColumn: number }>>();
