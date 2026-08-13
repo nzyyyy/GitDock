@@ -3,7 +3,10 @@ mod models;
 mod store;
 
 use crate::{
-    git::{ensure_success, path_name, strings, Git},
+    git::{
+        ensure_success, file_executable, path_name, render_conflict_resolution, strings,
+        ConflictSource, Git,
+    },
     models::*,
     store::ConfigStore,
 };
@@ -63,6 +66,7 @@ struct SnapshotCache {
     repository_id: RepositoryId,
     head_oid: Option<String>,
     hunks: HashMap<String, CachedHunk>,
+    conflicts: HashMap<String, ConflictSource>,
 }
 
 #[derive(Clone)]
@@ -715,6 +719,7 @@ fn get_status(
                 repository_id,
                 head_oid: snapshot.head_oid.clone(),
                 hunks: HashMap::new(),
+                conflicts: HashMap::new(),
             },
         );
     Ok(snapshot)
@@ -760,6 +765,43 @@ fn get_diff(
         );
     }
     Ok(diff)
+}
+
+#[tauri::command]
+fn get_conflict_document(
+    repository_id: RepositoryId,
+    snapshot_id: u64,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ConflictDocument, String> {
+    validate_relative_path(&path)?;
+    let git = state.git()?;
+    let record = state.record(repository_id)?;
+    let inspection = git.inspect_repository(Path::new(&record.path))?;
+    if inspection.bare {
+        return Err("Bare repositories do not have conflicts".into());
+    }
+    safe_worktree_file(&inspection.root, &path)?;
+    let mut snapshots = state
+        .snapshots
+        .lock()
+        .map_err(|_| "Snapshot cache is busy")?;
+    let snapshot = snapshots
+        .get_mut(&snapshot_id)
+        .ok_or("This view is stale. Refresh the repository and try again.")?;
+    if snapshot.repository_id != repository_id {
+        return Err("Snapshot does not belong to this repository".into());
+    }
+    let current_head = git
+        .text(&inspection.root, &["rev-parse", "--verify", "HEAD"])
+        .ok();
+    if snapshot.head_oid != current_head {
+        return Err("HEAD changed. Refresh the repository and try again.".into());
+    }
+    let source = git.conflict_source(&inspection.root, &path, snapshot_id)?;
+    let document = source.document.clone();
+    snapshot.conflicts.insert(document.id.clone(), source);
+    Ok(document)
 }
 
 #[tauri::command]
@@ -1077,6 +1119,72 @@ fn start_operation(
     validate_request(&git, &inspection.root, &request)?;
 
     let operation_id = state.next_operation_id.fetch_add(1, Ordering::Relaxed);
+    if let OperationRequest::ResolveConflictBlocks {
+        snapshot_id,
+        document_id,
+        path,
+        choices,
+    } = request
+    {
+        acquire_lock(&state, &inspection.common_git_dir)?;
+        suppress_watch(&state, repository_id);
+        let root = inspection.root.clone();
+        let common = inspection.common_git_dir.clone();
+        thread::spawn(move || {
+            emit(
+                &app,
+                operation_id,
+                Some(repository_id),
+                OperationEventKind::Started,
+                "Resolve conflict blocks",
+                None,
+                None,
+            );
+            let result = resolve_conflict_blocks(
+                &git,
+                &root,
+                &app.state::<AppState>(),
+                repository_id,
+                snapshot_id,
+                &document_id,
+                &path,
+                &choices,
+            );
+            let (message, code, outcome) = match result {
+                Ok(()) => (
+                    "Conflict resolved and staged".to_string(),
+                    0,
+                    OperationOutcome::Succeeded,
+                ),
+                Err(error) => (error, 1, OperationOutcome::Failed),
+            };
+            if code != 0 {
+                emit(
+                    &app,
+                    operation_id,
+                    Some(repository_id),
+                    OperationEventKind::Stderr,
+                    &message,
+                    None,
+                    None,
+                );
+            }
+            emit(
+                &app,
+                operation_id,
+                Some(repository_id),
+                OperationEventKind::Finished,
+                &message,
+                Some(code),
+                Some(outcome),
+            );
+            finish_operation(&app, operation_id, repository_id, &common);
+        });
+        return Ok(OperationResult {
+            operation_id,
+            accepted: true,
+        });
+    }
     if let OperationRequest::TrashUntracked { paths } = request {
         acquire_lock(&state, &inspection.common_git_dir)?;
         suppress_watch(&state, repository_id);
@@ -1169,6 +1277,117 @@ fn trash_paths(
     })
 }
 
+fn resolve_conflict_blocks(
+    git: &Git,
+    root: &Path,
+    state: &AppState,
+    repository_id: RepositoryId,
+    snapshot_id: u64,
+    document_id: &str,
+    path: &str,
+    choices: &[ConflictResolution],
+) -> Result<(), String> {
+    validate_relative_path(path)?;
+    let target = safe_worktree_file(root, path)?;
+    let source = {
+        let snapshots = state
+            .snapshots
+            .lock()
+            .map_err(|_| "Snapshot cache is busy")?;
+        let snapshot = snapshots
+            .get(&snapshot_id)
+            .ok_or("This conflict view is stale. Refresh and try again.")?;
+        if snapshot.repository_id != repository_id {
+            return Err("Snapshot does not belong to this repository".into());
+        }
+        let current_head = git.text(root, &["rev-parse", "--verify", "HEAD"]).ok();
+        if snapshot.head_oid != current_head {
+            return Err("HEAD changed. Refresh the repository and try again.".into());
+        }
+        snapshot
+            .conflicts
+            .get(document_id)
+            .filter(|source| source.document.path == path)
+            .cloned()
+            .ok_or("Conflict document is not available in this snapshot")?
+    };
+    if git.conflict_stages(root, path)? != source.stages {
+        return Err(
+            "Conflict stages changed after this editor was opened. Refresh and try again.".into(),
+        );
+    }
+    if fs::read(&target).map_err(|error| error.to_string())? != source.worktree {
+        return Err(
+            "The working-tree file changed after this editor was opened. Refresh and try again."
+                .into(),
+        );
+    }
+    if file_executable(&target)? != source.worktree_executable {
+        return Err(
+            "The working-tree file mode changed after this editor was opened. Refresh and try again."
+                .into(),
+        );
+    }
+    let result = render_conflict_resolution(&source.document.segments, choices)?;
+    let permissions = fs::metadata(&target)
+        .map_err(|error| error.to_string())?
+        .permissions();
+    replace_file(&target, &result, permissions.clone())?;
+    let add = ensure_success(git.run(root, &with_paths(&["add"], &[path.into()]), None)?);
+    if let Err(error) = add {
+        if let Err(restore_error) = replace_file(&target, &source.worktree, permissions) {
+            return Err(format!(
+                "{error}; restoring the original file also failed: {restore_error}"
+            ));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn safe_worktree_file(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let target = root.join(path);
+    let metadata = fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err("Only regular files can use the internal conflict editor".into());
+    }
+    let parent = target
+        .parent()
+        .ok_or("Conflict path has no parent")?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !parent.starts_with(&root) {
+        return Err("Conflict path resolves outside the repository".into());
+    }
+    Ok(target)
+}
+
+fn replace_file(
+    target: &Path,
+    contents: &[u8],
+    permissions: fs::Permissions,
+) -> Result<(), String> {
+    let parent = target.parent().ok_or("Conflict path has no parent")?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    temporary
+        .write_all(contents)
+        .map_err(|error| error.to_string())?;
+    temporary
+        .as_file()
+        .set_permissions(permissions)
+        .map_err(|error| error.to_string())?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    temporary
+        .persist(target)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn cancel_operation(operation_id: OperationId, state: State<'_, AppState>) -> Result<(), String> {
     let (pid, cancelled) = state
@@ -1206,6 +1425,14 @@ fn preview(
             paths.clone(),
             vec![],
             true,
+        ),
+        OperationRequest::ResolveConflictBlocks { path, .. } => (
+            "Resolve and stage conflict",
+            "Replace the working-tree file with the selected conflict blocks, then stage it. Existing manual edits in the file will be overwritten.",
+            RiskLevel::Destructive,
+            vec![path.clone()],
+            vec![],
+            false,
         ),
         OperationRequest::DeleteBranch { name, force: true } => (
             "Force delete branch",
@@ -1555,7 +1782,8 @@ fn command_spec(
             }
             a
         }
-        OperationRequest::TrashUntracked { .. } => unreachable!(),
+        OperationRequest::TrashUntracked { .. }
+        | OperationRequest::ResolveConflictBlocks { .. } => unreachable!(),
     };
     Ok(CommandSpec { args, input })
 }
@@ -2104,7 +2332,8 @@ fn request_paths(request: &OperationRequest) -> Vec<String> {
         | OperationRequest::SubmoduleUpdate { paths, .. }
         | OperationRequest::SubmoduleSync { paths, .. } => paths.clone(),
         OperationRequest::ChooseConflictSide { path, .. }
-        | OperationRequest::RunDifftool { path, .. } => vec![path.clone()],
+        | OperationRequest::RunDifftool { path, .. }
+        | OperationRequest::ResolveConflictBlocks { path, .. } => vec![path.clone()],
         OperationRequest::RunMergetool { path } => path.clone().into_iter().collect(),
         _ => vec![],
     }
@@ -2134,6 +2363,7 @@ fn operation_title(request: &OperationRequest) -> &'static str {
         OperationRequest::SubmoduleSync { .. } => "Sync submodules",
         OperationRequest::RunDifftool { .. } => "Open difftool",
         OperationRequest::RunMergetool { .. } => "Open mergetool",
+        OperationRequest::ResolveConflictBlocks { .. } => "Resolve and stage conflict",
         _ => "Run Git operation",
     }
 }
@@ -2185,6 +2415,7 @@ pub fn run() {
             watch_repository,
             get_status,
             get_diff,
+            get_conflict_document,
             get_history,
             export_session_log,
             get_commit_diff,
@@ -2261,15 +2492,28 @@ mod tests {
             favorite: false,
             order: 0,
         };
-        let preview = preview(
+        let discard_preview = preview(
             &record,
             &OperationRequest::DiscardTracked {
                 paths: vec!["a".into()],
             },
         )
         .unwrap();
-        assert_eq!(preview.risk, RiskLevel::Destructive);
-        assert!(preview.requires_confirmation);
+        assert_eq!(discard_preview.risk, RiskLevel::Destructive);
+        assert!(discard_preview.requires_confirmation);
+        let conflict = preview(
+            &record,
+            &OperationRequest::ResolveConflictBlocks {
+                snapshot_id: 1,
+                document_id: "document".into(),
+                path: "file.txt".into(),
+                choices: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(conflict.risk, RiskLevel::Destructive);
+        assert!(!conflict.recoverable);
+        assert_eq!(conflict.affected_paths, ["file.txt"]);
     }
 
     #[test]
@@ -2613,6 +2857,7 @@ mod tests {
                         source_diff: diff.patch,
                     },
                 )]),
+                conflicts: HashMap::new(),
             },
         );
         run_request(
@@ -2640,6 +2885,7 @@ mod tests {
                         source_diff: staged.patch,
                     },
                 )]),
+                conflicts: HashMap::new(),
             },
         );
         run_request(
@@ -3017,6 +3263,172 @@ mod tests {
             fs::read_to_string(dir.path().join("base")).unwrap(),
             "main conflict\n"
         );
+    }
+
+    #[test]
+    fn resolves_cached_conflict_blocks_and_stages_the_file() {
+        for (choice, expected) in [
+            (ConflictChoice::Current, "start\ncurrent\nend\n"),
+            (ConflictChoice::Incoming, "start\nincoming\nend\n"),
+            (ConflictChoice::Both, "start\ncurrent\nincoming\nend\n"),
+        ] {
+            let git = Git::discover(None).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            init_repo(&git, dir.path());
+            commit_file(&git, dir.path(), "file.txt", "start\nbase\nend\n", "base");
+            git_ok(&git, dir.path(), &["switch", "-c", "incoming"]);
+            commit_file(
+                &git,
+                dir.path(),
+                "file.txt",
+                "start\nincoming\nend\n",
+                "incoming",
+            );
+            git_ok(&git, dir.path(), &["switch", "main"]);
+            commit_file(
+                &git,
+                dir.path(),
+                "file.txt",
+                "start\ncurrent\nend\n",
+                "current",
+            );
+            assert!(!git
+                .run(dir.path(), &strings(&["merge", "incoming"]), None)
+                .unwrap()
+                .status
+                .success());
+
+            let source = git.conflict_source(dir.path(), "file.txt", 7).unwrap();
+            let block_id = source
+                .document
+                .segments
+                .iter()
+                .find_map(|segment| match segment {
+                    ConflictSegment::Conflict { id, .. } => Some(id.clone()),
+                    ConflictSegment::Context { .. } => None,
+                })
+                .unwrap();
+            let document_id = source.document.id.clone();
+            let state = test_state(git.clone(), dir.path().join("config.json"));
+            state.snapshots.lock().unwrap().insert(
+                7,
+                SnapshotCache {
+                    repository_id: 1,
+                    head_oid: Some(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap()),
+                    hunks: HashMap::new(),
+                    conflicts: HashMap::from([(document_id.clone(), source)]),
+                },
+            );
+            resolve_conflict_blocks(
+                &git,
+                dir.path(),
+                &state,
+                1,
+                7,
+                &document_id,
+                "file.txt",
+                &[ConflictResolution { block_id, choice }],
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+                expected
+            );
+            assert!(git
+                .text(dir.path(), &["ls-files", "--unmerged"])
+                .unwrap()
+                .is_empty());
+            assert!(git
+                .text(dir.path(), &["ls-files", "--stage", "--", "file.txt"])
+                .unwrap()
+                .contains(" 0\tfile.txt"));
+        }
+    }
+
+    #[test]
+    fn stale_conflict_editor_never_overwrites_external_changes() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        commit_file(&git, dir.path(), "file.txt", "base\n", "base");
+        git_ok(&git, dir.path(), &["switch", "-c", "incoming"]);
+        commit_file(&git, dir.path(), "file.txt", "incoming\n", "incoming");
+        git_ok(&git, dir.path(), &["switch", "main"]);
+        commit_file(&git, dir.path(), "file.txt", "current\n", "current");
+        assert!(!git
+            .run(dir.path(), &strings(&["merge", "incoming"]), None)
+            .unwrap()
+            .status
+            .success());
+        let source = git.conflict_source(dir.path(), "file.txt", 8).unwrap();
+        let document_id = source.document.id.clone();
+        let original_worktree = source.worktree.clone();
+        let block_id = source
+            .document
+            .segments
+            .iter()
+            .find_map(|segment| match segment {
+                ConflictSegment::Conflict { id, .. } => Some(id.clone()),
+                ConflictSegment::Context { .. } => None,
+            })
+            .unwrap();
+        let state = test_state(git.clone(), dir.path().join("config.json"));
+        state.snapshots.lock().unwrap().insert(
+            8,
+            SnapshotCache {
+                repository_id: 1,
+                head_oid: Some(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap()),
+                hunks: HashMap::new(),
+                conflicts: HashMap::from([(document_id.clone(), source)]),
+            },
+        );
+        fs::write(dir.path().join("file.txt"), "external edit\n").unwrap();
+        let refreshed = git.conflict_source(dir.path(), "file.txt", 8).unwrap();
+        assert_ne!(document_id, refreshed.document.id);
+        let error = resolve_conflict_blocks(
+            &git,
+            dir.path(),
+            &state,
+            1,
+            8,
+            &document_id,
+            "file.txt",
+            &[ConflictResolution {
+                block_id: block_id.clone(),
+                choice: ConflictChoice::Current,
+            }],
+        )
+        .unwrap_err();
+        assert!(error.contains("working-tree file changed"));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+            "external edit\n"
+        );
+
+        fs::write(dir.path().join("file.txt"), original_worktree).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let target = dir.path().join("file.txt");
+            let mut permissions = fs::metadata(&target).unwrap().permissions();
+            permissions.set_mode(permissions.mode() ^ 0o100);
+            fs::set_permissions(&target, permissions).unwrap();
+            let error = resolve_conflict_blocks(
+                &git,
+                dir.path(),
+                &state,
+                1,
+                8,
+                &document_id,
+                "file.txt",
+                &[ConflictResolution {
+                    block_id,
+                    choice: ConflictChoice::Current,
+                }],
+            )
+            .unwrap_err();
+            assert!(error.contains("file mode changed"));
+        }
     }
 
     #[test]
@@ -3612,6 +4024,7 @@ mod tests {
                         source_diff: "previous diff".into(),
                     },
                 )]),
+                conflicts: HashMap::new(),
             },
         );
         let error = command_spec(

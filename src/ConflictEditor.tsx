@@ -1,0 +1,15 @@
+import { useState } from "react";
+import type { ConflictChoice, ConflictDocument, ConflictResolution } from "./api";
+import { useI18n } from "./i18n";
+
+export function ConflictEditor({ document, onBack, onResolve }: { document: ConflictDocument; onBack: () => void; onResolve: (choices: ConflictResolution[]) => void }) {
+  const { t } = useI18n();
+  const blocks = document.segments.filter((segment) => segment.type === "conflict");
+  const blockNumbers = new Map(blocks.map((block, index) => [block.id, index + 1]));
+  const [choices, setChoices] = useState<Record<string, ConflictChoice>>({});
+  const remaining = blocks.filter((block) => !choices[block.id]).length;
+  const choose = (blockId: string, choice: ConflictChoice) => setChoices((current) => ({ ...current, [blockId]: choice }));
+  const resolve = () => onResolve(blocks.map((block) => ({ blockId: block.id, choice: choices[block.id] })));
+
+  return <div className="conflict-editor"><header className="canvas-header"><button onClick={onBack}>← {t("back")}</button><strong>{document.path}</strong><span>{remaining ? `${remaining} ${t("blocksRemaining")}` : t("readyToResolve")}</span><button className="primary" disabled={remaining > 0} onClick={resolve}>{t("resolveAndStage")}</button></header><div className="conflict-scroll"><div className="conflict-column-head"><span>{t("baseVersion")}</span><span>{t("currentVersion")}</span><span>{t("incomingVersion")}</span></div>{document.segments.map((segment, index) => segment.type === "context" ? <pre className="conflict-context" key={`context-${index}`}><code>{segment.text || " "}</code></pre> : <section className="conflict-block" aria-labelledby={`conflict-block-${segment.id}`} key={segment.id}><div className="conflict-track" /><div className="conflict-pane base" role="group" aria-label={t("baseVersion")}><pre><code>{segment.base || " "}</code></pre></div><div className="conflict-pane current" role="group" aria-label={t("currentVersion")}><pre><code>{segment.current || " "}</code></pre><button aria-describedby={`conflict-block-${segment.id}`} aria-pressed={choices[segment.id] === "current"} className={choices[segment.id] === "current" ? "active" : ""} onClick={() => choose(segment.id, "current")}>{t("useCurrent")}</button></div><div className="conflict-pane incoming" role="group" aria-label={t("incomingVersion")}><pre><code>{segment.incoming || " "}</code></pre><button aria-describedby={`conflict-block-${segment.id}`} aria-pressed={choices[segment.id] === "incoming"} className={choices[segment.id] === "incoming" ? "active" : ""} onClick={() => choose(segment.id, "incoming")}>{t("useIncoming")}</button></div><footer><code id={`conflict-block-${segment.id}`}>{t("conflictBlock")} {blockNumbers.get(segment.id)}</code><button aria-describedby={`conflict-block-${segment.id}`} aria-pressed={choices[segment.id] === "both"} className={choices[segment.id] === "both" ? "active" : ""} onClick={() => choose(segment.id, "both")}>{t("useBoth")}</button></footer></section>)}</div></div>;
+}

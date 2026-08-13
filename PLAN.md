@@ -76,6 +76,7 @@ Current verification: 31 frontend tests and 37 Rust tests pass, along with the p
 ### P3 — new capabilities, gated by demand
 
 - Internal three-way conflict editor with base/current/incoming panes and per-block choices. Trigger: external tools are a recurring blocker in conflict workflows.
+  - Initial slice implemented: ordinary three-stage UTF-8 text conflicts with matching regular-file modes support Current, Incoming, or Both per block, backend-owned IDs, stale-content checks, destructive preview, atomic writeback, and staging. Binary, oversized, missing-stage, mode, symlink, and submodule conflicts continue through external tools.
 - Interactive rebase for reorder, reword, squash, fixup, and drop. Trigger: ordinary rebase plus cherry-pick no longer covers common history-editing needs.
 - File history and blame. Trigger: users need repository investigation inside GitDock rather than their editor.
 - Reflog browser and guarded recovery of lost commits/branches. Trigger: safe revert and last-commit undo prove insufficient.

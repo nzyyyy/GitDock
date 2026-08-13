@@ -172,6 +172,43 @@ pub struct DiffFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct ConflictDocument {
+    pub id: String,
+    pub path: String,
+    pub segments: Vec<ConflictSegment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ConflictSegment {
+    Context {
+        text: String,
+    },
+    Conflict {
+        id: String,
+        base: String,
+        current: String,
+        incoming: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictResolution {
+    pub block_id: String,
+    pub choice: ConflictChoice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictChoice {
+    Current,
+    Incoming,
+    Both,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphLane {
     pub column: usize,
     pub parent_columns: Vec<usize>,
@@ -400,6 +437,12 @@ pub enum OperationRequest {
     },
     MarkResolved {
         paths: Vec<String>,
+    },
+    ResolveConflictBlocks {
+        snapshot_id: u64,
+        document_id: String,
+        path: String,
+        choices: Vec<ConflictResolution>,
     },
     StashCreate {
         message: Option<String>,

@@ -1,7 +1,8 @@
 use crate::models::*;
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
     ffi::OsStr,
+    fs,
     hash::{Hash, Hasher},
     io::Write,
     path::{Path, PathBuf},
@@ -23,6 +24,20 @@ pub struct RepositoryInspection {
     pub common_git_dir: PathBuf,
     pub git_dir: PathBuf,
     pub bare: bool,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct ConflictStage {
+    pub mode: String,
+    pub oid: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConflictSource {
+    pub document: ConflictDocument,
+    pub stages: [ConflictStage; 3],
+    pub worktree: Vec<u8>,
+    pub worktree_executable: bool,
 }
 
 impl Git {
@@ -274,6 +289,164 @@ impl Git {
         })
     }
 
+    pub fn conflict_source(
+        &self,
+        cwd: &Path,
+        path: &str,
+        snapshot_id: u64,
+    ) -> Result<ConflictSource, String> {
+        let stages = self.conflict_stages(cwd, path)?;
+        let contents = stages
+            .iter()
+            .map(|stage| self.filtered_blob(cwd, path, &stage.oid))
+            .collect::<Result<Vec<_>, _>>()?;
+        let [base, current, incoming]: [Vec<u8>; 3] = contents
+            .try_into()
+            .map_err(|_| "A three-stage conflict is required".to_string())?;
+        for content in [&base, &current, &incoming] {
+            validate_conflict_text(content)?;
+        }
+        let worktree = fs::read(cwd.join(path)).map_err(|error| error.to_string())?;
+        validate_conflict_text(&worktree)?;
+        let worktree_executable = file_executable(&cwd.join(path))?;
+
+        let mut hasher = DefaultHasher::new();
+        (snapshot_id, path, &stages).hash(&mut hasher);
+        let tag = format!("{:016x}", hasher.finish());
+        let labels = [
+            format!("gitdock-current-{tag}"),
+            format!("gitdock-base-{tag}"),
+            format!("gitdock-incoming-{tag}"),
+        ];
+        let mut current_file = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+        let mut base_file = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+        let mut incoming_file =
+            tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+        current_file
+            .write_all(&current)
+            .map_err(|error| error.to_string())?;
+        base_file
+            .write_all(&base)
+            .map_err(|error| error.to_string())?;
+        incoming_file
+            .write_all(&incoming)
+            .map_err(|error| error.to_string())?;
+        let output = self.run(
+            cwd,
+            &[
+                "merge-file".into(),
+                "--diff3".into(),
+                "--stdout".into(),
+                "-L".into(),
+                labels[0].clone(),
+                "-L".into(),
+                labels[1].clone(),
+                "-L".into(),
+                labels[2].clone(),
+                current_file.path().to_string_lossy().into_owned(),
+                base_file.path().to_string_lossy().into_owned(),
+                incoming_file.path().to_string_lossy().into_owned(),
+            ],
+            None,
+        )?;
+        if !matches!(output.status.code(), Some(0..=127)) {
+            return Err(error_text(&output));
+        }
+        let merged = String::from_utf8(output.stdout)
+            .map_err(|_| "Conflict content is not valid UTF-8".to_string())?;
+        let originals = [
+            std::str::from_utf8(&base).unwrap(),
+            std::str::from_utf8(&current).unwrap(),
+            std::str::from_utf8(&incoming).unwrap(),
+        ];
+        let segments = parse_conflict_segments(snapshot_id, path, &merged, &labels, originals)?;
+        let mut document_hasher = DefaultHasher::new();
+        (
+            snapshot_id,
+            path,
+            &stages,
+            &merged,
+            &worktree,
+            worktree_executable,
+        )
+            .hash(&mut document_hasher);
+        Ok(ConflictSource {
+            document: ConflictDocument {
+                id: format!("{:016x}", document_hasher.finish()),
+                path: path.into(),
+                segments,
+            },
+            stages,
+            worktree,
+            worktree_executable,
+        })
+    }
+
+    pub fn conflict_stages(&self, cwd: &Path, path: &str) -> Result<[ConflictStage; 3], String> {
+        let output = ensure_success(self.run(
+            cwd,
+            &strings(&["ls-files", "--unmerged", "-z", "--", path]),
+            None,
+        )?)?;
+        let mut stages: [Option<ConflictStage>; 3] = [None, None, None];
+        for record in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let record = std::str::from_utf8(record)
+                .map_err(|_| "Conflict index entry is not valid UTF-8")?;
+            let (metadata, entry_path) = record
+                .split_once('\t')
+                .ok_or("Invalid conflict index entry")?;
+            if entry_path != path {
+                return Err("Conflict index path changed".into());
+            }
+            let mut fields = metadata.split_whitespace();
+            let mode = fields.next().ok_or("Conflict stage mode is missing")?;
+            let oid = fields.next().ok_or("Conflict stage object is missing")?;
+            let stage = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|stage| (1..=3).contains(stage))
+                .ok_or("Invalid conflict stage")?;
+            if stages[stage - 1].is_some() {
+                return Err("Duplicate conflict stage".into());
+            }
+            stages[stage - 1] = Some(ConflictStage {
+                mode: mode.into(),
+                oid: oid.into(),
+            });
+        }
+        let [Some(base), Some(current), Some(incoming)] = stages else {
+            return Err("This conflict does not have base, current, and incoming stages".into());
+        };
+        if !matches!(base.mode.as_str(), "100644" | "100755")
+            || current.mode != base.mode
+            || incoming.mode != base.mode
+        {
+            return Err(
+                "Only regular files with matching modes can use the internal conflict editor"
+                    .into(),
+            );
+        }
+        Ok([base, current, incoming])
+    }
+
+    fn filtered_blob(&self, cwd: &Path, path: &str, oid: &str) -> Result<Vec<u8>, String> {
+        let output = ensure_success(self.run(
+            cwd,
+            &[
+                "cat-file".into(),
+                "--filters".into(),
+                format!("--path={path}"),
+                oid.into(),
+            ],
+            None,
+        )?)?;
+        Ok(output.stdout)
+    }
+
     pub fn history(
         &self,
         cwd: &Path,
@@ -436,6 +609,190 @@ impl Git {
                 })
             })
             .collect())
+    }
+}
+
+pub fn render_conflict_resolution(
+    segments: &[ConflictSegment],
+    choices: &[ConflictResolution],
+) -> Result<Vec<u8>, String> {
+    let mut selected = HashMap::new();
+    for choice in choices {
+        if selected
+            .insert(choice.block_id.as_str(), &choice.choice)
+            .is_some()
+        {
+            return Err("A conflict block was selected more than once".into());
+        }
+    }
+    let expected: HashSet<&str> = segments
+        .iter()
+        .filter_map(|segment| match segment {
+            ConflictSegment::Conflict { id, .. } => Some(id.as_str()),
+            ConflictSegment::Context { .. } => None,
+        })
+        .collect();
+    if selected.len() != expected.len() || selected.keys().any(|id| !expected.contains(id)) {
+        return Err("Choose a resolution for every conflict block".into());
+    }
+    let mut result = String::new();
+    for segment in segments {
+        match segment {
+            ConflictSegment::Context { text } => result.push_str(text),
+            ConflictSegment::Conflict {
+                id,
+                current,
+                incoming,
+                ..
+            } => match selected[id.as_str()] {
+                ConflictChoice::Current => result.push_str(current),
+                ConflictChoice::Incoming => result.push_str(incoming),
+                ConflictChoice::Both => {
+                    result.push_str(current);
+                    result.push_str(incoming);
+                }
+            },
+        }
+    }
+    Ok(result.into_bytes())
+}
+
+pub fn file_executable(path: &Path) -> Result<bool, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .map_err(|error| error.to_string());
+    }
+    #[cfg(not(unix))]
+    {
+        fs::metadata(path)
+            .map(|_| false)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn validate_conflict_text(content: &[u8]) -> Result<(), String> {
+    if content.len() > MAX_DIFF_BYTES
+        || content.iter().filter(|byte| **byte == b'\n').count() + 1 > MAX_DIFF_LINES
+    {
+        return Err("This conflict is too large for the internal editor".into());
+    }
+    if content.contains(&0) {
+        return Err("Binary conflicts must use an external merge tool".into());
+    }
+    std::str::from_utf8(content)
+        .map(|_| ())
+        .map_err(|_| "Conflict content is not valid UTF-8".into())
+}
+
+fn parse_conflict_segments(
+    snapshot_id: u64,
+    path: &str,
+    merged: &str,
+    labels: &[String; 3],
+    originals: [&str; 3],
+) -> Result<Vec<ConflictSegment>, String> {
+    let lines: Vec<&str> = merged.split_inclusive('\n').collect();
+    let marker = |line: &str, prefix: &str, label: &str| {
+        line.trim_end_matches(['\r', '\n']) == format!("{prefix} {label}")
+    };
+    let mut segments = Vec::new();
+    let mut context = String::new();
+    let mut index = 0;
+    let mut block_index = 0;
+    while index < lines.len() {
+        if !marker(lines[index], "<<<<<<<", &labels[0]) {
+            context.push_str(lines[index]);
+            index += 1;
+            continue;
+        }
+        if !context.is_empty() {
+            segments.push(ConflictSegment::Context {
+                text: std::mem::take(&mut context),
+            });
+        }
+        index += 1;
+        let mut current = String::new();
+        while index < lines.len() && !marker(lines[index], "|||||||", &labels[1]) {
+            current.push_str(lines[index]);
+            index += 1;
+        }
+        if index == lines.len() {
+            return Err("Git returned an incomplete conflict block".into());
+        }
+        index += 1;
+        let mut base = String::new();
+        while index < lines.len() && lines[index].trim_end_matches(['\r', '\n']) != "=======" {
+            base.push_str(lines[index]);
+            index += 1;
+        }
+        if index == lines.len() {
+            return Err("Git returned an incomplete conflict block".into());
+        }
+        index += 1;
+        let mut incoming = String::new();
+        while index < lines.len() && !marker(lines[index], ">>>>>>>", &labels[2]) {
+            incoming.push_str(lines[index]);
+            index += 1;
+        }
+        if index == lines.len() {
+            return Err("Git returned an incomplete conflict block".into());
+        }
+        index += 1;
+        segments.push(ConflictSegment::Conflict {
+            id: String::new(),
+            base,
+            current,
+            incoming,
+        });
+        block_index += 1;
+    }
+    if !context.is_empty() {
+        segments.push(ConflictSegment::Context { text: context });
+    }
+    if block_index == 0 {
+        return Err("No text conflict blocks were found".into());
+    }
+    if let Some(ConflictSegment::Conflict {
+        base,
+        current,
+        incoming,
+        ..
+    }) = segments
+        .iter_mut()
+        .rev()
+        .find(|segment| matches!(segment, ConflictSegment::Conflict { .. }))
+    {
+        restore_missing_eof_newline(base, originals[0]);
+        restore_missing_eof_newline(current, originals[1]);
+        restore_missing_eof_newline(incoming, originals[2]);
+    }
+    let mut block_index = 0;
+    for segment in &mut segments {
+        if let ConflictSegment::Conflict {
+            id,
+            base,
+            current,
+            incoming,
+        } = segment
+        {
+            let mut hasher = DefaultHasher::new();
+            (snapshot_id, path, block_index, base, current, incoming).hash(&mut hasher);
+            *id = format!("{:016x}", hasher.finish());
+            block_index += 1;
+        }
+    }
+    Ok(segments)
+}
+
+fn restore_missing_eof_newline(chunk: &mut String, original: &str) {
+    if !original.ends_with('\n') && chunk.ends_with('\n') {
+        let without_newline = &chunk[..chunk.len() - 1];
+        if original.ends_with(without_newline) {
+            chunk.pop();
+        }
     }
 }
 
@@ -802,6 +1159,156 @@ mod tests {
         )
         .unwrap();
         git.text(path, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    #[test]
+    fn parses_and_resolves_multiple_conflict_blocks() {
+        let labels = ["current".into(), "base".into(), "incoming".into()];
+        let merged = "before\n<<<<<<< current\ncurrent one\n||||||| base\nbase one\n=======\nincoming one\n>>>>>>> incoming\nbetween\n<<<<<<< current\ncurrent two\n||||||| base\nbase two\n=======\nincoming two\n>>>>>>> incoming\nafter";
+        let segments = parse_conflict_segments(
+            7,
+            "file.txt",
+            merged,
+            &labels,
+            [
+                "base one\nbase two\n",
+                "current one\ncurrent two\n",
+                "incoming one\nincoming two\n",
+            ],
+        )
+        .unwrap();
+        let ids: Vec<String> = segments
+            .iter()
+            .filter_map(|segment| match segment {
+                ConflictSegment::Conflict { id, .. } => Some(id.clone()),
+                ConflictSegment::Context { .. } => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        let rendered = render_conflict_resolution(
+            &segments,
+            &[
+                ConflictResolution {
+                    block_id: ids[0].clone(),
+                    choice: ConflictChoice::Both,
+                },
+                ConflictResolution {
+                    block_id: ids[1].clone(),
+                    choice: ConflictChoice::Incoming,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(rendered).unwrap(),
+            "before\ncurrent one\nincoming one\nbetween\nincoming two\nafter"
+        );
+        assert!(render_conflict_resolution(&segments, &[]).is_err());
+        assert!(render_conflict_resolution(
+            &segments,
+            &[
+                ConflictResolution {
+                    block_id: ids[0].clone(),
+                    choice: ConflictChoice::Current,
+                },
+                ConflictResolution {
+                    block_id: ids[0].clone(),
+                    choice: ConflictChoice::Incoming,
+                },
+            ],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_conflict_content() {
+        assert!(validate_conflict_text(b"text\0binary").is_err());
+        assert!(validate_conflict_text(&[0xff]).is_err());
+        assert!(validate_conflict_text(&vec![b'a'; MAX_DIFF_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn rejects_conflicts_without_all_three_stages() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["commit", "--allow-empty", "-m", "base"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(dir.path(), &strings(&["switch", "-c", "incoming"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        commit_file(&git, dir.path(), "incoming\n", "incoming");
+        ensure_success(
+            git.run(dir.path(), &strings(&["switch", "main"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        commit_file(&git, dir.path(), "current\n", "current");
+        assert!(!git
+            .run(dir.path(), &strings(&["merge", "incoming"]), None)
+            .unwrap()
+            .status
+            .success());
+        assert!(git
+            .conflict_source(dir.path(), "file.txt", 1)
+            .unwrap_err()
+            .contains("does not have base"));
+    }
+
+    #[test]
+    fn preserves_missing_eof_newlines_from_git_merge_file() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "base", "base");
+        ensure_success(
+            git.run(dir.path(), &strings(&["switch", "-c", "incoming"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        commit_file(&git, dir.path(), "incoming", "incoming");
+        ensure_success(
+            git.run(dir.path(), &strings(&["switch", "main"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        commit_file(&git, dir.path(), "current", "current");
+        assert!(!git
+            .run(dir.path(), &strings(&["merge", "incoming"]), None)
+            .unwrap()
+            .status
+            .success());
+        let source = git.conflict_source(dir.path(), "file.txt", 1).unwrap();
+        let block_id = source
+            .document
+            .segments
+            .iter()
+            .find_map(|segment| match segment {
+                ConflictSegment::Conflict { id, .. } => Some(id.clone()),
+                ConflictSegment::Context { .. } => None,
+            })
+            .unwrap();
+        assert_eq!(
+            render_conflict_resolution(
+                &source.document.segments,
+                &[ConflictResolution {
+                    block_id,
+                    choice: ConflictChoice::Current,
+                }],
+            )
+            .unwrap(),
+            b"current"
+        );
     }
 
     #[test]

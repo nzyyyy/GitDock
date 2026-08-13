@@ -8,7 +8,7 @@ GitDock is a macOS Git desktop client built with Tauri, React, TypeScript, and R
 
 - Add, asynchronously clone, initialize, and manage local repositories; clone streams progress and can be cancelled
 - Inspect working-tree status in a compact filename-and-path row, and switch between unified and side-by-side diffs with on-demand highlighting for common languages
-- Stage or unstage files and hunks, create commits, and resolve conflicts
+- Stage or unstage files and hunks and create commits; resolve ordinary three-stage UTF-8 text conflicts block by block in Base / Current / Incoming panes, then stage the result
 - Select multiple files to stage or unstage them in one operation
 - Switch between English and Simplified Chinese with a remembered preference
 - Smoothly scroll through a windowed commit topology graph whose lanes continue across pages; commits refresh the graph and list automatically, with commit diff, cherry-pick, and revert actions
@@ -83,4 +83,4 @@ Both `dist/` and `src-tauri/target/` are generated directories and must not be c
 
 ## Safety
 
-Repository paths and frontend input are validated at the Tauri boundary. High-risk actions such as deleting files, discarding changes, and force-pushing retain confirmation flows; review the affected scope before proceeding. Configuration is loaded by schema version, and the previous valid file is backed up as `config.json.bak` before saving.
+Repository paths and frontend input are validated at the Tauri boundary. The internal conflict editor accepts only backend-owned block IDs and choices, then revalidates the snapshot, index stages, and working-tree contents before writing; unsupported conflicts continue through external merge tools. High-risk actions such as deleting files, discarding changes, and force-pushing retain confirmation flows; review the affected scope before proceeding. Configuration is loaded by schema version, and the previous valid file is backed up as `config.json.bak` before saving.

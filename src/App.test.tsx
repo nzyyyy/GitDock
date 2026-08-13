@@ -381,6 +381,57 @@ test("routes conflict actions through previews and shows destructive impact", as
   expect(await screen.findByRole("alertdialog")).toHaveTextContent("work.ts");
 });
 
+test("resolves every internal conflict block through a destructive preview", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" } }) => void) | undefined;
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 1, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 9, repositoryId: 1, headOid: "12345678", files: [
+      { path: "conflict.ts", kind: "Conflicted", staged: false, unstaged: true, conflict: true, ignored: false },
+    ] });
+    if (command === "get_conflict_document") return Promise.resolve({ id: "document-1", path: "conflict.ts", segments: [
+      { type: "context", text: "const start = true;\n" },
+      { type: "conflict", id: "block-1", base: "base one\n", current: "current one\n", incoming: "incoming one\n" },
+      { type: "conflict", id: "block-2", base: "base two\n", current: "current two\n", incoming: "incoming two\n" },
+    ] });
+    if (command === "preview_operation") return Promise.resolve({ title: "Resolve and stage conflict", summary: "Existing manual edits will be overwritten.", risk: "destructive", affectedPaths: ["conflict.ts"], affectedRefs: [], recoverable: false, requiresConfirmation: true });
+    if (command === "start_operation") return Promise.resolve({ operationId: 12, accepted: true });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: /conflict\.ts/ }));
+  expect(await screen.findByText("Base")).toBeInTheDocument();
+  expect(screen.getByText("Current")).toBeInTheDocument();
+  expect(screen.getByText("Incoming")).toBeInTheDocument();
+  expect(screen.getAllByRole("group", { name: "Base" })).toHaveLength(2);
+  const resolve = screen.getByRole("button", { name: "Resolve and stage" });
+  expect(resolve).toBeDisabled();
+  const current = screen.getAllByRole("button", { name: "Use current target" })[0];
+  expect(current).toHaveAttribute("aria-describedby", "conflict-block-block-1");
+  fireEvent.click(current);
+  expect(resolve).toBeDisabled();
+  fireEvent.click(screen.getAllByRole("button", { name: "Use incoming commit" })[1]);
+  expect(resolve).toBeEnabled();
+  fireEvent.click(resolve);
+  const request = { type: "resolveConflictBlocks", snapshotId: 9, documentId: "document-1", path: "conflict.ts", choices: [
+    { blockId: "block-1", choice: "current" },
+    { blockId: "block-2", choice: "incoming" },
+  ] };
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request }));
+  expect(await screen.findByRole("alertdialog")).toHaveTextContent("conflict.ts");
+  fireEvent.click(screen.getByRole("button", { name: "Resolve and stage conflict" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_operation", { repositoryId: 1, request, confirmed: true }));
+  await act(async () => operationListener?.({ payload: { operationId: 12, repositoryId: 1, kind: "finished", message: "Conflict resolved and staged", outcome: "succeeded" } }));
+  expect(screen.queryByText("base one")).not.toBeInTheDocument();
+});
+
 test("opens output on failure and confirms cancellation before close", async () => {
   let operationListener: ((event: { payload: { operationId: number; repositoryId?: number; kind: "started" | "finished"; message: string; exitCode?: number; outcome?: string } }) => void) | undefined;
   let closeListener: ((event: { preventDefault: () => void }) => void) | undefined;

@@ -22,6 +22,10 @@ export interface FileChange {
 export interface WorkingTreeSnapshot { id: number; repositoryId: number; headOid?: string; files: FileChange[] }
 export interface DiffHunk { id: string; header: string; patch: string }
 export interface DiffFile { path: string; staged: boolean; binary: boolean; tooLarge: boolean; patch: string; hunks: DiffHunk[] }
+export type ConflictSegment = { type: "context"; text: string } | { type: "conflict"; id: string; base: string; current: string; incoming: string };
+export interface ConflictDocument { id: string; path: string; segments: ConflictSegment[] }
+export type ConflictChoice = "current" | "incoming" | "both";
+export interface ConflictResolution { blockId: string; choice: ConflictChoice }
 export interface CommitInfo { oid: string; parents: string[]; author: string; authoredAt: string; subject: string; refs: string[]; lane: { column: number; parentColumns: number[] } }
 export interface HistoryCursor { offset: number; activeLanes: string[] }
 export interface CommitPage { commits: CommitInfo[]; nextCursor?: HistoryCursor | null }
@@ -53,6 +57,7 @@ export const api = {
   watchRepository: (repositoryId: number) => invoke<void>("watch_repository", { repositoryId }),
   status: (repositoryId: number, includeIgnored = false) => invoke<WorkingTreeSnapshot>("get_status", { repositoryId, includeIgnored }),
   diff: (repositoryId: number, snapshotId: number, path: string, staged: boolean) => invoke<DiffFile>("get_diff", { repositoryId, snapshotId, path, staged }),
+  conflictDocument: (repositoryId: number, snapshotId: number, path: string) => invoke<ConflictDocument>("get_conflict_document", { repositoryId, snapshotId, path }),
   history: (repositoryId: number, cursor?: HistoryCursor, limit = 100) => invoke<CommitPage>("get_history", { repositoryId, cursor, limit }),
   exportSessionLog: (fileName: string, lines: SessionLogLine[]) => invoke<boolean>("export_session_log", { fileName, lines }),
   commitDiff: (repositoryId: number, oid: string) => invoke<string>("get_commit_diff", { repositoryId, oid }),

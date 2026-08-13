@@ -2,7 +2,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, type BranchInfo, type CommitInfo, type DiffFile, type FileChange, type GitInfo, type HistoryCursor, type Language, type OperationEvent, type OperationPreview, type OperationRequest, type RemoteInfo, type RepositorySummary, type SessionLogLine, type StashInfo, type SubmoduleInfo, type TagInfo, type WorkingTreeSnapshot } from "./api";
+import { api, type BranchInfo, type CommitInfo, type ConflictDocument, type ConflictResolution, type DiffFile, type FileChange, type GitInfo, type HistoryCursor, type Language, type OperationEvent, type OperationPreview, type OperationRequest, type RemoteInfo, type RepositorySummary, type SessionLogLine, type StashInfo, type SubmoduleInfo, type TagInfo, type WorkingTreeSnapshot } from "./api";
+import { ConflictEditor } from "./ConflictEditor";
 import { DiffView, type DiffMode } from "./DiffView";
 import { I18nProvider, translate, useI18n } from "./i18n";
 
@@ -57,6 +58,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("changes");
   const [snapshot, setSnapshot] = useState<WorkingTreeSnapshot>();
   const [diff, setDiff] = useState<DiffFile>();
+  const [conflict, setConflict] = useState<ConflictDocument & { snapshotId: number }>();
   const [diffMode, setDiffMode] = useState<DiffMode>("unified");
   const [commits, setCommits] = useState<CommitInfo[]>([]);
   const [nextHistoryCursor, setNextHistoryCursor] = useState<HistoryCursor>();
@@ -182,7 +184,7 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedId) return;
-    setDiff(undefined);
+    setDiff(undefined); setConflict(undefined);
     api.watchRepository(selectedId).catch((error) => pushLog("error", errorMessage(error)));
     if (selected?.kind === "workTree") refreshStatus(selectedId); else { statusRequest.current += 1; setSnapshot(undefined); }
   }, [selectedId, selected?.kind, refreshStatus, pushLog]);
@@ -220,6 +222,7 @@ export default function App() {
     if (!selectedId) return;
     const repositoryId = selectedId;
     setSelectedCommit(oid);
+    setConflict(undefined);
     try {
       const patch = await api.commitDiff(repositoryId, oid);
       if (historyRepository.current === repositoryId) setDiff({ path: t("commitDiff"), staged: false, binary: false, tooLarge: false, patch, hunks: [] });
@@ -394,18 +397,35 @@ export default function App() {
 
   const openDiff = useCallback(async (file: FileChange, staged: boolean) => {
     if (!selectedId || !snapshot) return;
-    try { setDiff(await api.diff(selectedId, snapshot.id, file.path, staged)); }
+    const repositoryId = selectedId;
+    const snapshotId = snapshot.id;
+    try {
+      if (file.conflict) {
+        const document = await api.conflictDocument(repositoryId, snapshotId, file.path);
+        if (selectedIdRef.current === repositoryId) { setConflict({ ...document, snapshotId }); setDiff(undefined); }
+      } else {
+        const nextDiff = await api.diff(repositoryId, snapshotId, file.path, staged);
+        if (selectedIdRef.current === repositoryId) { setDiff(nextDiff); setConflict(undefined); }
+      }
+    }
     catch (error) { pushLog("error", errorMessage(error)); setOutputOpen(true); }
   }, [selectedId, snapshot, pushLog]);
 
   const selectRepository = useCallback((repositoryId: number) => setSelectedId(repositoryId), []);
-  const closeDiff = useCallback(() => setDiff(undefined), []);
+  const closeDiff = useCallback(() => { setDiff(undefined); setConflict(undefined); }, []);
   const openRepositoryFile = useCallback((path: string) => {
     if (selectedId) api.openRepositoryFile(selectedId, path).catch((error) => pushLog("error", errorMessage(error)));
   }, [selectedId, pushLog]);
   const loadIgnored = useCallback(() => refreshStatus(selectedId, true), [selectedId, refreshStatus]);
   const reportError = useCallback((message: string) => pushLog("error", message), [pushLog]);
-  const showBranchDiff = useCallback((value: string) => setDiff({ path: translate(language, "branchComparison"), staged: false, binary: false, tooLarge: false, patch: value, hunks: [] }), [language]);
+  const showBranchDiff = useCallback((value: string) => { setConflict(undefined); setDiff({ path: translate(language, "branchComparison"), staged: false, binary: false, tooLarge: false, patch: value, hunks: [] }); }, [language]);
+  const resolveConflict = useCallback((choices: ConflictResolution[]) => {
+    if (!conflict) return;
+    const document = conflict;
+    void run({ type: "resolveConflictBlocks", snapshotId: document.snapshotId, documentId: document.id, path: document.path, choices }, (outcome) => {
+      if (outcome === "succeeded") setConflict((current) => current?.id === document.id ? undefined : current);
+    });
+  }, [conflict, run]);
 
   const repositoryGroups = useMemo<RepositoryGroup[]>(() => {
     const query = filter.trim().toLowerCase();
@@ -492,10 +512,10 @@ export default function App() {
 
   const command = (id: string, key: Parameters<typeof translate>[1], action: () => void, enabled = true): CommandItem | undefined => enabled ? { id, label: t(key), search: `${t(key)} ${translate("en", key)}`.toLowerCase(), action } : undefined;
   const commands = [
-    command("changes", "changes", () => { setTab("changes"); setDiff(undefined); }, Boolean(selected)),
-    command("history", "history", () => { setTab("history"); setDiff(undefined); }, Boolean(selected)),
-    command("branches", "branches", () => { setTab("branches"); setDiff(undefined); }, Boolean(selected)),
-    command("stashes", "stashes", () => { setTab("stashes"); setDiff(undefined); }, Boolean(selected)),
+    command("changes", "changes", () => { setTab("changes"); closeDiff(); }, Boolean(selected)),
+    command("history", "history", () => { setTab("history"); closeDiff(); }, Boolean(selected)),
+    command("branches", "branches", () => { setTab("branches"); closeDiff(); }, Boolean(selected)),
+    command("stashes", "stashes", () => { setTab("stashes"); closeDiff(); }, Boolean(selected)),
     command("add", "addRepository", register, git.supported), command("clone", "clone", clone, git.supported), command("init", "initialize", initialize, git.supported),
     command("refresh", "refreshAll", refreshRepositories), command("language", "language", toggleLanguage), command("git", "selectGit", selectGit),
     command("fetch", "fetch", () => { void run({ type: "fetch", prune: false }); }, Boolean(selected?.capabilities.canManageRemotes)),
@@ -539,13 +559,13 @@ export default function App() {
       <main className="workspace">
         <header className="topbar">
           <div className="repo-context"><span className="branch-dot" /> <strong>{selected?.name}</strong><code>{selected?.branch || shortOid(selected?.headOid)}</code></div>
-          <nav aria-label={t("workflows")}>{(["changes", "history", "branches", "stashes"] as Tab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => { setTab(item); setDiff(undefined); }}>{t(item)}</button>)}</nav>
+          <nav aria-label={t("workflows")}>{(["changes", "history", "branches", "stashes"] as Tab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => { setTab(item); closeDiff(); }}>{t(item)}</button>)}</nav>
           <div className="sync-actions"><button aria-label={t("commandPalette")} onClick={() => setPaletteOpen(true)}>⌘K</button><button disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "fetch", prune: false })}>{t("fetch")}</button><button disabled={!selected?.capabilities.canWriteWorkTree} onClick={() => run({ type: "pull" })}>{t("pull")}</button><button className="primary" disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "push" })}>{t("push")}</button><RowMenu label={t("more")}><button onClick={refreshRepositories}>{t("refreshAll")}</button><button onClick={() => run({ type: "pull", strategy: "merge" })}>{t("pullMerge")}</button><button onClick={() => run({ type: "pull", strategy: "rebase" })}>{t("pullRebase")}</button><button onClick={() => run({ type: "pull", strategy: "fastForwardOnly" })}>{t("pullFf")}</button><button onClick={forcePush}>{t("forcePush")}</button><button onClick={() => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } })}>{t("setUpstream")}</button><button onClick={() => showDialog({ title: t("cherryPickCommits"), fields: [{ name: "commits", label: t("commitOids"), required: true }], onSubmit: ({ commits }) => run({ type: "cherryPick", commits: String(commits).trim().split(/\s+/) }) })}>{t("cherryPickCommits")}</button><button onClick={() => run({ type: "undoLastCommit" })}>{t("undoCommit")}</button><button onClick={() => showDialog({ title: t("renameEntry"), fields: [{ name: "name", label: t("repositoryName"), value: selected?.name, required: true }], onSubmit: ({ name }) => updateSelected({ name: String(name).trim() }) })}>{t("renameEntry")}</button><button onClick={() => updateSelected({ favorite: !selected?.favorite })}>{selected?.favorite ? t("removeFavorite") : t("addFavorite")}</button><button onClick={() => showDialog({ title: t("setGroup"), fields: [{ name: "group", label: t("group"), value: selected?.group ?? "" }], onSubmit: ({ group }) => updateSelected({ group: String(group).trim() }) })}>{t("setGroup")}</button><button onClick={relocateSelected}>{t("relocate")}</button><button onClick={selectGit}>{t("selectGit")}</button><button className="menu-danger" onClick={removeSelected}>{t("removeGitDock")}</button></RowMenu></div>
         </header>
 
         <div className="work-area" style={{ gridTemplateColumns: `minmax(480px, 1fr) ${rightWidth}px` }}>
           <section className="canvas">
-            {diff ? <MemoDiffView diff={diff} snapshotId={snapshot?.id} mode={diffMode} onModeChange={setDiffMode} onBack={closeDiff} onRun={run} /> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
+            {conflict ? <ConflictEditor key={conflict.id} document={conflict} onBack={closeDiff} onResolve={resolveConflict} /> : diff ? <MemoDiffView diff={diff} snapshotId={snapshot?.id} mode={diffMode} onModeChange={setDiffMode} onBack={closeDiff} onRun={run} /> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
           </section>
           <aside className="tool-pane"><div className="resize-handle resize-right" onPointerDown={(event) => beginResize("right", event)} />
             {tab === "changes" && <MemoChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={openRepositoryFile} onLoadIgnored={loadIgnored} onRun={run} />}
@@ -660,7 +680,7 @@ function ChangeGroup({ name, files, type, selected, onToggle, onSelectAll, onOpe
   const { t } = useI18n();
   if (!files.length) return null;
   const selectable = type === "staged" || type === "unstaged" || type === "untracked";
-  return <section className="change-group"><header><span>{selectable && <input type="checkbox" aria-label={`${t("selectAll")} ${name}`} checked={files.every((file) => selected.includes(file.path))} onChange={onSelectAll} />}{name}</span><code>{files.length}</code></header>{files.map((file) => <div className={`file-row ${selectable ? "selectable" : ""} ${type === "conflict" ? "conflict-row" : ""}`} key={`${type}-${file.path}`}>{selectable && <input type="checkbox" aria-label={`${type === "staged" ? t("selectFileForUnstage") : t("selectFileForStage")} ${file.path}`} checked={selected.includes(file.path)} onChange={() => onToggle(file.path)} />}<button className="file-main" onClick={() => onOpen(file, type === "staged")}><b>{file.path.split("/").at(-1)}</b><small>{file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "./"}</small></button><span className={`file-kind kind-${file.kind.toLowerCase()}`}>{file.kind[0]}</span>{type === "staged" ? <button onClick={() => onRun({ type: "unstageFiles", paths: [file.path] })}>{t("unstage")}</button> : type === "untracked" ? <><button onClick={() => onRun({ type: "stageFiles", paths: [file.path] })}>{t("stage")}</button><button className="danger-icon" aria-label={`${t("trash")} ${file.path}`} onClick={() => onRun({ type: "trashUntracked", paths: [file.path] })}>⌫</button></> : type === "conflict" ? <RowMenu label={t("resolve")}><button onClick={() => onRun({ type: "chooseConflictSide", path: file.path, side: "ours" })}>{t("useCurrent")}</button><button onClick={() => onRun({ type: "chooseConflictSide", path: file.path, side: "theirs" })}>{t("useIncoming")}</button><button onClick={() => onOpenExternal(file.path)}>{t("openExternal")}</button><button onClick={() => onRun({ type: "runMergetool", path: file.path })}>{t("runMergetool")}</button><button onClick={() => onRun({ type: "markResolved", paths: [file.path] })}>{t("markResolved")}</button></RowMenu> : type === "ignored" ? null : <><button onClick={() => onRun({ type: "stageFiles", paths: [file.path] })}>{t("stage")}</button><button className="danger-icon" aria-label={`${t("discard")} ${file.path}`} onClick={() => onRun({ type: "discardTracked", paths: [file.path] })}>↶</button></>}</div>)}</section>;
+  return <section className="change-group"><header><span>{selectable && <input type="checkbox" aria-label={`${t("selectAll")} ${name}`} checked={files.every((file) => selected.includes(file.path))} onChange={onSelectAll} />}{name}</span><code>{files.length}</code></header>{files.map((file) => <div className={`file-row ${selectable ? "selectable" : ""} ${type === "conflict" ? "conflict-row" : ""}`} key={`${type}-${file.path}`}>{selectable && <input type="checkbox" aria-label={`${type === "staged" ? t("selectFileForUnstage") : t("selectFileForStage")} ${file.path}`} checked={selected.includes(file.path)} onChange={() => onToggle(file.path)} />}<button className="file-main" onClick={() => onOpen(file, type === "staged")}><b>{file.path.split("/").at(-1)}</b><small>{file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "./"}</small></button><span className={`file-kind kind-${file.kind.toLowerCase()}`}>{file.kind[0]}</span>{type === "staged" ? <button onClick={() => onRun({ type: "unstageFiles", paths: [file.path] })}>{t("unstage")}</button> : type === "untracked" ? <><button onClick={() => onRun({ type: "stageFiles", paths: [file.path] })}>{t("stage")}</button><button className="danger-icon" aria-label={`${t("trash")} ${file.path}`} onClick={() => onRun({ type: "trashUntracked", paths: [file.path] })}>⌫</button></> : type === "conflict" ? <RowMenu label={t("resolve")}><button onClick={() => onOpen(file, false)}>{t("openInternalEditor")}</button><button onClick={() => onRun({ type: "chooseConflictSide", path: file.path, side: "ours" })}>{t("useCurrent")}</button><button onClick={() => onRun({ type: "chooseConflictSide", path: file.path, side: "theirs" })}>{t("useIncoming")}</button><button onClick={() => onOpenExternal(file.path)}>{t("openExternal")}</button><button onClick={() => onRun({ type: "runMergetool", path: file.path })}>{t("runMergetool")}</button><button onClick={() => onRun({ type: "markResolved", paths: [file.path] })}>{t("markResolved")}</button></RowMenu> : type === "ignored" ? null : <><button onClick={() => onRun({ type: "stageFiles", paths: [file.path] })}>{t("stage")}</button><button className="danger-icon" aria-label={`${t("discard")} ${file.path}`} onClick={() => onRun({ type: "discardTracked", paths: [file.path] })}>↶</button></>}</div>)}</section>;
 }
 
 function useVirtualRows(count: number, rowHeight: number, overscan = 12) {
