@@ -15,7 +15,7 @@ export interface RepositorySummary {
 export interface RepositoryRefresh { summary: RepositorySummary; snapshot?: WorkingTreeSnapshot }
 export interface RepositoryRecord { id: number; path: string; name: string; group?: string; favorite: boolean; order: number }
 export interface RepositoryPlacement { id: number; group?: string; favorite: boolean; order: number }
-export interface Bootstrap { git: GitInfo; settings: { selectedRepositoryId?: number; leftWidth: number; rightWidth: number; outputHeight: number; language?: Language }; repositories: RepositorySummary[] }
+export interface Bootstrap { git: GitInfo; settings: { selectedRepositoryId?: number; leftWidth: number; rightWidth: number; outputHeight: number; language?: Language; groupOrder?: string[] }; repositories: RepositorySummary[] }
 export interface FileChange {
   path: string; originalPath?: string; kind: string; indexStatus?: string; worktreeStatus?: string;
   staged: boolean; unstaged: boolean; conflict: boolean; ignored: boolean;
@@ -52,6 +52,7 @@ export const api = {
   relocateRepository: (repositoryId: number, path: string) => invoke<RepositorySummary>("relocate_repository", { repositoryId, path }),
   updateRepository: (repository: RepositoryRecord) => invoke<void>("update_repository", { repository }),
   reorderRepositories: (placements: RepositoryPlacement[]) => invoke<void>("reorder_repositories", { placements }),
+  saveGroupOrder: (groups: string[]) => invoke<void>("save_group_order", { groups }),
   setGitPath: (path?: string) => invoke<GitInfo>("set_git_path", { path }),
   saveLayout: (leftWidth: number, rightWidth: number, outputHeight: number) => invoke<void>("save_layout", { leftWidth, rightWidth, outputHeight }),
   saveLanguage: (language: Language) => invoke<void>("save_language", { language }),

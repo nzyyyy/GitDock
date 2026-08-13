@@ -22,6 +22,8 @@ pub struct Settings {
     pub output_height: u16,
     #[serde(default)]
     pub language: Language,
+    #[serde(default)]
+    pub group_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,6 +44,7 @@ impl Default for Settings {
             right_width: 360,
             output_height: 190,
             language: Language::English,
+            group_order: Vec::new(),
         }
     }
 }

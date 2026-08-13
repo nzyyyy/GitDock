@@ -297,6 +297,32 @@ fn apply_repository_placements(
     Ok(())
 }
 
+fn sanitize_group_order(groups: Vec<String>) -> Result<Vec<String>, String> {
+    let mut seen = HashSet::new();
+    let sanitized = groups
+        .into_iter()
+        .map(|group| group.trim().to_string())
+        .filter(|group| !group.is_empty() && seen.insert(group.clone()))
+        .collect::<Vec<_>>();
+    if sanitized
+        .iter()
+        .any(|group| group.len() > 100 || group.chars().any(char::is_control))
+    {
+        return Err("Repository group must be at most 100 characters".into());
+    }
+    Ok(sanitized)
+}
+
+#[tauri::command]
+pub(crate) fn save_group_order(
+    groups: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
+    store.config.settings.group_order = sanitize_group_order(groups)?;
+    store.save()
+}
+
 #[tauri::command]
 pub(crate) fn remove_repository(
     repository_id: RepositoryId,
@@ -434,6 +460,38 @@ mod tests {
         assert_eq!(repositories[0].order, 1);
         assert!(repositories[0].favorite);
         assert_eq!(repositories[1].group.as_deref(), Some("Team"));
+    }
+
+    #[test]
+    fn group_order_is_sanitized_and_validated() {
+        assert_eq!(
+            sanitize_group_order(vec![
+                " Work ".into(),
+                "".into(),
+                "  ".into(),
+                "Work".into(),
+                "Team".into(),
+                "Team".into(),
+            ])
+            .unwrap(),
+            vec!["Work", "Team"]
+        );
+        let mut long = "x".repeat(101);
+        assert!(sanitize_group_order(vec![long.clone()]).is_err());
+        long.truncate(100);
+        assert!(sanitize_group_order(vec![long]).is_ok());
+        assert!(sanitize_group_order(vec!["bad\u{1}name".into()]).is_err());
+    }
+
+    #[test]
+    fn group_order_persists_through_the_config_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = ConfigStore::load(path.clone()).unwrap();
+        store.config.settings.group_order = sanitize_group_order(vec!["Work".into()]).unwrap();
+        store.save().unwrap();
+        let reloaded = ConfigStore::load(path).unwrap();
+        assert_eq!(reloaded.config.settings.group_order, vec!["Work"]);
     }
 
     #[test]

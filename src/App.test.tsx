@@ -1004,3 +1004,40 @@ test("opens the command palette and routes repository actions through existing p
   fireEvent.keyDown(input, { key: "Enter" });
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "fetch", prune: false } }));
 });
+
+test("keeps the More menu free of cherry-pick, favorite, and set group entries", async () => {
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "More" }));
+  expect(screen.queryByText("Cherry-pick commits")).not.toBeInTheDocument();
+  expect(screen.queryByText("Add favorite")).not.toBeInTheDocument();
+  expect(screen.queryByText("Set group")).not.toBeInTheDocument();
+  expect(screen.getByText("Undo last commit")).toBeInTheDocument();
+  expect(screen.getByText("Rename entry")).toBeInTheDocument();
+});
+
+test("adds an empty group from the sidebar and persists it", async () => {
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Add group" }));
+  const input = screen.getByRole("textbox", { name: "Group" });
+  expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+  fireEvent.change(input, { target: { value: " Work " } });
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_group_order", { groups: ["Work"] }));
+  const group = await screen.findByRole("group", { name: "Work" });
+  expect(group).toHaveClass("empty");
+  expect(group.textContent).toContain("0");
+});

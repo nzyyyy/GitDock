@@ -18,8 +18,8 @@ use crate::{
     operations::{cancel_operation, preview_operation, start_operation},
     repositories::{
         add_repository, clone_repository, initialize_repository, relocate_repository,
-        remove_repository, reorder_repositories, save_language, save_layout, set_git_path,
-        update_repository, watch_repository,
+        remove_repository, reorder_repositories, save_group_order, save_language, save_layout,
+        set_git_path, update_repository, watch_repository,
     },
     snapshot::{get_conflict_document, get_diff, get_status},
     store::ConfigStore,
@@ -152,6 +152,7 @@ pub fn run() {
             relocate_repository,
             update_repository,
             reorder_repositories,
+            save_group_order,
             remove_repository,
             watch_repository,
             get_status,

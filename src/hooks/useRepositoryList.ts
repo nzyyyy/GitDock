@@ -17,6 +17,7 @@ export function useRepositoryList({
   language: "en" | "zh-CN";
 }) {
   const [repositories, setRepositories] = useState<RepositorySummary[]>([]);
+  const [customGroups, setCustomGroups] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const draggingRepositoryId = useRef<number | undefined>(undefined);
@@ -83,16 +84,19 @@ export function useRepositoryList({
       const key = repository.group?.trim() || UNGROUPED_GROUP;
       grouped.set(key, [...(grouped.get(key) ?? []), repository]);
     }
-    const named = [...grouped.entries()]
-      .filter(([key]) => key !== UNGROUPED_GROUP)
+    const named = new Map([...grouped.entries()].filter(([key]) => key !== UNGROUPED_GROUP));
+    for (const key of customGroups) {
+      if (!named.has(key) && key !== FAVORITES_GROUP && key !== UNGROUPED_GROUP) named.set(key, []);
+    }
+    const namedGroups = [...named.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, items]) => ({ key, label: key, repositories: items }));
     return [
       { key: FAVORITES_GROUP, label: t("favorites"), repositories: favorites },
-      ...named,
+      ...namedGroups,
       { key: UNGROUPED_GROUP, label: t("ungrouped"), repositories: grouped.get(UNGROUPED_GROUP) ?? [] },
     ];
-  }, [repositories, filter, language]);
+  }, [repositories, filter, language, customGroups]);
 
   const persistRepositoryLayout = useCallback(async (ordered: RepositorySummary[]) => {
     const previous = repositories;
@@ -135,10 +139,29 @@ export function useRepositoryList({
     void persistRepositoryLayout(groups.flatMap((item) => item.repositories));
   }, [filter, repositoryGroups, persistRepositoryLayout]);
 
+  const persistCustomGroups = useCallback((next: string[]) => {
+    const previous = customGroups;
+    setCustomGroups(next);
+    api.saveGroupOrder(next).catch((error) => { setCustomGroups(previous); reportError(errorMessage(error)); });
+  }, [customGroups, reportError]);
+
+  const addGroup = useCallback((name: string) => {
+    const key = name.trim();
+    if (!key || key === FAVORITES_GROUP || key === UNGROUPED_GROUP) return;
+    if (customGroups.includes(key) || repositoryGroups.some((group) => group.key === key)) return;
+    persistCustomGroups([...customGroups, key]);
+  }, [customGroups, repositoryGroups, persistCustomGroups]);
+
   const updateGroup = useCallback((group: string, replacement?: string) => {
     const ordered = [...repositories].sort((left, right) => left.order - right.order).map((repository) => repository.group === group ? { ...repository, group: replacement } : repository);
     void persistRepositoryLayout(ordered);
-  }, [repositories, persistRepositoryLayout]);
+    const next = replacement === undefined
+      ? customGroups.filter((key) => key !== group)
+      : customGroups.map((key) => key === group ? replacement : key);
+    if (next.length !== customGroups.length || next.some((key, index) => key !== customGroups[index])) {
+      persistCustomGroups(next);
+    }
+  }, [repositories, persistRepositoryLayout, customGroups, persistCustomGroups]);
 
   const acceptRepositoryDrop = useCallback((event: React.DragEvent) => {
     if (filter.trim()) return;
@@ -174,9 +197,9 @@ export function useRepositoryList({
   }, [filter]);
 
   return {
-    repositories, setRepositories, filter, setFilter, collapsedGroups, setCollapsedGroups,
+    repositories, setRepositories, customGroups, setCustomGroups, filter, setFilter, collapsedGroups, setCollapsedGroups,
     draggingRepositoryId, dropTargetGroup, refreshRepositories, refreshRepository,
-    repositoryGroups, moveRepository, moveRepositoryBy, updateGroup,
+    repositoryGroups, moveRepository, moveRepositoryBy, addGroup, updateGroup,
     acceptRepositoryDrop, hintRepositoryDrop, clearRepositoryDropHint,
   };
 }
