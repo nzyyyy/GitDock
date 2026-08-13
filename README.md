@@ -77,9 +77,16 @@ dist/GitDock.app
 ## 项目结构
 
 - `src/`：React/TypeScript 前端
-- `src-tauri/src/`：Rust 后端、Git 命令与 Tauri 接口
+  - `src/App.tsx`：组件组合与全局布局，按领域使用 hooks 管理状态
+  - `src/hooks/`：领域 hooks（仓库列表、工作区快照、历史、操作执行、日志）
+  - `src/components/`：按面板拆分的 UI 组件（仓库列表、变更、历史、分支、Stash、对话框、Toast、命令面板）
+  - `src/lib/`：纯逻辑工具（会话日志环形缓冲）
+  - `src/types.ts`：跨组件共享类型与常量；`src/api.ts`：Tauri 命令封装
+  - `src/App.test.tsx`：前端回归测试
+- `src-tauri/src/`：Rust 后端，按职责拆分为模块
+  - `lib.rs`：`AppState` 与 Tauri 命令注册；`summary.rs`：仓库摘要刷新；`repositories.rs`：仓库管理与配置；`snapshot.rs`：工作区快照/差异/冲突；`history.rs`：历史与引用查询；`operations.rs`：Git 操作引擎与校验；`process.rs`：子进程、流与锁
+  - `git.rs`：Git 进程封装与输出解析；`models.rs`：共享数据类型；`store.rs`：配置持久化
 - `src-tauri/icons/`：应用图标
-- `src/App.test.tsx`：前端回归测试
 
 ## 安全说明
 

@@ -77,9 +77,16 @@ Both `dist/` and `src-tauri/target/` are generated directories and must not be c
 ## Project Structure
 
 - `src/`: React/TypeScript frontend
-- `src-tauri/src/`: Rust backend, Git commands, and Tauri interface
+  - `src/App.tsx`: component composition and global layout; state is managed per domain through hooks
+  - `src/hooks/`: domain hooks (repository list, working-tree snapshot, history, operations, log buffer)
+  - `src/components/`: pane-scoped UI components (repository list, changes, history, branches, stashes, dialogs, toasts, command palette)
+  - `src/lib/`: pure utilities (session-log ring buffer)
+  - `src/types.ts`: shared types and constants; `src/api.ts`: Tauri command wrappers
+  - `src/App.test.tsx`: frontend regression tests
+- `src-tauri/src/`: Rust backend, split by responsibility
+  - `lib.rs`: `AppState` and Tauri command registration; `summary.rs`: repository summary refresh; `repositories.rs`: repository management and settings; `snapshot.rs`: working-tree snapshots/diffs/conflicts; `history.rs`: history and reference queries; `operations.rs`: Git operation engine and validation; `process.rs`: child processes, streams, and locks
+  - `git.rs`: Git process wrapper and output parsing; `models.rs`: shared data types; `store.rs`: persisted settings
 - `src-tauri/icons/`: application icons
-- `src/App.test.tsx`: frontend regression tests
 
 ## Safety
 
