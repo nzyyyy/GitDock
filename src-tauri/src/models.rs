@@ -303,6 +303,59 @@ pub struct SubmoduleInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct FileHistoryEntry {
+    pub oid: String,
+    pub author: String,
+    pub authored_at: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameHunk {
+    pub oid: String,
+    pub author: String,
+    pub author_time: i64,
+    pub start_line: usize,
+    pub line_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameFile {
+    pub path: String,
+    pub content: Vec<String>,
+    pub hunks: Vec<BlameHunk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RebaseCommit {
+    pub oid: String,
+    pub subject: String,
+    pub author: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RebaseAction {
+    Pick,
+    Reword,
+    Squash,
+    Fixup,
+    Drop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RebaseStep {
+    pub oid: String,
+    pub action: RebaseAction,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct OngoingGitState {
     pub kind: OngoingKind,
     pub can_continue: bool,
@@ -428,6 +481,10 @@ pub enum OperationRequest {
     },
     Rebase {
         onto: String,
+    },
+    InteractiveRebase {
+        onto: String,
+        plan: Vec<RebaseStep>,
     },
     CherryPick {
         commits: Vec<String>,

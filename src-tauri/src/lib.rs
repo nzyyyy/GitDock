@@ -11,8 +11,9 @@ mod summary;
 use crate::{
     git::Git,
     history::{
-        compare_branches, export_session_log, get_branches, get_commit_diff, get_history,
-        get_remotes, get_stashes, get_submodules, get_tags, open_repository_file,
+        compare_branches, export_session_log, get_blame, get_branches, get_commit_diff,
+        get_commit_file_diff, get_file_history, get_history, get_rebase_commits, get_remotes,
+        get_stashes, get_submodules, get_tags, open_repository_file,
     },
     models::*,
     operations::{cancel_operation, preview_operation, start_operation},
@@ -168,6 +169,10 @@ pub fn run() {
             get_remotes,
             get_stashes,
             get_submodules,
+            get_rebase_commits,
+            get_file_history,
+            get_commit_file_diff,
+            get_blame,
             preview_operation,
             start_operation,
             cancel_operation
@@ -197,7 +202,7 @@ pub(crate) mod test_util {
         let output = state
             .git()
             .unwrap()
-            .run(cwd, &spec.args, spec.input.as_deref())
+            .run_env(cwd, &spec.args, spec.input.as_deref(), &spec.env)
             .unwrap();
         ensure_success(output).unwrap()
     }

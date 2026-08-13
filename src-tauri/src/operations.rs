@@ -202,9 +202,13 @@ pub(crate) fn start_operation(
     }
 
     let spec = command_spec(&state, repository_id, &inspection.root, &request)?;
-    acquire_lock(&state, &inspection.common_git_dir)?;
+    let cleanup_dir = spec.cleanup_dir.clone();
+    if let Err(error) = acquire_lock(&state, &inspection.common_git_dir) {
+        remove_dir(&cleanup_dir);
+        return Err(error);
+    }
     suppress_watch(&state, repository_id);
-    spawn_git_operation(
+    if let Err(error) = spawn_git_operation(
         &git,
         &inspection.root,
         spec,
@@ -216,12 +220,12 @@ pub(crate) fn start_operation(
         },
         &state,
         app,
-    )
-    .map_err(|error| {
+    ) {
         release_lock(&state, &inspection.common_git_dir);
         resume_watch(&state, repository_id);
-        error
-    })?;
+        remove_dir(&cleanup_dir);
+        return Err(error);
+    }
     Ok(OperationResult {
         operation_id,
         accepted: true,
@@ -237,6 +241,12 @@ fn trash_paths(
         validate_relative_path(path)?;
         delete(&root.join(path))
     })
+}
+
+fn remove_dir(dir: &Option<PathBuf>) {
+    if let Some(dir) = dir {
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 fn resolve_conflict_blocks(
@@ -491,6 +501,14 @@ fn preview(
             vec![],
             true,
         ),
+        OperationRequest::InteractiveRebase { onto, .. } => (
+            "Interactive rebase",
+            "Rewrite the commits in HEAD that are not reachable from the selected base.",
+            RiskLevel::Destructive,
+            vec![],
+            vec![format!("HEAD ({onto}..HEAD)")],
+            false,
+        ),
         _ => (
             operation_title(request),
             "Run the selected Git operation.",
@@ -511,6 +529,135 @@ fn preview(
     })
 }
 
+fn interactive_rebase_spec(
+    onto: &str,
+    plan: &[RebaseStep],
+) -> Result<(Vec<String>, Vec<(String, String)>, PathBuf), String> {
+    let mut todo = String::new();
+    let mut events: Vec<Option<String>> = Vec::new();
+    let mut seen_commit = false;
+    for step in plan {
+        if step.action == RebaseAction::Drop {
+            continue;
+        }
+        if matches!(step.action, RebaseAction::Squash | RebaseAction::Fixup) && !seen_commit {
+            return Err("A squash or fixup step cannot be the first commit".into());
+        }
+        seen_commit = true;
+        match step.action {
+            RebaseAction::Pick => {
+                todo.push_str("pick ");
+                todo.push_str(&step.oid);
+                todo.push('\n');
+            }
+            RebaseAction::Reword => {
+                let message = step
+                    .message
+                    .as_deref()
+                    .ok_or("A reword step requires a message")?;
+                if message.trim().is_empty() {
+                    return Err("A reword step requires a message".into());
+                }
+                todo.push_str("reword ");
+                todo.push_str(&step.oid);
+                todo.push('\n');
+                events.push(Some(message.to_string()));
+            }
+            RebaseAction::Squash => {
+                todo.push_str("squash ");
+                todo.push_str(&step.oid);
+                todo.push('\n');
+                events.push(None);
+            }
+            RebaseAction::Fixup => {
+                todo.push_str("fixup ");
+                todo.push_str(&step.oid);
+                todo.push('\n');
+            }
+            RebaseAction::Drop => unreachable!(),
+        }
+    }
+    if todo.is_empty() {
+        return Err("Interactive rebase has no commits to apply".into());
+    }
+
+    let dir = tempfile::Builder::new()
+        .prefix("gitdock-rebase-")
+        .tempdir()
+        .map_err(|error| error.to_string())?;
+
+    fs::write(dir.path().join("todo"), todo.as_bytes()).map_err(|error| error.to_string())?;
+    let seq_editor = dir.path().join("seq-editor.sh");
+    fs::write(&seq_editor, "#!/bin/sh\ncp \"$GITDOCK_TMP/todo\" \"$1\"\n")
+        .map_err(|error| error.to_string())?;
+    set_executable(&seq_editor)?;
+
+    let mut env = Vec::new();
+    if events.iter().any(Option::is_some) {
+        for (index, event) in events.iter().enumerate() {
+            match event {
+                Some(message) => {
+                    fs::write(dir.path().join(format!("evt.{index}")), "reword")
+                        .map_err(|error| error.to_string())?;
+                    fs::write(dir.path().join(format!("msg.{index}")), message.as_bytes())
+                        .map_err(|error| error.to_string())?;
+                }
+                None => {
+                    fs::write(dir.path().join(format!("evt.{index}")), "keep")
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        fs::write(dir.path().join("counter"), "0").map_err(|error| error.to_string())?;
+        let msg_editor = dir.path().join("msg-editor.sh");
+        fs::write(
+            &msg_editor,
+            "#!/bin/sh\nn=$(cat \"$GITDOCK_TMP/counter\")\nif [ \"$(cat \"$GITDOCK_TMP/evt.$n\")\" = reword ]; then\n  cat \"$GITDOCK_TMP/msg.$n\" > \"$1\"\nfi\necho $((n+1)) > \"$GITDOCK_TMP/counter\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        set_executable(&msg_editor)?;
+        env.push((
+            "GIT_EDITOR".into(),
+            msg_editor.to_string_lossy().into_owned(),
+        ));
+    }
+
+    env.push((
+        "GIT_SEQUENCE_EDITOR".into(),
+        seq_editor.to_string_lossy().into_owned(),
+    ));
+    env.push((
+        "GITDOCK_TMP".into(),
+        dir.path().to_string_lossy().into_owned(),
+    ));
+
+    // Keep the TempDir alive: the spawned Git process needs the helper scripts.
+    // The operation runner removes this directory after the process exits.
+    let dir_path = dir.keep();
+    Ok((
+        vec!["rebase".into(), "-i".into(), onto.into()],
+        env,
+        dir_path,
+    ))
+}
+
+fn set_executable(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).map_err(|error| error.to_string())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 pub(crate) fn command_spec(
     state: &AppState,
     repository_id: RepositoryId,
@@ -518,6 +665,8 @@ pub(crate) fn command_spec(
     request: &OperationRequest,
 ) -> Result<crate::process::CommandSpec, String> {
     let mut input = None;
+    let mut env = Vec::new();
+    let mut cleanup_dir = None;
     let args: Vec<String> = match request {
         OperationRequest::StageFiles { paths } => with_paths(&["add"], paths),
         OperationRequest::UnstageFiles { paths } => with_paths(&["reset", "--quiet"], paths),
@@ -658,6 +807,12 @@ pub(crate) fn command_spec(
             a
         }
         OperationRequest::Rebase { onto } => strings(&["rebase", onto]),
+        OperationRequest::InteractiveRebase { onto, plan } => {
+            let (args, spec_env, dir) = interactive_rebase_spec(onto, plan)?;
+            env = spec_env;
+            cleanup_dir = Some(dir);
+            args
+        }
         OperationRequest::CherryPick { commits } => {
             let mut a = strings(&["cherry-pick"]);
             a.extend(commits.clone());
@@ -750,7 +905,12 @@ pub(crate) fn command_spec(
         OperationRequest::TrashUntracked { .. }
         | OperationRequest::ResolveConflictBlocks { .. } => unreachable!(),
     };
-    Ok(crate::process::CommandSpec { args, input })
+    Ok(crate::process::CommandSpec {
+        args,
+        input,
+        env,
+        cleanup_dir,
+    })
 }
 
 fn validate_request(git: &Git, cwd: &Path, request: &OperationRequest) -> Result<(), String> {
@@ -790,6 +950,24 @@ fn validate_request(git: &Git, cwd: &Path, request: &OperationRequest) -> Result
             .try_for_each(|oid| verify_commit(git, cwd, oid)),
         OperationRequest::ForcePushWithLease { expected_oid, .. } => {
             verify_oid(git, cwd, expected_oid)
+        }
+        OperationRequest::InteractiveRebase { onto, plan } => {
+            verify_commit(git, cwd, onto)?;
+            let range = git.text(cwd, &["rev-list", "--topo-order", &format!("{onto}..HEAD")])?;
+            let allowed: HashSet<&str> = range.split_whitespace().collect();
+            let mut seen: HashSet<&str> = HashSet::new();
+            for step in plan {
+                verify_commit(git, cwd, &step.oid)?;
+                if !seen.insert(step.oid.as_str()) {
+                    return Err("The rebase plan lists a commit more than once".into());
+                }
+                if !allowed.contains(step.oid.as_str()) {
+                    return Err(
+                        "The rebase plan contains a commit outside the selected range".into(),
+                    );
+                }
+            }
+            Ok(())
         }
         _ => Ok(()),
     }
@@ -1103,6 +1281,14 @@ mod tests {
             OperationRequest::Rebase {
                 onto: "main".into(),
             },
+            OperationRequest::InteractiveRebase {
+                onto: "main".into(),
+                plan: vec![RebaseStep {
+                    oid: "a".repeat(40),
+                    action: RebaseAction::Pick,
+                    message: None,
+                }],
+            },
             OperationRequest::CherryPick {
                 commits: vec!["a".repeat(40)],
             },
@@ -1164,7 +1350,7 @@ mod tests {
                 path: Some("a".into()),
             },
         ];
-        assert_eq!(requests.len(), 37);
+        assert_eq!(requests.len(), 38);
         for request in requests {
             let spec = command_spec(&state, 1, dir.path(), &request).unwrap();
             assert!(!spec.args.is_empty(), "missing command for {request:?}");
@@ -2294,5 +2480,97 @@ mod tests {
         .err()
         .unwrap();
         assert!(error.contains("changed after it was displayed"));
+    }
+
+    #[test]
+    fn interactive_rebase_reorders_rewords_and_fixups() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        commit_file(&git, dir.path(), "base", "base\n", "base");
+        let base = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        commit_file(&git, dir.path(), "a", "a\n", "A");
+        let a = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        commit_file(&git, dir.path(), "b", "b\n", "B");
+        let b = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        commit_file(&git, dir.path(), "c", "c\n", "C");
+        let c = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        let state = test_state(git.clone(), dir.path().join("config.json"));
+
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::InteractiveRebase {
+                onto: base,
+                plan: vec![
+                    RebaseStep {
+                        oid: c,
+                        action: RebaseAction::Reword,
+                        message: Some("C rewritten".into()),
+                    },
+                    RebaseStep {
+                        oid: a,
+                        action: RebaseAction::Pick,
+                        message: None,
+                    },
+                    RebaseStep {
+                        oid: b,
+                        action: RebaseAction::Fixup,
+                        message: None,
+                    },
+                ],
+            },
+        );
+        let subjects = git.text(dir.path(), &["log", "--format=%s"]).unwrap();
+        assert_eq!(subjects, "A\nC rewritten\nbase");
+        assert!(dir.path().join("a").exists());
+        assert!(dir.path().join("b").exists());
+        assert!(dir.path().join("c").exists());
+    }
+
+    #[test]
+    fn interactive_rebase_squashes_and_drops() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        commit_file(&git, dir.path(), "base", "base\n", "base");
+        let base = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        commit_file(&git, dir.path(), "a", "a\n", "A");
+        let a = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        commit_file(&git, dir.path(), "b", "b\n", "B");
+        let b = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        commit_file(&git, dir.path(), "c", "c\n", "C");
+        let c = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        let state = test_state(git.clone(), dir.path().join("config.json"));
+
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::InteractiveRebase {
+                onto: base,
+                plan: vec![
+                    RebaseStep {
+                        oid: a,
+                        action: RebaseAction::Pick,
+                        message: None,
+                    },
+                    RebaseStep {
+                        oid: c,
+                        action: RebaseAction::Squash,
+                        message: None,
+                    },
+                    RebaseStep {
+                        oid: b,
+                        action: RebaseAction::Drop,
+                        message: None,
+                    },
+                ],
+            },
+        );
+        let subjects = git.text(dir.path(), &["log", "--format=%s"]).unwrap();
+        assert_eq!(subjects, "A\nbase");
+        assert!(!dir.path().join("b").exists());
+        assert!(dir.path().join("a").exists());
+        assert!(dir.path().join("c").exists());
     }
 }

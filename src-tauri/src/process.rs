@@ -35,6 +35,8 @@ pub(crate) enum OperationContext {
 pub(crate) struct CommandSpec {
     pub(crate) args: Vec<String>,
     pub(crate) input: Option<Vec<u8>>,
+    pub(crate) env: Vec<(String, String)>,
+    pub(crate) cleanup_dir: Option<PathBuf>,
 }
 
 pub(crate) fn acquire_lock(state: &AppState, common: &Path) -> Result<(), String> {
@@ -76,6 +78,12 @@ pub(crate) fn spawn_git_operation(
     state: &State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let CommandSpec {
+        args,
+        input,
+        env,
+        cleanup_dir,
+    } = spec;
     let repository_id = match &context {
         OperationContext::Repository { repository_id, .. } => Some(*repository_id),
         OperationContext::Clone { .. } => None,
@@ -83,16 +91,19 @@ pub(crate) fn spawn_git_operation(
     let mut command = Command::new(&git.path);
     command
         .current_dir(cwd)
-        .args(&spec.args)
+        .args(&args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
-        .stdin(if spec.input.is_some() {
+        .stdin(if input.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (key, value) in &env {
+        command.env(key, value);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -101,7 +112,7 @@ pub(crate) fn spawn_git_operation(
     let mut child = command
         .spawn()
         .map_err(|e| format!("Cannot start Git: {e}"))?;
-    if let Some(input) = spec.input {
+    if let Some(input) = input {
         if let Err(error) = child
             .stdin
             .take()
@@ -250,6 +261,9 @@ pub(crate) fn spawn_git_operation(
                     running.remove(&operation_id);
                 }
             }
+        }
+        if let Some(dir) = cleanup_dir {
+            let _ = std::fs::remove_dir_all(dir);
         }
     });
     Ok(())

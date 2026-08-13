@@ -96,13 +96,27 @@ impl Git {
     }
 
     pub fn run(&self, cwd: &Path, args: &[String], input: Option<&[u8]>) -> Result<Output, String> {
+        self.run_env(cwd, args, input, &[])
+    }
+
+    pub fn run_env(
+        &self,
+        cwd: &Path,
+        args: &[String],
+        input: Option<&[u8]>,
+        env: &[(String, String)],
+    ) -> Result<Output, String> {
         let mut command = Command::new(&self.path);
         command
             .current_dir(cwd)
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_EDITOR", "true")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for (key, value) in env {
+            command.env(key, value);
+        }
         command.stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -515,6 +529,78 @@ impl Git {
                 active_lanes,
             }),
         })
+    }
+
+    pub fn rebase_commits(&self, cwd: &Path, onto: &str) -> Result<Vec<RebaseCommit>, String> {
+        let output = self.run(
+            cwd,
+            &[
+                "log".into(),
+                "--reverse".into(),
+                "--format=%H%x1f%s%x1f%an%x1e".into(),
+                format!("{onto}..HEAD"),
+            ],
+            None,
+        )?;
+        if !output.status.success() {
+            return Err(error_text(&output));
+        }
+        Ok(parse_rebase_commits(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
+    }
+
+    pub fn file_history(&self, cwd: &Path, path: &str) -> Result<Vec<FileHistoryEntry>, String> {
+        let output = self.run(
+            cwd,
+            &[
+                "log".into(),
+                "--follow".into(),
+                "-n".into(),
+                "500".into(),
+                "--format=%H%x1f%an%x1f%aI%x1f%s%x1e".into(),
+                "--".into(),
+                path.into(),
+            ],
+            None,
+        )?;
+        if !output.status.success() {
+            return Err(error_text(&output));
+        }
+        Ok(parse_file_history(&String::from_utf8_lossy(&output.stdout)))
+    }
+
+    pub fn commit_file_diff(&self, cwd: &Path, oid: &str, path: &str) -> Result<String, String> {
+        let output = ensure_success(self.run(
+            cwd,
+            &[
+                "show".into(),
+                "--format=".into(),
+                "--no-ext-diff".into(),
+                "--no-color".into(),
+                oid.into(),
+                "--".into(),
+                path.into(),
+            ],
+            None,
+        )?)?;
+        let patch = String::from_utf8_lossy(&output.stdout).to_string();
+        if patch.len() > MAX_DIFF_BYTES || patch.lines().count() > MAX_DIFF_LINES {
+            return Err("This file diff is too large".into());
+        }
+        Ok(patch)
+    }
+
+    pub fn blame(&self, cwd: &Path, path: &str) -> Result<BlameFile, String> {
+        let output = self.run(cwd, &strings(&["blame", "--porcelain", "--", path]), None)?;
+        if !output.status.success() {
+            return Err(error_text(&output));
+        }
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        if text.len() > MAX_DIFF_BYTES || text.lines().count() > MAX_DIFF_LINES {
+            return Err("This file is too large for blame".into());
+        }
+        parse_blame(path, &text)
     }
 
     pub fn branches(&self, cwd: &Path) -> Result<Vec<BranchInfo>, String> {
@@ -969,6 +1055,93 @@ fn split_hunks(snapshot_id: u64, path: &str, staged: bool, patch: &str) -> Vec<D
                 header: hunk_header,
                 patch: complete,
             }
+        })
+        .collect()
+}
+
+fn parse_file_history(text: &str) -> Vec<FileHistoryEntry> {
+    text.split('\x1e')
+        .filter_map(|record| {
+            let record = record.trim_matches('\n');
+            if record.is_empty() {
+                return None;
+            }
+            let mut p = record.splitn(4, '\x1f');
+            Some(FileHistoryEntry {
+                oid: p.next()?.into(),
+                author: p.next()?.into(),
+                authored_at: p.next()?.into(),
+                subject: p.next().unwrap_or_default().into(),
+            })
+        })
+        .collect()
+}
+
+fn parse_blame(path: &str, text: &str) -> Result<BlameFile, String> {
+    let mut content = Vec::new();
+    let mut hunks: Vec<BlameHunk> = Vec::new();
+    let mut current: Option<BlameHunk> = None;
+
+    for line in text.lines() {
+        if let Some(code) = line.strip_prefix('\t') {
+            content.push(code.to_string());
+            if let Some(hunk) = current.as_mut() {
+                hunk.line_count += 1;
+            }
+            continue;
+        }
+        if line.len() >= 40
+            && line.as_bytes().get(40).is_some_and(|b| *b == b' ')
+            && line[..40].bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            if let Some(previous) = current.take() {
+                hunks.push(previous);
+            }
+            let final_line = line[41..]
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .ok_or("Invalid blame header")?;
+            current = Some(BlameHunk {
+                oid: line[..40].to_string(),
+                author: String::new(),
+                author_time: 0,
+                start_line: final_line,
+                line_count: 0,
+            });
+            continue;
+        }
+        if let Some(hunk) = current.as_mut() {
+            if let Some(name) = line.strip_prefix("author ") {
+                hunk.author = name.to_string();
+            } else if let Some(time) = line.strip_prefix("author-time ") {
+                hunk.author_time = time.parse().unwrap_or(0);
+            }
+        }
+    }
+    if let Some(previous) = current {
+        hunks.push(previous);
+    }
+    Ok(BlameFile {
+        path: path.to_string(),
+        content,
+        hunks,
+    })
+}
+
+fn parse_rebase_commits(text: &str) -> Vec<RebaseCommit> {
+    text.split('\x1e')
+        .filter_map(|record| {
+            let record = record.trim_matches('\n');
+            if record.is_empty() {
+                return None;
+            }
+            let mut p = record.splitn(3, '\x1f');
+            Some(RebaseCommit {
+                oid: p.next()?.into(),
+                subject: p.next()?.into(),
+                author: p.next().unwrap_or_default().into(),
+            })
         })
         .collect()
 }
@@ -1911,5 +2084,39 @@ mod tests {
             )
             .unwrap();
         assert!(!output.status.success());
+    }
+
+    #[test]
+    fn file_history_lists_commits_for_a_path() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "one\n", "one");
+        let second = commit_file(&git, dir.path(), "two\n", "two");
+
+        let entries = git.file_history(dir.path(), "file.txt").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].oid, second);
+        assert_eq!(entries[0].subject, "two");
+        assert_eq!(entries[1].subject, "one");
+    }
+
+    #[test]
+    fn blame_attributes_each_line_to_a_commit() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        let first = commit_file(&git, dir.path(), "a\nb\n", "first");
+        let second = commit_file(&git, dir.path(), "a\nc\n", "second");
+
+        let blame = git.blame(dir.path(), "file.txt").unwrap();
+        assert_eq!(blame.content, vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(blame.hunks.len(), 2);
+        assert_eq!(blame.hunks[0].oid, first);
+        assert_eq!(blame.hunks[0].start_line, 1);
+        assert_eq!(blame.hunks[0].line_count, 1);
+        assert_eq!(blame.hunks[1].oid, second);
+        assert_eq!(blame.hunks[1].start_line, 2);
+        assert_eq!(blame.hunks[1].line_count, 1);
     }
 }

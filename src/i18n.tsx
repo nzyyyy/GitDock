@@ -38,6 +38,8 @@ const en = {
   recoverable: "Git can usually recover this change.", unrecoverable: "GitDock cannot recover this change.", closeOperations: "Git operation(s) are still running. Cancel them and quit?",
   removeRepositoryConfirm: "from GitDock? Files on disk are not changed.", fetchBeforeForce: "before force pushing.", operationSucceeded: "Succeeded",
   operationFailed: "Failed", operationCancelled: "Cancelled", dismissNotification: "Dismiss notification",
+  interactiveRebase: "Interactive rebase", startRebase: "Start rebase", onto: "Rebase onto", pick: "Pick", reword: "Reword", squash: "Squash", fixup: "Fixup",
+  rewordMessage: "New message", noCommitsToRebase: "No commits to rebase onto this base", fileHistory: "File history", blame: "Blame", historyOf: "History of", blameOf: "Blame of", author: "Author", noHistory: "No history for this file",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -78,6 +80,8 @@ const zh: Record<MessageKey, string> = {
   recoverable: "Git 通常可以恢复此更改。", unrecoverable: "GitDock 无法恢复此更改。", closeOperations: "个 Git 操作仍在运行。取消并退出？",
   removeRepositoryConfirm: "从 GitDock 移除？磁盘文件不会改变。", fetchBeforeForce: "后再强制推送。", operationSucceeded: "操作成功",
   operationFailed: "操作失败", operationCancelled: "操作已取消", dismissNotification: "关闭通知",
+  interactiveRebase: "交互式变基", startRebase: "开始变基", onto: "变基目标", pick: "保留", reword: "改写提交信息", squash: "压缩", fixup: "修复",
+  rewordMessage: "新的提交信息", noCommitsToRebase: "该基础上没有可变基的提交", fileHistory: "文件历史", blame: "追溯", historyOf: "历史：", blameOf: "追溯：", author: "作者", noHistory: "该文件没有历史记录",
 };
 
 const dictionaries: Record<Language, Record<MessageKey, string>> = { en, "zh-CN": zh };

@@ -172,6 +172,58 @@ pub(crate) fn get_commit_diff(
 }
 
 #[tauri::command]
+pub(crate) fn get_rebase_commits(
+    repository_id: RepositoryId,
+    onto: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<RebaseCommit>, String> {
+    let git = state.git()?;
+    let record = state.record(repository_id)?;
+    let cwd = Path::new(&record.path);
+    verify_commit(&git, cwd, &onto)?;
+    git.rebase_commits(cwd, &onto)
+}
+
+#[tauri::command]
+pub(crate) fn get_file_history(
+    repository_id: RepositoryId,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<FileHistoryEntry>, String> {
+    validate_relative_path(&path)?;
+    let git = state.git()?;
+    let record = state.record(repository_id)?;
+    git.file_history(Path::new(&record.path), &path)
+}
+
+#[tauri::command]
+pub(crate) fn get_commit_file_diff(
+    repository_id: RepositoryId,
+    oid: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    validate_relative_path(&path)?;
+    let git = state.git()?;
+    let record = state.record(repository_id)?;
+    let cwd = Path::new(&record.path);
+    verify_commit(&git, cwd, &oid)?;
+    git.commit_file_diff(cwd, &oid, &path)
+}
+
+#[tauri::command]
+pub(crate) fn get_blame(
+    repository_id: RepositoryId,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<BlameFile, String> {
+    validate_relative_path(&path)?;
+    let git = state.git()?;
+    let record = state.record(repository_id)?;
+    git.blame(Path::new(&record.path), &path)
+}
+
+#[tauri::command]
 pub(crate) fn compare_branches(
     repository_id: RepositoryId,
     base: String,

@@ -7,6 +7,9 @@ import { I18nProvider, translate } from "./i18n";
 import { readLogs } from "./lib/logBuffer";
 import { BranchCanvas, MemoBranchesPane } from "./components/BranchesPane";
 import { MemoChangesOverview, MemoChangesPane } from "./components/ChangesPane";
+import { BlameView } from "./components/BlameView";
+import { FileHistoryView } from "./components/FileHistoryView";
+import { InteractiveRebase } from "./components/InteractiveRebase";
 import { CommandPalette } from "./components/CommandPalette";
 import { MemoHistoryCanvas, MemoHistoryPane } from "./components/HistoryPane";
 import { EmptyState, MemoRepositoryRow, RailMark, RowMenu } from "./components/RepositoryPane";
@@ -14,6 +17,7 @@ import { MemoStashesPane, StashCanvas } from "./components/StashesPane";
 import { ConfirmDialog, FormDialog } from "./components/dialogs";
 import { ToastStack } from "./components/toast";
 import { useHistory } from "./hooks/useHistory";
+import { useFileInspection } from "./hooks/useFileInspection";
 import { useLogBuffer } from "./hooks/useLogBuffer";
 import { useOperations } from "./hooks/useOperations";
 import { useRepositoryList } from "./hooks/useRepositoryList";
@@ -33,6 +37,7 @@ export default function App() {
   const [outputHeight, setOutputHeight] = useState(190);
   const [language, setLanguage] = useState<Language>("en");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [rebaseDialog, setRebaseDialog] = useState<number>();
   const selectedIdRef = useRef<number | undefined>(undefined);
   selectedIdRef.current = selectedId;
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
@@ -45,9 +50,11 @@ export default function App() {
   const workingTree = useWorkingTree({ reportError, selectedIdRef, historyRepositoryRef: history.historyRepositoryRef, selectedId, language });
   const list = useRepositoryList({ reportError, selectedIdRef, setSnapshot: workingTree.setSnapshot, refreshStatus: workingTree.refreshStatus, t, language });
   const operations = useOperations({ pushLog, reportError, t, showDialog, setSelectedId, setOutputOpen, refreshRepositories: list.refreshRepositories, refreshHistory: history.refreshHistory, selectedId, selectedIdRef, historyRepositoryRef: history.historyRepositoryRef });
+  const fileInspection = useFileInspection({ reportError, selectedId, selectedIdRef });
 
   const { repositories, setRepositories, setCustomGroups, filter, setFilter, collapsedGroups, setCollapsedGroups, draggingRepositoryId, dropTargetGroup, refreshRepositories, repositoryGroups, moveRepository, moveRepositoryBy, addGroup, updateGroup, acceptRepositoryDrop, hintRepositoryDrop, clearRepositoryDropHint } = list;
-  const { snapshot, setSnapshot, diff, conflict, setConflict, diffMode, setDiffMode, selectedCommit, statusRequest, refreshStatus, openDiff, closeDiff, loadIgnored, openCommit, showBranchDiff } = workingTree;
+  const { snapshot, setSnapshot, diff, conflict, setConflict, diffMode, setDiffMode, selectedCommit, diffIsFile, statusRequest, refreshStatus, openDiff, closeDiff, loadIgnored, openCommit, showBranchDiff } = workingTree;
+  const { view: fileView, path: filePath, entries: fileHistoryEntries, selectedOid: fileHistoryOid, diff: fileDiff, blameFile, openFileHistory, openBlame, selectHistoryOid, close: closeFileView } = fileInspection;
   const { commits, historyLoading, hasMore, loadMoreHistory } = history;
   const { pending, setPending, confirmPending, busyOperations, toasts, dismissToast, run } = operations;
 
@@ -192,6 +199,7 @@ export default function App() {
     command("force-push", "forcePush", forcePush, Boolean(selected?.capabilities.canManageRemotes && selected.branch)),
     command("upstream", "setUpstream", () => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } }), Boolean(selected?.branch)),
     command("cherry-pick", "cherryPickCommits", () => showDialog({ title: t("cherryPickCommits"), fields: [{ name: "commits", label: t("commitOids"), required: true }], onSubmit: ({ commits }) => run({ type: "cherryPick", commits: String(commits).trim().split(/\s+/) }) }), Boolean(selected?.capabilities.canWriteWorkTree)),
+    command("interactive-rebase", "interactiveRebase", () => { if (selectedId) setRebaseDialog(selectedId); }, Boolean(selected?.capabilities.canWriteWorkTree)),
     command("undo", "undoCommit", () => { void run({ type: "undoLastCommit" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
     command("rename", "renameEntry", () => showDialog({ title: t("renameEntry"), fields: [{ name: "name", label: t("repositoryName"), value: selected?.name, required: true }], onSubmit: ({ name }) => updateSelected({ name: String(name).trim() }) }), Boolean(selected)),
     command("favorite", selected?.favorite ? "removeFavorite" : "addFavorite", () => { void updateSelected({ favorite: !selected?.favorite }); }, Boolean(selected)),
@@ -239,12 +247,12 @@ export default function App() {
 
         <div className="work-area" style={{ gridTemplateColumns: `minmax(480px, 1fr) ${rightWidth}px` }}>
           <section className="canvas">
-            {conflict ? <ConflictEditor key={conflict.id} document={conflict} onBack={closeDiff} onResolve={resolveConflict} /> : diff ? <MemoDiffView diff={diff} snapshotId={snapshot?.id} mode={diffMode} onModeChange={setDiffMode} onBack={closeDiff} onRun={run} /> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
+            {conflict ? <ConflictEditor key={conflict.id} document={conflict} onBack={closeDiff} onResolve={resolveConflict} /> : fileView === "history" && filePath ? <FileHistoryView path={filePath} entries={fileHistoryEntries} selectedOid={fileHistoryOid} diff={fileDiff} onBack={closeFileView} onSelect={selectHistoryOid} /> : fileView === "blame" && blameFile ? <BlameView blame={blameFile} onBack={closeFileView} /> : diff ? <MemoDiffView diff={diff} snapshotId={snapshot?.id} mode={diffMode} onModeChange={setDiffMode} onBack={closeDiff} onRun={run} fileActions={diffIsFile} onFileHistory={openFileHistory} onBlame={openBlame} /> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
           </section>
           <aside className="tool-pane"><div className="resize-handle resize-right" onPointerDown={(event) => beginResize("right", event)} />
-            {tab === "changes" && <MemoChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={openRepositoryFile} onLoadIgnored={loadIgnored} onRun={run} />}
+            {tab === "changes" && <MemoChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={openRepositoryFile} onLoadIgnored={loadIgnored} onRun={run} onFileHistory={openFileHistory} onBlame={openBlame} />}
             {tab === "history" && <MemoHistoryPane commits={commits} selectedOid={selectedCommit} loading={historyLoading} hasMore={hasMore} onLoadMore={loadMoreHistory} onSelect={openCommit} onRun={run} />}
-            {tab === "branches" && <MemoBranchesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onDiff={showBranchDiff} onError={reportError} />}
+            {tab === "branches" && <MemoBranchesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onDiff={showBranchDiff} onError={reportError} onInteractiveRebase={() => selectedId && setRebaseDialog(selectedId)} />}
             {tab === "stashes" && <MemoStashesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onError={reportError} />}
           </aside>
         </div>
@@ -255,6 +263,7 @@ export default function App() {
       {pending && <ConfirmDialog pending={pending} onCancel={() => { pending.onFinished?.("cancelled"); setPending(undefined); }} onConfirm={confirmPending} />}
       {toastStack}
       {paletteOpen && <CommandPalette items={commands} onClose={() => setPaletteOpen(false)} />}
+      {rebaseDialog && <InteractiveRebase repositoryId={rebaseDialog} onClose={() => setRebaseDialog(undefined)} onRun={run} />}
       {dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}
     </div></I18nProvider>
   );

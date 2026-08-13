@@ -35,6 +35,12 @@ export interface TagInfo { name: string; oid: string; subject: string }
 export interface RemoteInfo { name: string; fetchUrl: string; pushUrl: string }
 export interface StashInfo { index: number; oid: string; subject: string }
 export interface SubmoduleInfo { path: string; oid: string; initialized: boolean; state: string }
+export type RebaseAction = "pick" | "reword" | "squash" | "fixup" | "drop";
+export interface RebaseStep { oid: string; action: RebaseAction; message?: string }
+export interface RebaseCommit { oid: string; subject: string; author: string }
+export interface FileHistoryEntry { oid: string; author: string; authoredAt: string; subject: string }
+export interface BlameHunk { oid: string; author: string; authorTime: number; startLine: number; lineCount: number }
+export interface BlameFile { path: string; content: string[]; hunks: BlameHunk[] }
 export interface OperationPreview { title: string; summary: string; risk: RiskLevel; affectedPaths: string[]; affectedRefs: string[]; recoverable: boolean; requiresConfirmation: boolean }
 export interface OperationEvent { operationId: number; repositoryId?: number | null; kind: "started" | "stdout" | "stderr" | "finished"; message: string; exitCode?: number; outcome?: "succeeded" | "failed" | "cancelled" }
 export interface OperationResult { operationId: number; accepted: boolean }
@@ -70,6 +76,10 @@ export const api = {
   remotes: (repositoryId: number) => invoke<RemoteInfo[]>("get_remotes", { repositoryId }),
   stashes: (repositoryId: number) => invoke<StashInfo[]>("get_stashes", { repositoryId }),
   submodules: (repositoryId: number) => invoke<SubmoduleInfo[]>("get_submodules", { repositoryId }),
+  rebaseCommits: (repositoryId: number, onto: string) => invoke<RebaseCommit[]>("get_rebase_commits", { repositoryId, onto }),
+  fileHistory: (repositoryId: number, path: string) => invoke<FileHistoryEntry[]>("get_file_history", { repositoryId, path }),
+  commitFileDiff: (repositoryId: number, oid: string, path: string) => invoke<string>("get_commit_file_diff", { repositoryId, oid, path }),
+  blame: (repositoryId: number, path: string) => invoke<BlameFile>("get_blame", { repositoryId, path }),
   preview: (repositoryId: number, request: OperationRequest) => invoke<OperationPreview>("preview_operation", { repositoryId, request }),
   start: (repositoryId: number, request: OperationRequest, confirmed = false) => invoke<OperationResult>("start_operation", { repositoryId, request, confirmed }),
   cancel: (operationId: number) => invoke<void>("cancel_operation", { operationId }),

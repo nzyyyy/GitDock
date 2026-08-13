@@ -148,6 +148,8 @@ pub(crate) fn clone_repository(
                 destination_path.to_string_lossy().into(),
             ],
             input: None,
+            env: Vec::new(),
+            cleanup_dir: None,
         },
         operation_id,
         "Clone repository",

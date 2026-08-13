@@ -18,6 +18,7 @@ export function useWorkingTree({
   const [conflict, setConflict] = useState<ConflictDocument & { snapshotId: number }>();
   const [diffMode, setDiffMode] = useState<DiffMode>("unified");
   const [selectedCommit, setSelectedCommit] = useState<string>();
+  const [diffIsFile, setDiffIsFile] = useState(false);
   const statusRequest = useRef(0);
 
   const refreshStatus = useCallback(async (repositoryId = selectedIdRef.current, includeIgnored = false) => {
@@ -39,16 +40,16 @@ export function useWorkingTree({
     try {
       if (file.conflict) {
         const document = await api.conflictDocument(repositoryId, snapshotId, file.path);
-        if (selectedIdRef.current === repositoryId) { setConflict({ ...document, snapshotId }); setDiff(undefined); }
+        if (selectedIdRef.current === repositoryId) { setConflict({ ...document, snapshotId }); setDiff(undefined); setDiffIsFile(false); }
       } else {
         const nextDiff = await api.diff(repositoryId, snapshotId, file.path, staged);
-        if (selectedIdRef.current === repositoryId) { setDiff(nextDiff); setConflict(undefined); }
+        if (selectedIdRef.current === repositoryId) { setDiff(nextDiff); setConflict(undefined); setDiffIsFile(true); }
       }
     }
     catch (error) { reportError(errorMessage(error)); }
   }, [selectedId, snapshot, reportError, selectedIdRef]);
 
-  const closeDiff = useCallback(() => { setDiff(undefined); setConflict(undefined); }, []);
+  const closeDiff = useCallback(() => { setDiff(undefined); setConflict(undefined); setDiffIsFile(false); }, []);
   const loadIgnored = useCallback(() => refreshStatus(selectedId, true), [selectedId, refreshStatus]);
 
   const openCommit = useCallback(async (oid: string) => {
@@ -56,6 +57,7 @@ export function useWorkingTree({
     const repositoryId = selectedId;
     setSelectedCommit(oid);
     setConflict(undefined);
+    setDiffIsFile(false);
     try {
       const patch = await api.commitDiff(repositoryId, oid);
       if (historyRepositoryRef.current === repositoryId) setDiff({ path: translate(language, "commitDiff"), staged: false, binary: false, tooLarge: false, patch, hunks: [] });
@@ -65,11 +67,12 @@ export function useWorkingTree({
 
   const showBranchDiff = useCallback((value: string) => {
     setConflict(undefined);
+    setDiffIsFile(false);
     setDiff({ path: translate(language, "branchComparison"), staged: false, binary: false, tooLarge: false, patch: value, hunks: [] });
   }, [language]);
 
   return {
-    snapshot, setSnapshot, diff, conflict, setConflict, diffMode, setDiffMode, selectedCommit, setSelectedCommit,
+    snapshot, setSnapshot, diff, conflict, setConflict, diffMode, setDiffMode, selectedCommit, setSelectedCommit, diffIsFile,
     statusRequest, refreshStatus, openDiff, closeDiff, loadIgnored, openCommit, showBranchDiff,
   };
 }

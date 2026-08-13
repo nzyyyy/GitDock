@@ -89,7 +89,16 @@ export function useRepositoryList({
       if (!named.has(key) && key !== FAVORITES_GROUP && key !== UNGROUPED_GROUP) named.set(key, []);
     }
     const namedGroups = [...named.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => {
+        const leftIndex = customGroups.indexOf(left);
+        const rightIndex = customGroups.indexOf(right);
+        if (leftIndex !== -1 || rightIndex !== -1) {
+          if (leftIndex === -1) return 1;
+          if (rightIndex === -1) return -1;
+          return leftIndex - rightIndex;
+        }
+        return left.localeCompare(right);
+      })
       .map(([key, items]) => ({ key, label: key, repositories: items }));
     return [
       { key: FAVORITES_GROUP, label: t("favorites"), repositories: favorites },
