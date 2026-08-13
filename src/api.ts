@@ -12,6 +12,7 @@ export interface RepositorySummary {
   capabilities: RepositoryCapabilities; branch?: string; headOid?: string; changedCount: number; conflictCount: number;
   ahead: number; behind: number; lastCommit?: string; ongoing?: OngoingGitState; error?: string;
 }
+export interface RepositoryRefresh { summary: RepositorySummary; snapshot?: WorkingTreeSnapshot }
 export interface RepositoryRecord { id: number; path: string; name: string; group?: string; favorite: boolean; order: number }
 export interface RepositoryPlacement { id: number; group?: string; favorite: boolean; order: number }
 export interface Bootstrap { git: GitInfo; settings: { selectedRepositoryId?: number; leftWidth: number; rightWidth: number; outputHeight: number; language?: Language }; repositories: RepositorySummary[] }
@@ -43,7 +44,7 @@ export type OperationRequest = { type: string; [key: string]: unknown };
 export const api = {
   bootstrap: () => invoke<Bootstrap>("bootstrap"),
   refreshRepositories: (activeRepositoryId?: number) => invoke<RepositorySummary[]>("refresh_repositories", { activeRepositoryId }),
-  refreshRepository: (repositoryId: number) => invoke<RepositorySummary>("refresh_repository", { repositoryId }),
+  refreshRepository: (repositoryId: number) => invoke<RepositoryRefresh>("refresh_repository", { repositoryId }),
   addRepository: (path: string) => invoke<RepositorySummary>("add_repository", { path }),
   initRepository: (path: string) => invoke<RepositorySummary>("initialize_repository", { path }),
   cloneRepository: (url: string, destination: string) => invoke<OperationResult>("clone_repository", { url, destination }),

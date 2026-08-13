@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -74,6 +74,8 @@ export default function App() {
   const [filter, setFilter] = useState("");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const draggingRepositoryId = useRef<number | undefined>(undefined);
+  const dropTargetGroup = useRef<HTMLElement | undefined>(undefined);
+  const dropTargetRow = useRef<HTMLElement | undefined>(undefined);
   const [leftWidth, setLeftWidth] = useState(240);
   const [rightWidth, setRightWidth] = useState(360);
   const [outputHeight, setOutputHeight] = useState(190);
@@ -114,19 +116,6 @@ export default function App() {
     catch (error) { if (request === repositoryListRequest.current) { pushLog("error", errorMessage(error)); setOutputOpen(true); } }
   }, [pushLog]);
 
-  const refreshRepository = useCallback(async (repositoryId: number) => {
-    const request = (repositoryRequests.current.get(repositoryId) ?? 0) + 1;
-    repositoryRequests.current.set(repositoryId, request);
-    try {
-      const repository = await api.refreshRepository(repositoryId);
-      if (repositoryRequests.current.get(repositoryId) !== request) return;
-      setRepositories((current) => current.map((item) => item.id === repositoryId ? repository : item));
-    } catch (error) {
-      if (repositoryRequests.current.get(repositoryId) !== request) return;
-      pushLog("error", errorMessage(error)); setOutputOpen(true);
-    }
-  }, [pushLog]);
-
   const refreshStatus = useCallback(async (repositoryId = selectedIdRef.current, includeIgnored = false) => {
     if (!repositoryId) return;
     const request = ++statusRequest.current;
@@ -138,6 +127,27 @@ export default function App() {
       setSnapshot(undefined); pushLog("error", errorMessage(error)); setOutputOpen(true);
     }
   }, [pushLog]);
+
+  const refreshRepository = useCallback(async (repositoryId: number) => {
+    const request = (repositoryRequests.current.get(repositoryId) ?? 0) + 1;
+    repositoryRequests.current.set(repositoryId, request);
+    try {
+      const refresh = await api.refreshRepository(repositoryId);
+      if (repositoryRequests.current.get(repositoryId) !== request) return;
+      const selected = repositoryId === selectedIdRef.current;
+      startTransition(() => {
+        setRepositories((current) => current.map((item) => item.id === repositoryId ? refresh.summary : item));
+        if (selected) {
+          if (refresh.snapshot) setSnapshot((current) => repositoryId === selectedIdRef.current ? refresh.snapshot : current);
+          else if (refresh.summary.kind !== "workTree") setSnapshot((current) => repositoryId === selectedIdRef.current ? undefined : current);
+        }
+      });
+      if (selected && refresh.summary.kind === "workTree" && !refresh.snapshot) void refreshStatus(repositoryId);
+    } catch (error) {
+      if (repositoryRequests.current.get(repositoryId) !== request) return;
+      pushLog("error", errorMessage(error)); setOutputOpen(true);
+    }
+  }, [pushLog, refreshStatus]);
 
   const refreshHistory = useCallback(async (repositoryId: number) => {
     const request = ++historyRequest.current;
@@ -262,11 +272,10 @@ export default function App() {
       }),
       listen<{ repositoryId: number }>("repository-changed", ({ payload }) => {
         refreshRepository(payload.repositoryId);
-        if (payload.repositoryId === selectedIdRef.current) refreshStatus(payload.repositoryId);
       }),
       listen<RepositorySummary>("repository-summary-refreshed", ({ payload }) => {
         streamedSummaries.current.set(payload.id, payload);
-        setRepositories((current) => current.map((repository) => repository.id === payload.id ? payload : repository));
+        startTransition(() => setRepositories((current) => current.map((repository) => repository.id === payload.id ? payload : repository)));
       }),
       listen("repository-list-changed", refreshRepositories),
     ]);
@@ -460,7 +469,7 @@ export default function App() {
     }
   }, [repositories, pushLog]);
 
-  const moveRepository = useCallback((repositoryId: number, targetGroup: string, targetId?: number) => {
+  const moveRepository = useCallback((repositoryId: number, targetGroup: string, targetId?: number, after = false) => {
     if (filter.trim() || repositoryId === targetId) return;
     const groups = repositoryGroups.map((group) => ({ ...group, repositories: [...group.repositories] }));
     let moving: RepositorySummary | undefined;
@@ -474,7 +483,7 @@ export default function App() {
       ? { ...moving, favorite: true }
       : { ...moving, favorite: false, group: targetGroup === UNGROUPED_GROUP ? undefined : targetGroup };
     const index = targetId ? target.repositories.findIndex((repository) => repository.id === targetId) : -1;
-    target.repositories.splice(index < 0 ? target.repositories.length : index, 0, moving);
+    target.repositories.splice(index < 0 ? target.repositories.length : index + Number(after), 0, moving);
     void persistRepositoryLayout(groups.flatMap((group) => group.repositories));
   }, [filter, repositoryGroups, persistRepositoryLayout]);
 
@@ -498,6 +507,34 @@ export default function App() {
   const acceptRepositoryDrop = useCallback((event: React.DragEvent) => {
     if (filter.trim()) return;
     event.preventDefault(); event.dataTransfer.dropEffect = "move";
+  }, [filter]);
+
+  const clearRepositoryDropHint = useCallback(() => {
+    dropTargetGroup.current?.classList.remove("drop-target");
+    dropTargetRow.current?.classList.remove("drop-before", "drop-after");
+    dropTargetGroup.current = undefined;
+    dropTargetRow.current = undefined;
+  }, []);
+
+  const hintRepositoryDrop = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (filter.trim()) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = "move";
+    const group = event.currentTarget;
+    const row = (event.target as Element).closest<HTMLElement>(".repo-row-shell");
+    const targetRow = row && Number(row.dataset.repositoryId) !== draggingRepositoryId.current ? row : undefined;
+    const bounds = targetRow?.getBoundingClientRect();
+    const after = Boolean(bounds && event.clientY >= bounds.top + bounds.height / 2);
+    if (dropTargetGroup.current !== group) {
+      dropTargetGroup.current?.classList.remove("drop-target");
+      group.classList.add("drop-target");
+      dropTargetGroup.current = group;
+    }
+    const rowClass = after ? "drop-after" : "drop-before";
+    if (dropTargetRow.current !== targetRow || (targetRow && !targetRow.classList.contains(rowClass))) {
+      dropTargetRow.current?.classList.remove("drop-before", "drop-after");
+      targetRow?.classList.add(rowClass);
+      dropTargetRow.current = targetRow;
+    }
   }, [filter]);
 
   const exportLogs = useCallback(async () => {
@@ -547,10 +584,19 @@ export default function App() {
       <aside className="repo-sidebar">
         <header className="brand"><RailMark /><div><strong>GitDock</strong><span>{git.supported ? `Git ${git.version}` : t("gitUnavailable")}</span></div></header>
         <label className="search"><span>⌕</span><input aria-label={t("searchRepositories")} placeholder={t("findRepository")} value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
-        <div className="repo-list" role="listbox" aria-label={t("repositories")}>
-          {repositoryGroups.map((group) => <section role="group" aria-label={group.label} className={`repo-group ${!collapsedGroups.has(group.key) && !group.repositories.length ? "empty" : ""}`} key={group.key} onDragEnter={acceptRepositoryDrop} onDragOver={acceptRepositoryDrop} onDrop={(event) => { event.preventDefault(); const repositoryId = Number(event.dataTransfer.getData("text/plain")) || draggingRepositoryId.current; if (repositoryId) moveRepository(repositoryId, group.key); draggingRepositoryId.current = undefined; }}>
+        <div className="repo-list" role="listbox" aria-label={t("repositories")} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) clearRepositoryDropHint(); }} onDragEnd={clearRepositoryDropHint}>
+          {repositoryGroups.map((group) => <section role="group" aria-label={group.label} className={`repo-group ${!collapsedGroups.has(group.key) && !group.repositories.length ? "empty" : ""}`} key={group.key} onDragEnter={acceptRepositoryDrop} onDragOver={hintRepositoryDrop} onDragLeave={(event) => { if (dropTargetGroup.current === event.currentTarget && !event.currentTarget.contains(event.relatedTarget as Node | null)) clearRepositoryDropHint(); }} onDrop={(event) => {
+            event.preventDefault();
+            const repositoryId = Number(event.dataTransfer.getData("text/plain")) || draggingRepositoryId.current;
+            const row = (event.target as Element).closest<HTMLElement>(".repo-row-shell");
+            const targetId = row ? Number(row.dataset.repositoryId) : undefined;
+            const bounds = row?.getBoundingClientRect();
+            if (!filter.trim() && repositoryId) moveRepository(repositoryId, group.key, targetId, Boolean(bounds && event.clientY >= bounds.top + bounds.height / 2));
+            draggingRepositoryId.current = undefined;
+            clearRepositoryDropHint();
+          }}>
             <header><button aria-expanded={!collapsedGroups.has(group.key)} onClick={() => setCollapsedGroups((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span>{collapsedGroups.has(group.key) ? "▸" : "▾"} {group.label}</span><code>{group.repositories.length}</code></button>{group.key !== FAVORITES_GROUP && group.key !== UNGROUPED_GROUP && <RowMenu><button onClick={() => showDialog({ title: t("renameGroup"), fields: [{ name: "group", label: t("group"), value: group.label, required: true }], onSubmit: ({ group: value }) => updateGroup(group.key, String(value).trim()) })}>{t("rename")}</button><button onClick={() => updateGroup(group.key)}>{t("ungroup")}</button></RowMenu>}</header>
-            {!collapsedGroups.has(group.key) && group.repositories.map((repository, index) => <MemoRepositoryRow key={repository.id} repository={repository} selected={repository.id === selectedId} draggable={!filter.trim()} canMoveUp={!filter.trim() && index > 0} canMoveDown={!filter.trim() && index < group.repositories.length - 1} onSelect={selectRepository} onMove={(direction) => moveRepositoryBy(repository.id, direction)} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(repository.id)); draggingRepositoryId.current = repository.id; }} onDragEnd={() => { draggingRepositoryId.current = undefined; }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const repositoryId = Number(event.dataTransfer.getData("text/plain")) || draggingRepositoryId.current; if (repositoryId) moveRepository(repositoryId, group.key, repository.id); draggingRepositoryId.current = undefined; }} />)}
+            {!collapsedGroups.has(group.key) && group.repositories.map((repository, index) => <MemoRepositoryRow key={repository.id} repository={repository} selected={repository.id === selectedId} draggable={!filter.trim()} canMoveUp={!filter.trim() && index > 0} canMoveDown={!filter.trim() && index < group.repositories.length - 1} onSelect={selectRepository} onMove={(direction) => moveRepositoryBy(repository.id, direction)} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(repository.id)); const image = event.currentTarget.querySelector<HTMLElement>(".repo-name"); if (image) event.dataTransfer.setDragImage(image, 12, 12); draggingRepositoryId.current = repository.id; }} onDragEnd={() => { draggingRepositoryId.current = undefined; clearRepositoryDropHint(); }} />)}
           </section>)}
         </div>
         <footer className="sidebar-actions"><button onClick={register}>{t("add")}</button><button onClick={clone}>{t("clone")}</button><button onClick={initialize}>{t("init")}</button><button onClick={toggleLanguage}>{t("language")}</button></footer><div className="resize-handle resize-left" onPointerDown={(event) => beginResize("left", event)} />
@@ -604,10 +650,10 @@ function EmptyState({ git, onAdd, onClone, onInit, onSelectGit, onToggleLanguage
 
 function RailMark() { return <svg className="rail-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M9 4v18a6 6 0 0 0 6 6h3" /><path d="M23 4v7a5 5 0 0 1-5 5H9" /><circle cx="9" cy="4" r="2.5" /><circle cx="23" cy="4" r="2.5" /><circle cx="20" cy="28" r="2.5" /></svg>; }
 
-function RepositoryRow({ repository, selected, draggable, canMoveUp, canMoveDown, onSelect, onMove, onDragStart, onDragEnd, onDrop }: { repository: RepositorySummary; selected: boolean; draggable: boolean; canMoveUp: boolean; canMoveDown: boolean; onSelect: (repositoryId: number) => void; onMove: (direction: -1 | 1) => void; onDragStart: React.DragEventHandler<HTMLDivElement>; onDragEnd: () => void; onDrop: React.DragEventHandler<HTMLDivElement> }) {
+function RepositoryRow({ repository, selected, draggable, canMoveUp, canMoveDown, onSelect, onMove, onDragStart, onDragEnd }: { repository: RepositorySummary; selected: boolean; draggable: boolean; canMoveUp: boolean; canMoveDown: boolean; onSelect: (repositoryId: number) => void; onMove: (direction: -1 | 1) => void; onDragStart: React.DragEventHandler<HTMLDivElement>; onDragEnd: () => void }) {
   const { t } = useI18n();
   const state = repository.kind === "missing" ? "missing" : repository.conflictCount ? "conflict" : repository.changedCount ? "changed" : "clean";
-  return <div role="option" tabIndex={0} aria-selected={selected} className="repo-row-shell" draggable={draggable} onClick={() => onSelect(repository.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(repository.id); } }} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragOver={(event) => { if (draggable) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={onDrop}><button className={`repo-row ${selected ? "selected" : ""}`} tabIndex={-1}><span className={`status-rail ${state}`} /><span className="repo-copy"><span className="repo-name">{repository.favorite && "★ "}{repository.name}<i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button><RowMenu><button disabled={!canMoveUp} onClick={() => onMove(-1)}>{t("moveUp")}</button><button disabled={!canMoveDown} onClick={() => onMove(1)}>{t("moveDown")}</button></RowMenu></div>;
+  return <div role="option" tabIndex={0} aria-selected={selected} className="repo-row-shell" data-repository-id={repository.id} draggable={draggable} onClick={() => onSelect(repository.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(repository.id); } }} onDragStart={onDragStart} onDragEnd={onDragEnd}><button className={`repo-row ${selected ? "selected" : ""}`} tabIndex={-1}><span className={`status-rail ${state}`} /><span className="repo-copy"><span className="repo-name">{repository.favorite && "★ "}{repository.name}<i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button><RowMenu><button disabled={!canMoveUp} onClick={() => onMove(-1)}>{t("moveUp")}</button><button disabled={!canMoveDown} onClick={() => onMove(1)}>{t("moveDown")}</button></RowMenu></div>;
 }
 
 function ChangesOverview({ repository, snapshot }: { repository?: RepositorySummary; snapshot?: WorkingTreeSnapshot }) {
@@ -619,12 +665,8 @@ function ChangesOverview({ repository, snapshot }: { repository?: RepositorySumm
 
 function ChangesPane({ repository, snapshot, onOpen, onOpenExternal, onLoadIgnored, onRun }: { repository?: RepositorySummary; snapshot?: WorkingTreeSnapshot; onOpen: (file: FileChange, staged: boolean) => void; onOpenExternal: (path: string) => void; onLoadIgnored: () => void; onRun: RunOperation }) {
   const { t } = useI18n();
-  const [messages, setMessages] = useState<Record<number, string>>({}); const [amend, setAmend] = useState(false); const [signoff, setSignoff] = useState(false);
-  const [committingRepositories, setCommittingRepositories] = useState<Set<number>>(() => new Set());
   const [stageSelection, setStageSelection] = useState<string[]>([]); const [unstageSelection, setUnstageSelection] = useState<string[]>([]);
   const repositoryId = repository?.id;
-  const message = repositoryId ? messages[repositoryId] ?? "" : "";
-  const commitRunning = repositoryId ? committingRepositories.has(repositoryId) : false;
   const files = snapshot?.files ?? [];
   const groups = [
     [t("conflictsGroup"), files.filter((f) => f.conflict), "conflict"],
@@ -641,18 +683,32 @@ function ChangesPane({ repository, snapshot, onOpen, onOpenExternal, onLoadIgnor
   }, [snapshot?.id, repository?.id]);
   const toggle = (path: string, selected: string[], setSelected: React.Dispatch<React.SetStateAction<string[]>>) => setSelected(selected.includes(path) ? selected.filter((item) => item !== path) : [...selected, path]);
   const batch = (type: "stageFiles" | "unstageFiles", paths: string[], clear: () => void) => { onRun({ type, paths }); clear(); };
+  return <div className="changes-pane"><div className="pane-title"><span>{t("workingTree")}</span><span className="batch-actions">{stageSelection.length > 0 && <button onClick={() => batch("stageFiles", stageSelection, () => setStageSelection([]))}>{t("stageSelected")} ({stageSelection.length})</button>}{unstageSelection.length > 0 && <button onClick={() => batch("unstageFiles", unstageSelection, () => setUnstageSelection([]))}>{t("unstageSelected")} ({unstageSelection.length})</button>}{stageSelection.length === 0 && unstageSelection.length === 0 && <button onClick={onLoadIgnored}>{t("loadIgnored")}</button>}</span></div><div className="change-groups">{repository?.ongoing && <div className="ongoing"><strong>{repository.ongoing.kind} {t("inProgress")}</strong>{repository.ongoing.canContinue && <button onClick={() => onRun({ type: "continue", kind: repository.ongoing!.kind })}>{t("continue")}</button>}{repository.ongoing.canSkip && <button onClick={() => onRun({ type: "skip", kind: repository.ongoing!.kind })}>{t("skip")}</button>}{repository.ongoing.canAbort && <button onClick={() => onRun({ type: "abort", kind: repository.ongoing!.kind })}>{t("abort")}</button>}</div>}{groups.map(([name, entries, type]) => { const selected = type === "staged" ? unstageSelection : stageSelection; const setSelected = type === "staged" ? setUnstageSelection : setStageSelection; return <ChangeGroup key={type} name={name} files={entries} type={type} selected={selected} onToggle={(path) => toggle(path, selected, setSelected)} onSelectAll={() => setSelected(entries.every((file) => selected.includes(file.path)) ? selected.filter((path) => !entries.some((file) => file.path === path)) : [...new Set([...selected, ...entries.map((file) => file.path)])])} onOpen={onOpen} onOpenExternal={onOpenExternal} onRun={onRun} />; })}</div><MemoCommitBox repositoryId={repositoryId} onRun={onRun} /></div>;
+}
+
+function CommitBox({ repositoryId, onRun }: { repositoryId?: number; onRun: RunOperation }) {
+  const { t } = useI18n();
+  const messages = useRef<Record<number, string>>({}); const textarea = useRef<HTMLTextAreaElement>(null); const activeRepositoryId = useRef(repositoryId); activeRepositoryId.current = repositoryId;
+  const [nonemptyRepositories, setNonemptyRepositories] = useState<Set<number>>(() => new Set()); const [amend, setAmend] = useState(false); const [signoff, setSignoff] = useState(false);
+  const [committingRepositories, setCommittingRepositories] = useState<Set<number>>(() => new Set());
+  const commitRunning = repositoryId ? committingRepositories.has(repositoryId) : false;
   const commit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!repositoryId) return;
-    const submittedMessage = message;
+    const submittedMessage = textarea.current?.value ?? messages.current[repositoryId] ?? "";
     const submittedRepositoryId = repositoryId;
+    messages.current[submittedRepositoryId] = submittedMessage;
     setCommittingRepositories((current) => new Set(current).add(submittedRepositoryId));
-    onRun({ type: "commit", message, amend, signoff }, (outcome) => {
+    onRun({ type: "commit", message: submittedMessage, amend, signoff }, (outcome) => {
       setCommittingRepositories((current) => { const next = new Set(current); next.delete(submittedRepositoryId); return next; });
-      if (outcome === "succeeded") setMessages((current) => current[submittedRepositoryId] === submittedMessage ? { ...current, [submittedRepositoryId]: "" } : current);
+      if (outcome === "succeeded" && messages.current[submittedRepositoryId] === submittedMessage) {
+        messages.current[submittedRepositoryId] = "";
+        setNonemptyRepositories((current) => { if (!current.has(submittedRepositoryId)) return current; const next = new Set(current); next.delete(submittedRepositoryId); return next; });
+        if (activeRepositoryId.current === submittedRepositoryId && textarea.current) textarea.current.value = "";
+      }
     });
   };
-  return <div className="changes-pane"><div className="pane-title"><span>{t("workingTree")}</span><span className="batch-actions">{stageSelection.length > 0 && <button onClick={() => batch("stageFiles", stageSelection, () => setStageSelection([]))}>{t("stageSelected")} ({stageSelection.length})</button>}{unstageSelection.length > 0 && <button onClick={() => batch("unstageFiles", unstageSelection, () => setUnstageSelection([]))}>{t("unstageSelected")} ({unstageSelection.length})</button>}{stageSelection.length === 0 && unstageSelection.length === 0 && <button onClick={onLoadIgnored}>{t("loadIgnored")}</button>}</span></div><div className="change-groups">{repository?.ongoing && <div className="ongoing"><strong>{repository.ongoing.kind} {t("inProgress")}</strong>{repository.ongoing.canContinue && <button onClick={() => onRun({ type: "continue", kind: repository.ongoing!.kind })}>{t("continue")}</button>}{repository.ongoing.canSkip && <button onClick={() => onRun({ type: "skip", kind: repository.ongoing!.kind })}>{t("skip")}</button>}{repository.ongoing.canAbort && <button onClick={() => onRun({ type: "abort", kind: repository.ongoing!.kind })}>{t("abort")}</button>}</div>}{groups.map(([name, entries, type]) => { const selected = type === "staged" ? unstageSelection : stageSelection; const setSelected = type === "staged" ? setUnstageSelection : setStageSelection; return <ChangeGroup key={type} name={name} files={entries} type={type} selected={selected} onToggle={(path) => toggle(path, selected, setSelected)} onSelectAll={() => setSelected(entries.every((file) => selected.includes(file.path)) ? selected.filter((path) => !entries.some((file) => file.path === path)) : [...new Set([...selected, ...entries.map((file) => file.path)])])} onOpen={onOpen} onOpenExternal={onOpenExternal} onRun={onRun} />; })}</div><form className="commit-box" onSubmit={commit}><label>{t("commitMessage")}<textarea value={message} onChange={(event) => { if (repositoryId) { const value = event.target.value; setMessages((current) => ({ ...current, [repositoryId]: value })); } }} placeholder={t("commitPlaceholder")} /></label><div className="commit-options"><label><input type="checkbox" checked={amend} onChange={(event) => setAmend(event.target.checked)} /> {t("amend")}</label><label><input type="checkbox" checked={signoff} onChange={(event) => setSignoff(event.target.checked)} /> {t("signOff")}</label></div><button className="primary" disabled={commitRunning || !message.trim()}>{commitRunning ? t("running") : t("commitStaged")}</button></form></div>;
+  return <form className="commit-box" onSubmit={commit}><label>{t("commitMessage")}<textarea key={repositoryId} ref={textarea} autoCapitalize="none" autoCorrect="off" spellCheck={false} defaultValue={repositoryId ? messages.current[repositoryId] ?? "" : ""} onChange={(event) => { if (!repositoryId) return; const value = event.currentTarget.value; const wasNonempty = Boolean(messages.current[repositoryId]?.trim()); const isNonempty = Boolean(value.trim()); messages.current[repositoryId] = value; if (wasNonempty !== isNonempty) setNonemptyRepositories((current) => { const next = new Set(current); if (isNonempty) next.add(repositoryId); else next.delete(repositoryId); return next; }); }} placeholder={t("commitPlaceholder")} /></label><div className="commit-options"><label><input type="checkbox" checked={amend} onChange={(event) => setAmend(event.target.checked)} /> {t("amend")}</label><label><input type="checkbox" checked={signoff} onChange={(event) => setSignoff(event.target.checked)} /> {t("signOff")}</label></div><button className="primary" disabled={commitRunning || !repositoryId || !nonemptyRepositories.has(repositoryId)}>{commitRunning ? t("running") : t("commitStaged")}</button></form>;
 }
 
 function RowMenu({ children, label }: { children: React.ReactNode; label?: string }) {
@@ -828,6 +884,7 @@ function ConfirmDialog({ pending, onCancel, onConfirm }: { pending: Pending; onC
 }
 
 const MemoRepositoryRow = memo(RepositoryRow);
+const MemoCommitBox = memo(CommitBox);
 const MemoChangesOverview = memo(ChangesOverview);
 const MemoChangesPane = memo(ChangesPane);
 const MemoDiffView = memo(DiffView);

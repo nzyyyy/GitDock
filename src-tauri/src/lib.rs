@@ -353,11 +353,17 @@ fn clear_summary_cache(state: &AppState) {
 fn refresh_repository(
     repository_id: RepositoryId,
     state: State<'_, AppState>,
-) -> Result<RepositorySummary, String> {
+) -> Result<RepositoryRefresh, String> {
     let generation = start_summary_refresh(&state)?;
-    let summary = state.git()?.summary(&state.record(repository_id)?);
+    let snapshot_id = state.next_snapshot_id.fetch_add(1, Ordering::Relaxed);
+    let (summary, snapshot) = state
+        .git()?
+        .summary_with_snapshot(&state.record(repository_id)?, snapshot_id);
+    if let Some(snapshot) = &snapshot {
+        cache_snapshot(&state, snapshot)?;
+    }
     publish_summary_batch(&state, generation, std::slice::from_ref(&summary), |_| {});
-    Ok(summary)
+    Ok(RepositoryRefresh { summary, snapshot })
 }
 
 #[tauri::command]
@@ -709,20 +715,25 @@ fn get_status(
     }
     let id = state.next_snapshot_id.fetch_add(1, Ordering::Relaxed);
     let snapshot = git.status(repository_id, &inspection.root, include_ignored, id)?;
+    cache_snapshot(&state, &snapshot)?;
+    Ok(snapshot)
+}
+
+fn cache_snapshot(state: &AppState, snapshot: &WorkingTreeSnapshot) -> Result<(), String> {
     state
         .snapshots
         .lock()
         .map_err(|_| "Snapshot cache is busy")?
         .insert(
-            id,
+            snapshot.id,
             SnapshotCache {
-                repository_id,
+                repository_id: snapshot.repository_id,
                 head_oid: snapshot.head_oid.clone(),
                 hunks: HashMap::new(),
                 conflicts: HashMap::new(),
             },
         );
-    Ok(snapshot)
+    Ok(())
 }
 
 #[tauri::command]
@@ -2480,6 +2491,24 @@ mod tests {
             summary_refresh_running: Mutex::new(0),
             summary_refresh_ready: Condvar::new(),
         }
+    }
+
+    #[test]
+    fn caches_combined_refresh_snapshots() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(git, dir.path().join("config.json"));
+        let snapshot = WorkingTreeSnapshot {
+            id: 9,
+            repository_id: 3,
+            head_oid: Some("head".into()),
+            files: Vec::new(),
+        };
+        cache_snapshot(&state, &snapshot).unwrap();
+        let snapshots = state.snapshots.lock().unwrap();
+        let cached = snapshots.get(&9).unwrap();
+        assert_eq!(cached.repository_id, 3);
+        assert_eq!(cached.head_oid.as_deref(), Some("head"));
     }
 
     #[test]

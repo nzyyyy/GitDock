@@ -520,8 +520,20 @@ test("clears the commit message only after a successful early completion event",
 
   render(<App />);
   const message = await screen.findByRole("textbox", { name: "Commit message" });
+  expect(message).toHaveAttribute("autocapitalize", "none");
+  expect(message).toHaveAttribute("autocorrect", "off");
+  expect(message).toHaveAttribute("spellcheck", "false");
+  const commitButton = screen.getByRole("button", { name: "Commit staged changes" });
+  expect(commitButton).toBeDisabled();
+  for (const value of ["S", "Sh", "Ship"]) fireEvent.change(message, { target: { value } });
+  expect(message).toHaveValue("Ship");
+  expect(commitButton).toBeEnabled();
+  for (const value of ["Shi", "Sh", "S", ""]) fireEvent.change(message, { target: { value } });
+  expect(message).toHaveValue("");
+  expect(commitButton).toBeDisabled();
   fireEvent.change(message, { target: { value: "Ship it" } });
-  fireEvent.click(screen.getByRole("button", { name: "Commit staged changes" }));
+  fireEvent.click(commitButton);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "commit", message: "Ship it", amend: false, signoff: false } }));
   expect(await screen.findByRole("button", { name: "running" })).toBeDisabled();
   await waitFor(() => expect(resolveStart).toBeDefined());
   await act(async () => operationListener?.({ payload: { operationId: 7, repositoryId: 1, kind: "started", message: "Commit" } }));
@@ -660,12 +672,17 @@ test("refreshes only the changed repository and status for the selected reposito
   vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: Number(args && "repositoryId" in args ? args.repositoryId : 1), headOid: "11111111", files: [] });
-    if (command === "refresh_repository") return Promise.resolve(repositories[Number(args && "repositoryId" in args ? args.repositoryId : 1) - 1]);
+    if (command === "refresh_repository") {
+      const repositoryId = Number(args && "repositoryId" in args ? args.repositoryId : 1);
+      return Promise.resolve({ summary: { ...repositories[repositoryId - 1], changedCount: repositoryId === 1 ? 1 : 0 }, snapshot: repositoryId === 1 ? { id: 3, repositoryId: 1, headOid: "11111111", files: [{ path: "fresh.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] } : undefined });
+    }
     return Promise.resolve(undefined);
   });
 
   render(<App />);
   await screen.findByRole("option", { name: /One/ });
+  const message = screen.getByRole("textbox", { name: "Commit message" });
+  fireEvent.change(message, { target: { value: "Draft while refreshing" } });
   vi.mocked(invoke).mockClear();
   await act(async () => repositoryChanged?.({ payload: { repositoryId: 2 } }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("refresh_repository", { repositoryId: 2 }));
@@ -673,7 +690,33 @@ test("refreshes only the changed repository and status for the selected reposito
   expect(invoke).not.toHaveBeenCalledWith("refresh_repositories");
 
   await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
+  await waitFor(() => expect(screen.getByText("fresh.ts")).toBeInTheDocument());
+  expect(invoke).not.toHaveBeenCalledWith("get_status", expect.objectContaining({ repositoryId: 1 }));
+  expect(screen.getByRole("option", { name: /One/ })).toHaveTextContent("±1");
+  expect(screen.getByRole("textbox", { name: "Commit message" })).toBe(message);
+  expect(message).toHaveValue("Draft while refreshing");
+});
+
+test("falls back to status when a worktree refresh has no snapshot", async () => {
+  let repositoryChanged: ((event: { payload: { repositoryId: number } }) => void) | undefined;
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "11111111", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof repositoryChanged) => {
+    if (event === "repository-changed") repositoryChanged = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 4, repositoryId: 1, headOid: "11111111", files: [{ path: "fallback.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
+    if (command === "refresh_repository") return Promise.resolve({ summary: repository });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await screen.findByRole("option", { name: /Repo/ });
+  vi.mocked(invoke).mockClear();
+  await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_status", { repositoryId: 1, includeIgnored: false }));
+  expect(await screen.findByText("fallback.ts")).toBeInTheDocument();
 });
 
 test("ignores an older repository summary response", async () => {
@@ -698,11 +741,43 @@ test("ignores an older repository summary response", async () => {
     repositoryChanged?.({ payload: { repositoryId: 1 } });
   });
   await waitFor(() => expect(refreshResolvers).toHaveLength(2));
-  await act(async () => refreshResolvers[1]({ ...repository, branch: "newer", changedCount: 2 }));
+  await act(async () => refreshResolvers[1]({ summary: { ...repository, branch: "newer", changedCount: 2 }, snapshot: { id: 3, repositoryId: 1, headOid: "11111111", files: [] } }));
   await waitFor(() => expect(screen.getByRole("option", { name: /Repo/ })).toHaveTextContent("newer"));
-  await act(async () => refreshResolvers[0]({ ...repository, branch: "older", changedCount: 1 }));
+  await act(async () => refreshResolvers[0]({ summary: { ...repository, branch: "older", changedCount: 1 }, snapshot: { id: 2, repositoryId: 1, headOid: "11111111", files: [] } }));
   expect(screen.getByRole("option", { name: /Repo/ })).toHaveTextContent("newer");
   expect(screen.getByRole("option", { name: /Repo/ })).not.toHaveTextContent("older");
+});
+
+test("does not apply a combined snapshot after switching repositories", async () => {
+  let repositoryChanged: ((event: { payload: { repositoryId: number } }) => void) | undefined;
+  let resolveRefresh: ((value: unknown) => void) | undefined;
+  const repositories = [
+    { id: 1, path: "/one", name: "One", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "11111111", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 2, path: "/two", name: "Two", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "22222222", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 },
+  ];
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof repositoryChanged) => {
+    if (event === "repository-changed") repositoryChanged = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    if (command === "get_status") {
+      const repositoryId = Number(args && "repositoryId" in args ? args.repositoryId : 1);
+      return Promise.resolve({ id: repositoryId, repositoryId, headOid: repositoryId === 1 ? "11111111" : "22222222", files: [{ path: repositoryId === 1 ? "one.ts" : "two.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
+    }
+    if (command === "refresh_repository") return new Promise((resolve) => { resolveRefresh = resolve; });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await screen.findByText("one.ts");
+  act(() => { repositoryChanged?.({ payload: { repositoryId: 1 } }); });
+  await waitFor(() => expect(resolveRefresh).toBeDefined());
+  fireEvent.click(screen.getByRole("option", { name: /Two/ }));
+  expect(await screen.findByText("two.ts")).toBeInTheDocument();
+  await act(async () => resolveRefresh?.({ summary: repositories[0], snapshot: { id: 9, repositoryId: 1, headOid: "11111111", files: [{ path: "stale.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] } }));
+  expect(screen.getByText("two.ts")).toBeInTheDocument();
+  expect(screen.queryByText("stale.ts")).not.toBeInTheDocument();
 });
 
 test("ignores a stale status response after switching repositories", async () => {
@@ -806,15 +881,96 @@ test("groups repositories, moves one into favorites, and disables drag while sea
   fireEvent.change(search, { target: { value: "" } });
   const alpha = await screen.findByRole("option", { name: /Alpha/ });
   const favorites = screen.getByRole("button", { name: /Favorites0/ }).closest("section")!;
+  const workButton = screen.getByRole("button", { name: /Work1/ });
+  const work = workButton.closest("section")!;
   expect(favorites).toHaveClass("empty");
-  fireEvent.dragStart(alpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn() } });
+  const setDragImage = vi.fn();
+  fireEvent.click(workButton);
+  fireEvent.dragStart(alpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn(), setDragImage } });
+  fireEvent.dragOver(work, { dataTransfer: { dropEffect: "none" } });
+  expect(work).toHaveClass("drop-target");
+  fireEvent.dragLeave(work, { relatedTarget: document.body });
+  expect(work).not.toHaveClass("drop-target");
+  fireEvent.dragOver(work, { dataTransfer: { dropEffect: "none" } });
+  fireEvent.dragEnd(alpha);
+  expect(work).not.toHaveClass("drop-target");
+
+  fireEvent.dragStart(alpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn(), setDragImage } });
+  expect(setDragImage).toHaveBeenLastCalledWith(alpha.querySelector(".repo-name"), 12, 12);
   const dataTransfer = { dropEffect: "none", getData: () => "" };
   expect(fireEvent.dragOver(favorites, { dataTransfer })).toBe(false);
   expect(dataTransfer.dropEffect).toBe("move");
+  expect(favorites).toHaveClass("drop-target");
   fireEvent.drop(favorites, { dataTransfer });
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("reorder_repositories", { placements: expect.arrayContaining([expect.objectContaining({ id: 1, favorite: true, group: undefined })]) }));
+  expect(favorites).not.toHaveClass("drop-target");
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("reorder_repositories", { placements: [
+    { id: 1, favorite: true, group: undefined, order: 0 },
+    { id: 2, favorite: false, group: "Work", order: 1 },
+  ] }));
   expect(screen.getByRole("button", { name: /Favorites1/ })).toBeInTheDocument();
   expect(favorites).not.toHaveClass("empty");
+});
+
+test("sorts favorite repositories before or after the dropped row", async () => {
+  const dragAt = (type: "dragover" | "drop", target: HTMLElement, repositoryId: number, clientY: number) => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperties(event, { clientY: { value: clientY }, dataTransfer: { value: { dropEffect: "none", getData: () => String(repositoryId) } } });
+    fireEvent(target, event);
+  };
+  const repositories = [
+    { id: 1, path: "/alpha", name: "Alpha", favorite: true, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 2, path: "/beta", name: "Beta", favorite: true, order: 1, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 3, path: "/gamma", name: "Gamma", favorite: true, order: 2, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+  ];
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, files: [] });
+    return Promise.resolve(undefined);
+  });
+  render(<App />);
+  const alpha = await screen.findByRole("option", { name: /Alpha/ });
+  const beta = screen.getByRole("option", { name: /Beta/ });
+  const gamma = screen.getByRole("option", { name: /Gamma/ });
+  vi.spyOn(alpha, "getBoundingClientRect").mockReturnValue({ top: 10, height: 40 } as DOMRect);
+  vi.spyOn(beta, "getBoundingClientRect").mockReturnValue({ top: 10, height: 40 } as DOMRect);
+  vi.spyOn(gamma, "getBoundingClientRect").mockReturnValue({ top: 10, height: 40 } as DOMRect);
+  fireEvent.dragStart(alpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn(), setDragImage: vi.fn() } });
+  dragAt("dragover", alpha, 1, 20);
+  expect(alpha).not.toHaveClass("drop-before");
+  expect(alpha).not.toHaveClass("drop-after");
+  expect(alpha.closest("section")).toHaveClass("drop-target");
+  dragAt("dragover", gamma, 1, 40);
+  expect(gamma).toHaveClass("drop-after");
+  dragAt("dragover", beta, 1, 20);
+  expect(gamma).not.toHaveClass("drop-after");
+  expect(beta).toHaveClass("drop-before");
+  fireEvent.dragEnd(alpha);
+  expect(beta).not.toHaveClass("drop-before");
+  expect(alpha.closest("section")).not.toHaveClass("drop-target");
+
+  fireEvent.dragStart(alpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn(), setDragImage: vi.fn() } });
+  dragAt("dragover", gamma, 1, 40);
+  dragAt("drop", gamma, 1, 40);
+  expect(gamma).not.toHaveClass("drop-after");
+  expect(gamma.closest("section")).not.toHaveClass("drop-target");
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("reorder_repositories", { placements: [
+    { id: 2, favorite: true, group: undefined, order: 0 },
+    { id: 3, favorite: true, group: undefined, order: 1 },
+    { id: 1, favorite: true, group: undefined, order: 2 },
+  ] }));
+
+  vi.mocked(invoke).mockClear();
+  const movedAlpha = screen.getByRole("option", { name: /Alpha/ });
+  const movedBeta = screen.getByRole("option", { name: /Beta/ });
+  vi.spyOn(movedBeta, "getBoundingClientRect").mockReturnValue({ top: 10, height: 40 } as DOMRect);
+  fireEvent.dragStart(movedAlpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn(), setDragImage: vi.fn() } });
+  dragAt("dragover", movedBeta, 1, 20);
+  dragAt("drop", movedBeta, 1, 20);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("reorder_repositories", { placements: [
+    { id: 1, favorite: true, group: undefined, order: 0 },
+    { id: 2, favorite: true, group: undefined, order: 1 },
+    { id: 3, favorite: true, group: undefined, order: 2 },
+  ] }));
 });
 
 test("exports the retained session log only after an explicit save choice", async () => {

@@ -98,6 +98,13 @@ pub struct RepositorySummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct RepositoryRefresh {
+    pub summary: RepositorySummary,
+    pub snapshot: Option<WorkingTreeSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct RepositoryPlacement {
     pub id: RepositoryId,
     pub group: Option<String>,

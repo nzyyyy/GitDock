@@ -156,6 +156,14 @@ impl Git {
     }
 
     pub fn summary(&self, record: &RepositoryRecord) -> RepositorySummary {
+        self.summary_with_snapshot(record, 0).0
+    }
+
+    pub fn summary_with_snapshot(
+        &self,
+        record: &RepositoryRecord,
+        snapshot_id: u64,
+    ) -> (RepositorySummary, Option<WorkingTreeSnapshot>) {
         let missing = || RepositorySummary {
             id: record.id,
             path: record.path.clone(),
@@ -177,24 +185,36 @@ impl Git {
         };
         let path = Path::new(&record.path);
         if !path.exists() {
-            return missing();
+            return (missing(), None);
         }
         let Ok(inspection) = self.inspect_repository(path) else {
-            return missing();
+            return (missing(), None);
         };
         let kind = if inspection.bare {
             RepositoryKind::Bare
         } else {
             RepositoryKind::WorkTree
         };
+        let snapshot = (!inspection.bare)
+            .then(|| {
+                self.status(record.id, &inspection.root, false, snapshot_id)
+                    .ok()
+            })
+            .flatten();
         let branch = self
-            .text(path, &["branch", "--show-current"])
+            .text(&inspection.root, &["branch", "--show-current"])
             .ok()
             .filter(|s| !s.is_empty());
-        let head_oid = self.text(path, &["rev-parse", "--verify", "HEAD"]).ok();
+        let head_oid = snapshot
+            .as_ref()
+            .and_then(|value| value.head_oid.clone())
+            .or_else(|| {
+                self.text(&inspection.root, &["rev-parse", "--verify", "HEAD"])
+                    .ok()
+            });
         let (ahead, behind) = self
             .text(
-                path,
+                &inspection.root,
                 &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
             )
             .ok()
@@ -203,14 +223,16 @@ impl Git {
                 Some((n.next()?.parse().ok()?, n.next()?.parse().ok()?))
             })
             .unwrap_or((0, 0));
-        let (changed_count, conflict_count) = if inspection.bare {
-            (0, 0)
-        } else {
-            self.status(record.id, path, false, 0)
-                .map(|s| (s.files.len(), s.files.iter().filter(|f| f.conflict).count()))
-                .unwrap_or((0, 0))
-        };
-        RepositorySummary {
+        let (changed_count, conflict_count) = snapshot
+            .as_ref()
+            .map(|value| {
+                (
+                    value.files.len(),
+                    value.files.iter().filter(|file| file.conflict).count(),
+                )
+            })
+            .unwrap_or((0, 0));
+        let summary = RepositorySummary {
             id: record.id,
             path: record.path.clone(),
             name: record.name.clone(),
@@ -225,10 +247,13 @@ impl Git {
             conflict_count,
             ahead,
             behind,
-            last_commit: self.text(path, &["log", "-1", "--format=%s"]).ok(),
+            last_commit: self
+                .text(&inspection.root, &["log", "-1", "--format=%s"])
+                .ok(),
             ongoing: ongoing_state(&inspection.git_dir),
             error: None,
-        }
+        };
+        (summary, snapshot)
     }
 
     pub fn status(
@@ -238,7 +263,13 @@ impl Git {
         ignored: bool,
         snapshot_id: u64,
     ) -> Result<WorkingTreeSnapshot, String> {
-        let mut args = strings(&["status", "--porcelain=v2", "-z", "--untracked-files=all"]);
+        let mut args = strings(&[
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=all",
+        ]);
         if ignored {
             args.push("--ignored=matching".into());
         }
@@ -1320,6 +1351,32 @@ mod tests {
         assert_eq!(files[1].kind, ChangeKind::Untracked);
         assert_eq!(files[2].original_path.as_deref(), Some("old.rs"));
         assert!(files[3].ignored);
+    }
+
+    #[test]
+    fn summary_and_snapshot_share_worktree_status() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        let head = commit_file(&git, dir.path(), "base\n", "base");
+        std::fs::write(dir.path().join("file.txt"), "changed\n").unwrap();
+        let record = RepositoryRecord {
+            id: 7,
+            path: dir.path().to_string_lossy().into_owned(),
+            name: "repo".into(),
+            group: None,
+            favorite: false,
+            order: 0,
+        };
+
+        let (summary, snapshot) = git.summary_with_snapshot(&record, 42);
+        let snapshot = snapshot.unwrap();
+        assert_eq!(snapshot.id, 42);
+        assert_eq!(snapshot.head_oid.as_deref(), Some(head.as_str()));
+        assert_eq!(summary.head_oid, snapshot.head_oid);
+        assert_eq!(summary.changed_count, snapshot.files.len());
+        assert_eq!(summary.conflict_count, 0);
+        assert_eq!(snapshot.files[0].path, "file.txt");
     }
 
     #[test]
