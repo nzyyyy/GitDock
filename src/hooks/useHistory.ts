@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api, type CommitInfo, type HistoryCursor } from "../api";
 import { errorMessage, type Tab } from "../types";
 
@@ -43,6 +44,14 @@ export function useHistory({
       }
     };
   }, [selectedId, tab, refreshHistory]);
+
+  useEffect(() => {
+    if (tab !== "history") return;
+    const unlisten = listen<{ repositoryId: number }>("repository-changed", ({ payload }) => {
+      if (selectedIdRef.current === payload.repositoryId) void refreshHistory(payload.repositoryId);
+    });
+    return () => { unlisten.then((unlistenFn) => unlistenFn()); };
+  }, [tab, refreshHistory, selectedIdRef]);
 
   const loadMoreHistory = useCallback(async () => {
     if (!selectedId || historyRepository.current !== selectedId || nextHistoryCursor === undefined || historyLoading) return;

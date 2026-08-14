@@ -37,7 +37,7 @@ export default function App() {
   const [outputHeight, setOutputHeight] = useState(190);
   const [language, setLanguage] = useState<Language>("en");
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [rebaseDialog, setRebaseDialog] = useState<number>();
+  const [rebaseDialog, setRebaseDialog] = useState<{ repositoryId: number; onto?: string }>();
   const selectedIdRef = useRef<number | undefined>(undefined);
   selectedIdRef.current = selectedId;
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
@@ -199,7 +199,7 @@ export default function App() {
     command("force-push", "forcePush", forcePush, Boolean(selected?.capabilities.canManageRemotes && selected.branch)),
     command("upstream", "setUpstream", () => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } }), Boolean(selected?.branch)),
     command("cherry-pick", "cherryPickCommits", () => showDialog({ title: t("cherryPickCommits"), fields: [{ name: "commits", label: t("commitOids"), required: true }], onSubmit: ({ commits }) => run({ type: "cherryPick", commits: String(commits).trim().split(/\s+/) }) }), Boolean(selected?.capabilities.canWriteWorkTree)),
-    command("interactive-rebase", "interactiveRebase", () => { if (selectedId) setRebaseDialog(selectedId); }, Boolean(selected?.capabilities.canWriteWorkTree)),
+    command("interactive-rebase", "interactiveRebase", () => { if (selectedId) setRebaseDialog({ repositoryId: selectedId }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
     command("undo", "undoCommit", () => { void run({ type: "undoLastCommit" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
     command("rename", "renameEntry", () => showDialog({ title: t("renameEntry"), fields: [{ name: "name", label: t("repositoryName"), value: selected?.name, required: true }], onSubmit: ({ name }) => updateSelected({ name: String(name).trim() }) }), Boolean(selected)),
     command("favorite", selected?.favorite ? "removeFavorite" : "addFavorite", () => { void updateSelected({ favorite: !selected?.favorite }); }, Boolean(selected)),
@@ -218,7 +218,7 @@ export default function App() {
   return (
     <I18nProvider language={language}><div className="app-shell" style={{ gridTemplateColumns: `${leftWidth}px 1fr` }}>
       <aside className="repo-sidebar">
-        <header className="brand"><RailMark /><div><strong>GitDock</strong><span>{git.supported ? `Git ${git.version}` : t("gitUnavailable")}</span></div></header>
+        <header className="brand" data-tauri-drag-region><RailMark /><div><strong>GitDock</strong><span>{git.supported ? `Git ${git.version}` : t("gitUnavailable")}</span></div></header>
         <label className="search"><span>⌕</span><input aria-label={t("searchRepositories")} placeholder={t("findRepository")} value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
         <div className="repo-list" role="listbox" aria-label={t("repositories")} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) clearRepositoryDropHint(); }} onDragEnd={clearRepositoryDropHint}>
           {repositoryGroups.map((group) => <section role="group" aria-label={group.label} className={`repo-group ${!collapsedGroups.has(group.key) && !group.repositories.length ? "empty" : ""}`} key={group.key} onDragEnter={acceptRepositoryDrop} onDragOver={hintRepositoryDrop} onDragLeave={(event) => { if (dropTargetGroup.current === event.currentTarget && !event.currentTarget.contains(event.relatedTarget as Node | null)) clearRepositoryDropHint(); }} onDrop={(event) => {
@@ -239,7 +239,7 @@ export default function App() {
       </aside>
 
       <main className="workspace">
-        <header className="topbar">
+        <header className="topbar" data-tauri-drag-region>
           <div className="repo-context"><span className="branch-dot" /> <strong>{selected?.name}</strong><code>{selected?.branch || shortOid(selected?.headOid)}</code></div>
           <nav aria-label={t("workflows")}>{(["changes", "history", "branches", "stashes"] as Tab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => { setTab(item); closeDiff(); }}>{t(item)}</button>)}</nav>
           <div className="sync-actions"><button aria-label={t("commandPalette")} onClick={() => setPaletteOpen(true)}>⌘K</button><button disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "fetch", prune: false })}>{t("fetch")}</button><button disabled={!selected?.capabilities.canWriteWorkTree} onClick={() => run({ type: "pull" })}>{t("pull")}</button><button className="primary" disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "push" })}>{t("push")}</button><RowMenu label={t("more")}><button onClick={refreshRepositories}>{t("refreshAll")}</button><button onClick={() => run({ type: "pull", strategy: "merge" })}>{t("pullMerge")}</button><button onClick={() => run({ type: "pull", strategy: "rebase" })}>{t("pullRebase")}</button><button onClick={() => run({ type: "pull", strategy: "fastForwardOnly" })}>{t("pullFf")}</button><button onClick={forcePush}>{t("forcePush")}</button><button onClick={() => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } })}>{t("setUpstream")}</button><button onClick={() => run({ type: "undoLastCommit" })}>{t("undoCommit")}</button><button onClick={() => showDialog({ title: t("renameEntry"), fields: [{ name: "name", label: t("repositoryName"), value: selected?.name, required: true }], onSubmit: ({ name }) => updateSelected({ name: String(name).trim() }) })}>{t("renameEntry")}</button><button onClick={relocateSelected}>{t("relocate")}</button><button onClick={selectGit}>{t("selectGit")}</button><button className="menu-danger" onClick={removeSelected}>{t("removeGitDock")}</button></RowMenu></div>
@@ -252,7 +252,7 @@ export default function App() {
           <aside className="tool-pane"><div className="resize-handle resize-right" onPointerDown={(event) => beginResize("right", event)} />
             {tab === "changes" && <MemoChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={openRepositoryFile} onLoadIgnored={loadIgnored} onRun={run} onFileHistory={openFileHistory} onBlame={openBlame} />}
             {tab === "history" && <MemoHistoryPane commits={commits} selectedOid={selectedCommit} loading={historyLoading} hasMore={hasMore} onLoadMore={loadMoreHistory} onSelect={openCommit} onRun={run} />}
-            {tab === "branches" && <MemoBranchesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onDiff={showBranchDiff} onError={reportError} onInteractiveRebase={() => selectedId && setRebaseDialog(selectedId)} />}
+            {tab === "branches" && <MemoBranchesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onDiff={showBranchDiff} onError={reportError} onInteractiveRebase={(onto) => selectedId && setRebaseDialog({ repositoryId: selectedId, onto })} />}
             {tab === "stashes" && <MemoStashesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onError={reportError} />}
           </aside>
         </div>
@@ -263,7 +263,7 @@ export default function App() {
       {pending && <ConfirmDialog pending={pending} onCancel={() => { pending.onFinished?.("cancelled"); setPending(undefined); }} onConfirm={confirmPending} />}
       {toastStack}
       {paletteOpen && <CommandPalette items={commands} onClose={() => setPaletteOpen(false)} />}
-      {rebaseDialog && <InteractiveRebase repositoryId={rebaseDialog} onClose={() => setRebaseDialog(undefined)} onRun={run} />}
+      {rebaseDialog && <InteractiveRebase repositoryId={rebaseDialog.repositoryId} initialOnto={rebaseDialog.onto} onClose={() => setRebaseDialog(undefined)} onRun={run} />}
       {dialog && <FormDialog spec={dialog} onClose={() => setDialog(undefined)} />}
     </div></I18nProvider>
   );

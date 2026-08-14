@@ -242,7 +242,7 @@ pub(crate) fn compare_branches(
             "diff".into(),
             "--no-ext-diff".into(),
             "--no-color".into(),
-            format!("{base}...{head}"),
+            format!("{base}..{head}"),
             "--".into(),
         ],
         None,

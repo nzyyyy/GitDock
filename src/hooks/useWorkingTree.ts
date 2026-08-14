@@ -49,7 +49,7 @@ export function useWorkingTree({
     catch (error) { reportError(errorMessage(error)); }
   }, [selectedId, snapshot, reportError, selectedIdRef]);
 
-  const closeDiff = useCallback(() => { setDiff(undefined); setConflict(undefined); setDiffIsFile(false); }, []);
+  const closeDiff = useCallback(() => { setDiff(undefined); setConflict(undefined); setDiffIsFile(false); setSelectedCommit(undefined); }, []);
   const loadIgnored = useCallback(() => refreshStatus(selectedId, true), [selectedId, refreshStatus]);
 
   const openCommit = useCallback(async (oid: string) => {

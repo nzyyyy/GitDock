@@ -35,8 +35,7 @@ test("shows actionable first-run state", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Initialize" }));
 });
 
-test("creates a branch from the inline form", async () => {
-  const prompt = vi.spyOn(window, "prompt");
+test("creates a branch from a branch menu", async () => {
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({
       git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
@@ -56,27 +55,24 @@ test("creates a branch from the inline form", async () => {
 
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Branches" }));
-  const newBranch = await screen.findByRole("button", { name: "New branch" });
-  expect(screen.getByText("Local branches")).toBeInTheDocument();
+  expect(await screen.findByText("Local branches")).toBeInTheDocument();
   expect(screen.getByText("Remote branches")).toBeInTheDocument();
-  fireEvent.click(newBranch);
-  const input = screen.getByRole("textbox", { name: "New branch name" });
-  expect(input).toHaveFocus();
-  expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
-  expect(screen.getAllByRole("button", { name: "More actions" })[0]).toHaveAttribute("aria-haspopup", "menu");
-  expect(document.querySelector("[popover='auto']")).toBeInTheDocument();
-  fireEvent.keyDown(input, { key: "Escape" });
-  expect(screen.queryByRole("textbox", { name: "New branch name" })).not.toBeInTheDocument();
+  expect(document.querySelector(".pane-title")!.querySelectorAll("button")).toHaveLength(0);
 
-  fireEvent.click(newBranch);
-  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-  expect(screen.queryByRole("textbox", { name: "New branch name" })).not.toBeInTheDocument();
+  const row = screen.getByText("origin/main").closest(".object-action-row")!;
+  const trigger = row.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
+  fireEvent.click(trigger);
+  const menu = trigger.nextElementSibling as HTMLDivElement;
+  fireEvent.click([...menu.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "New branch")!);
 
-  fireEvent.click(newBranch);
-  fireEvent.change(screen.getByRole("textbox", { name: "New branch name" }), { target: { value: " feature/test " } });
+  const name = screen.getByRole("textbox", { name: "New branch name" });
+  expect(name).toHaveFocus();
+  expect(screen.getByRole("textbox", { name: "Base branch" })).toHaveValue("origin/main");
+  expect(screen.getByRole("checkbox", { name: "Checkout after creating" })).toBeChecked();
+
+  fireEvent.change(name, { target: { value: " feature/test " } });
   fireEvent.click(screen.getByRole("button", { name: "Create" }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "createBranch", name: "feature/test", checkout: true } }));
-  expect(prompt).not.toHaveBeenCalled();
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "createBranch", name: "feature/test", start_point: "origin/main", checkout: true } }));
 });
 
 test("renders history topology and ref labels", async () => {
@@ -123,7 +119,6 @@ test("loads more history without losing the selected commit", async () => {
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "History" }));
   fireEvent.click((await screen.findAllByRole("button", { name: /Selected/ }))[0]);
-  fireEvent.click(await screen.findByRole("button", { name: /Back/ }));
   fireEvent.click(screen.getByRole("button", { name: "Load more" }));
   expect((await screen.findAllByText("Older")).length).toBeGreaterThan(0);
   expect(screen.getAllByRole("button", { name: /Selected/ }).some((button) => button.classList.contains("selected") || button.parentElement?.classList.contains("selected"))).toBe(true);
@@ -657,6 +652,32 @@ test("refreshes both history views after a successful commit only", async () => 
   await act(async () => operationListener?.({ payload: { operationId: 2, repositoryId: 1, kind: "started", message: "Create commit" } }));
   await act(async () => operationListener?.({ payload: { operationId: 2, repositoryId: 1, kind: "finished", message: "Failed", outcome: "failed" } }));
   expect(historyCalls).toBe(3);
+});
+
+test("refreshes history when the selected repository changes externally", async () => {
+  let repositoryChanged: ((event: { payload: { repositoryId: number } }) => void) | undefined;
+  let historyCalls = 0;
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "11111111", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof repositoryChanged) => {
+    if (event === "repository-changed") repositoryChanged = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "11111111", files: [] });
+    if (command === "get_history") {
+      historyCalls += 1;
+      return Promise.resolve({ commits: [{ oid: historyCalls === 1 ? "aaaaaaaa" : "bbbbbbbb", parents: [], author: "Ada", authoredAt: "2026-08-10T00:00:00Z", subject: historyCalls === 1 ? "First" : "Refreshed", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: null });
+    }
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  expect((await screen.findAllByText("First")).length).toBeGreaterThan(0);
+  await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
+  expect((await screen.findAllByText("Refreshed")).length).toBeGreaterThan(0);
+  expect(historyCalls).toBe(2);
 });
 
 test("refreshes only the changed repository and status for the selected repository", async () => {

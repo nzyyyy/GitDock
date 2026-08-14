@@ -18,7 +18,9 @@
       "minHeight": 700,
       "center": true,
       "dragDropEnabled": false,
-      "decorations": true
+      "decorations": true,
+      "titleBarStyle": "Overlay",
+      "hiddenTitle": true
     }],
     "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost" }
   },

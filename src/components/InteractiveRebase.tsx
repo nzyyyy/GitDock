@@ -5,7 +5,7 @@ import { errorMessage, shortOid, type RunOperation } from "../types";
 
 const ACTIONS: RebaseAction[] = ["pick", "reword", "squash", "fixup", "drop"];
 
-export function InteractiveRebase({ repositoryId, onClose, onRun }: { repositoryId: number; onClose: () => void; onRun: RunOperation }) {
+export function InteractiveRebase({ repositoryId, initialOnto, onClose, onRun }: { repositoryId: number; initialOnto?: string; onClose: () => void; onRun: RunOperation }) {
   const { t } = useI18n();
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [onto, setOnto] = useState("");
@@ -19,7 +19,7 @@ export function InteractiveRebase({ repositoryId, onClose, onRun }: { repository
       const local = all.filter((branch) => !branch.remote);
       setBranches(local);
       const current = local.find((branch) => branch.current);
-      setOnto(current?.upstream ?? current?.name ?? "");
+      setOnto(initialOnto ?? current?.upstream ?? current?.name ?? "");
     }).catch((cause) => setError(errorMessage(cause)));
   }, [repositoryId]);
 
