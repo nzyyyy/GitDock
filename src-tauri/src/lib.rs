@@ -8,32 +8,17 @@ mod snapshot;
 mod store;
 mod summary;
 
-use crate::{
-    git::Git,
-    history::{
-        compare_branches, export_session_log, get_blame, get_branches, get_commit_diff,
-        get_commit_file_diff, get_file_history, get_history, get_rebase_commits, get_remotes,
-        get_stashes, get_submodules, get_tags, open_repository_file,
-    },
-    models::*,
-    operations::{cancel_operation, preview_operation, start_operation},
-    repositories::{
-        add_repository, clone_repository, initialize_repository, relocate_repository,
-        remove_repository, reorder_repositories, save_group_order, save_language, save_layout,
-        set_git_path, update_repository, watch_repository,
-    },
-    snapshot::{get_conflict_document, get_diff, get_status},
-    store::ConfigStore,
-    summary::{refresh_repositories, refresh_repository, SummaryRefreshState},
-};
+use crate::{git::Git, models::*, store::ConfigStore, summary::SummaryRefreshState};
 use notify::RecommendedWatcher;
 use serde::Serialize;
+use specta_typescript::Typescript;
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicU64, Condvar, Mutex},
 };
 use tauri::{Manager, State};
+use tauri_specta::{collect_commands, Builder, ErrorHandlingMode};
 
 pub struct AppState {
     pub(crate) store: Mutex<ConfigStore>,
@@ -82,6 +67,7 @@ impl AppState {
 }
 
 #[tauri::command]
+#[specta::specta]
 fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
     let (settings, records) = {
         let store = state.store.lock().map_err(|_| "Settings are busy")?;
@@ -110,7 +96,61 @@ fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
     })
 }
 
+fn specta_builder() -> Builder<tauri::Wry> {
+    Builder::<tauri::Wry>::new()
+        .commands(collect_commands![
+            bootstrap,
+            summary::refresh_repositories,
+            summary::refresh_repository,
+            repositories::set_git_path,
+            repositories::save_layout,
+            repositories::save_language,
+            repositories::add_repository,
+            repositories::initialize_repository,
+            repositories::clone_repository,
+            repositories::relocate_repository,
+            repositories::update_repository,
+            repositories::reorder_repositories,
+            repositories::save_group_order,
+            repositories::remove_repository,
+            repositories::watch_repository,
+            snapshot::get_status,
+            snapshot::get_diff,
+            snapshot::get_conflict_document,
+            history::get_history,
+            history::export_session_log,
+            history::get_commit_diff,
+            history::compare_branches,
+            history::open_repository_file,
+            history::get_branches,
+            history::get_tags,
+            history::get_remotes,
+            history::get_stashes,
+            history::get_submodules,
+            history::get_rebase_commits,
+            history::get_file_history,
+            history::get_commit_file_diff,
+            history::get_blame,
+            operations::preview_operation,
+            operations::start_operation,
+            operations::cancel_operation
+        ])
+        .typ::<OperationEvent>()
+        .error_handling(ErrorHandlingMode::Throw)
+        .dangerously_cast_bigints_to_number()
+}
+
+fn bindings_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/bindings.ts")
+}
+
 pub fn run() {
+    let builder = specta_builder();
+    #[cfg(debug_assertions)]
+    builder
+        .export(Typescript::default(), bindings_path())
+        .expect("failed to export TypeScript bindings");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {
@@ -140,43 +180,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            bootstrap,
-            refresh_repositories,
-            refresh_repository,
-            set_git_path,
-            save_layout,
-            save_language,
-            add_repository,
-            initialize_repository,
-            clone_repository,
-            relocate_repository,
-            update_repository,
-            reorder_repositories,
-            save_group_order,
-            remove_repository,
-            watch_repository,
-            get_status,
-            get_diff,
-            get_conflict_document,
-            get_history,
-            export_session_log,
-            get_commit_diff,
-            compare_branches,
-            open_repository_file,
-            get_branches,
-            get_tags,
-            get_remotes,
-            get_stashes,
-            get_submodules,
-            get_rebase_commits,
-            get_file_history,
-            get_commit_file_diff,
-            get_blame,
-            preview_operation,
-            start_operation,
-            cancel_operation
-        ])
+        .invoke_handler(builder.invoke_handler())
         .run(tauri::generate_context!())
         .expect("error while running GitDock");
 }
@@ -228,5 +232,29 @@ pub(crate) mod test_util {
             summary_refresh_running: Mutex::new(0),
             summary_refresh_ready: Condvar::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    #[test]
+    fn generated_bindings_are_current() {
+        if std::env::var_os("GITDOCK_UPDATE_BINDINGS").is_some() {
+            specta_builder()
+                .export(Typescript::default(), bindings_path())
+                .unwrap();
+            return;
+        }
+        let output = tempfile::NamedTempFile::new().unwrap();
+        specta_builder()
+            .export(Typescript::default(), output.path())
+            .unwrap();
+        assert_eq!(
+            std::fs::read(output.path()).unwrap(),
+            std::fs::read(bindings_path()).unwrap(),
+            "bindings are stale; run the app in debug mode to regenerate them"
+        );
     }
 }

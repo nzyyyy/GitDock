@@ -20,6 +20,7 @@ impl Drop for SummaryRefreshPermit<'_> {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn refresh_repositories(
     active_repository_id: Option<RepositoryId>,
     state: State<'_, AppState>,
@@ -214,6 +215,7 @@ pub(crate) fn clear_summary_cache(state: &AppState) {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn refresh_repository(
     repository_id: RepositoryId,
     state: State<'_, AppState>,

@@ -19,8 +19,8 @@ export function ChangesPane({ repository, snapshot, onOpen, onOpenExternal, onLo
   const groups = [
     [t("conflictsGroup"), files.filter((f) => f.conflict), "conflict"],
     [t("staged"), files.filter((f) => f.staged && !f.conflict), "staged"],
-    [t("unstaged"), files.filter((f) => f.unstaged && !f.conflict && f.kind !== "Untracked" && !f.ignored), "unstaged"],
-    [t("untracked"), files.filter((f) => f.kind === "Untracked"), "untracked"],
+    [t("unstaged"), files.filter((f) => f.unstaged && !f.conflict && f.kind !== "untracked" && !f.ignored), "unstaged"],
+    [t("untracked"), files.filter((f) => f.kind === "untracked"), "untracked"],
     [t("ignored"), files.filter((f) => f.ignored), "ignored"],
   ] as const;
   const validStagePaths = new Set(groups.filter(([, , type]) => type === "unstaged" || type === "untracked").flatMap(([, entries]) => entries.map((file) => file.path)));

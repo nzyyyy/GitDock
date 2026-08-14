@@ -24,7 +24,7 @@ export function useFileInspection({ reportError, selectedId, selectedIdRef }: {
     if (!repositoryId) return;
     setView("history"); setPath(target); setEntries([]); setSelectedOid(undefined); setDiff(undefined);
     try {
-      const list = await api.fileHistory(repositoryId, target);
+      const list = await api.getFileHistory(repositoryId, target);
       if (selectedIdRef.current === repositoryId) setEntries(list);
     } catch (error) { reportError(errorMessage(error)); }
   }, [selectedId, selectedIdRef, reportError]);
@@ -35,7 +35,7 @@ export function useFileInspection({ reportError, selectedId, selectedIdRef }: {
     if (!repositoryId || !currentPath) return;
     setSelectedOid(oid); setDiff(undefined);
     try {
-      const patch = await api.commitFileDiff(repositoryId, oid, currentPath);
+      const patch = await api.getCommitFileDiff(repositoryId, oid, currentPath);
       if (selectedIdRef.current === repositoryId) setDiff(patch);
     } catch (error) { reportError(errorMessage(error)); }
   }, [selectedId, selectedIdRef, path, reportError]);
@@ -45,7 +45,7 @@ export function useFileInspection({ reportError, selectedId, selectedIdRef }: {
     if (!repositoryId) return;
     setView("blame"); setPath(target); setBlameFile(undefined);
     try {
-      const file = await api.blame(repositoryId, target);
+      const file = await api.getBlame(repositoryId, target);
       if (selectedIdRef.current === repositoryId) setBlameFile(file);
     } catch (error) { reportError(errorMessage(error)); }
   }, [selectedId, selectedIdRef, reportError]);

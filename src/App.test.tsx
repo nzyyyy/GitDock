@@ -72,7 +72,7 @@ test("creates a branch from a branch menu", async () => {
 
   fireEvent.change(name, { target: { value: " feature/test " } });
   fireEvent.click(screen.getByRole("button", { name: "Create" }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "createBranch", name: "feature/test", start_point: "origin/main", checkout: true } }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "createBranch", name: "feature/test", startPoint: "origin/main", checkout: true } }));
 });
 
 test("renders history topology and ref labels", async () => {
@@ -145,7 +145,8 @@ test("hides pagination when switching to a repository without another page", asy
   expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
   expect((await screen.findAllByText("Small history")).length).toBeGreaterThan(0);
   expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
-  expect(invoke).not.toHaveBeenCalledWith("get_history", expect.objectContaining({ cursor: null }));
+  const smallHistoryCalls = vi.mocked(invoke).mock.calls.filter(([command, args]) => command === "get_history" && args && "repositoryId" in args && args.repositoryId === 2);
+  expect(smallHistoryCalls).toEqual([["get_history", { repositoryId: 2, cursor: null, limit: 100 }]]);
 });
 
 test("reloads history after leaving during the initial request", async () => {
@@ -327,12 +328,12 @@ test("stages and unstages multiple selected files", async () => {
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 6, conflictCount: 1, ahead: 0, behind: 0 }],
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [
-      { path: "staged.ts", kind: "Modified", staged: true, unstaged: false, conflict: false, ignored: false },
-      { path: "one.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false },
-      { path: "two.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false },
-      { path: "new.ts", kind: "Untracked", staged: false, unstaged: true, conflict: false, ignored: false },
-      { path: "conflict.ts", kind: "Conflicted", staged: false, unstaged: true, conflict: true, ignored: false },
-      { path: "ignored.log", kind: "Ignored", staged: false, unstaged: false, conflict: false, ignored: true },
+      { path: "staged.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false },
+      { path: "one.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false },
+      { path: "two.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false },
+      { path: "new.ts", kind: "untracked", staged: false, unstaged: true, conflict: false, ignored: false },
+      { path: "conflict.ts", kind: "conflicted", staged: false, unstaged: true, conflict: true, ignored: false },
+      { path: "ignored.log", kind: "ignored", staged: false, unstaged: false, conflict: false, ignored: true },
     ] });
     if (command === "preview_operation") return Promise.resolve({ title: "Operation", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
     if (command === "start_operation") return Promise.resolve({ operationId: 1, accepted: true });
@@ -359,8 +360,8 @@ test("routes conflict actions through previews and shows destructive impact", as
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 2, conflictCount: 1, ahead: 0, behind: 0 }],
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [
-      { path: "conflict.ts", kind: "Conflicted", staged: false, unstaged: true, conflict: true, ignored: false },
-      { path: "work.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false },
+      { path: "conflict.ts", kind: "conflicted", staged: false, unstaged: true, conflict: true, ignored: false },
+      { path: "work.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false },
     ] });
     if (command === "preview_operation" && args && "request" in args && (args.request as { type: string }).type === "discardTracked") return Promise.resolve({ title: "Discard tracked changes", summary: "", risk: "destructive", affectedPaths: ["work.ts"], affectedRefs: [], recoverable: false, requiresConfirmation: true });
     if (command === "preview_operation") return Promise.resolve({ title: "Resolve", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
@@ -388,7 +389,7 @@ test("resolves every internal conflict block through a destructive preview", asy
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 1, ahead: 0, behind: 0 }],
     });
     if (command === "get_status") return Promise.resolve({ id: 9, repositoryId: 1, headOid: "12345678", files: [
-      { path: "conflict.ts", kind: "Conflicted", staged: false, unstaged: true, conflict: true, ignored: false },
+      { path: "conflict.ts", kind: "conflicted", staged: false, unstaged: true, conflict: true, ignored: false },
     ] });
     if (command === "get_conflict_document") return Promise.resolve({ id: "document-1", path: "conflict.ts", segments: [
       { type: "context", text: "const start = true;\n" },
@@ -507,7 +508,7 @@ test("clears the commit message only after a successful early completion event",
       ],
     });
     if (command === "get_status" && args && "repositoryId" in args && args.repositoryId === 2) return Promise.resolve({ id: 2, repositoryId: 2, headOid: "87654321", files: [] });
-    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "file.ts", kind: "Modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "file.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
     if (command === "preview_operation") return Promise.resolve({ title: "Commit", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
     if (command === "start_operation") return new Promise((resolve) => { resolveStart = resolve; });
     return Promise.resolve(undefined);
@@ -574,7 +575,7 @@ test("keeps the commit message after failed and cancelled operations", async () 
       git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 }],
     });
-    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "file.ts", kind: "Modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "file.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
     if (command === "preview_operation") return Promise.resolve({ title: "Commit", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
     if (command === "start_operation") return Promise.resolve({ operationId: ++nextOperationId, accepted: true });
     return Promise.resolve(undefined);
@@ -608,7 +609,7 @@ test("refreshes both history views after a successful commit only", async () => 
       git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 }],
     });
-    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "src/file.ts", kind: "Modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "src/file.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
     if (command === "get_history") {
       historyCalls += 1;
       if (args && "cursor" in args && args.cursor) return new Promise((resolve) => { resolveStalePage = resolve; });
@@ -695,7 +696,7 @@ test("refreshes only the changed repository and status for the selected reposito
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: Number(args && "repositoryId" in args ? args.repositoryId : 1), headOid: "11111111", files: [] });
     if (command === "refresh_repository") {
       const repositoryId = Number(args && "repositoryId" in args ? args.repositoryId : 1);
-      return Promise.resolve({ summary: { ...repositories[repositoryId - 1], changedCount: repositoryId === 1 ? 1 : 0 }, snapshot: repositoryId === 1 ? { id: 3, repositoryId: 1, headOid: "11111111", files: [{ path: "fresh.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] } : undefined });
+      return Promise.resolve({ summary: { ...repositories[repositoryId - 1], changedCount: repositoryId === 1 ? 1 : 0 }, snapshot: repositoryId === 1 ? { id: 3, repositoryId: 1, headOid: "11111111", files: [{ path: "fresh.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] } : undefined });
     }
     return Promise.resolve(undefined);
   });
@@ -727,7 +728,7 @@ test("falls back to status when a worktree refresh has no snapshot", async () =>
   }) as never);
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
-    if (command === "get_status") return Promise.resolve({ id: 4, repositoryId: 1, headOid: "11111111", files: [{ path: "fallback.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
+    if (command === "get_status") return Promise.resolve({ id: 4, repositoryId: 1, headOid: "11111111", files: [{ path: "fallback.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
     if (command === "refresh_repository") return Promise.resolve({ summary: repository });
     return Promise.resolve(undefined);
   });
@@ -784,7 +785,7 @@ test("does not apply a combined snapshot after switching repositories", async ()
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
     if (command === "get_status") {
       const repositoryId = Number(args && "repositoryId" in args ? args.repositoryId : 1);
-      return Promise.resolve({ id: repositoryId, repositoryId, headOid: repositoryId === 1 ? "11111111" : "22222222", files: [{ path: repositoryId === 1 ? "one.ts" : "two.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
+      return Promise.resolve({ id: repositoryId, repositoryId, headOid: repositoryId === 1 ? "11111111" : "22222222", files: [{ path: repositoryId === 1 ? "one.ts" : "two.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
     }
     if (command === "refresh_repository") return new Promise((resolve) => { resolveRefresh = resolve; });
     return Promise.resolve(undefined);
@@ -796,7 +797,7 @@ test("does not apply a combined snapshot after switching repositories", async ()
   await waitFor(() => expect(resolveRefresh).toBeDefined());
   fireEvent.click(screen.getByRole("option", { name: /Two/ }));
   expect(await screen.findByText("two.ts")).toBeInTheDocument();
-  await act(async () => resolveRefresh?.({ summary: repositories[0], snapshot: { id: 9, repositoryId: 1, headOid: "11111111", files: [{ path: "stale.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] } }));
+  await act(async () => resolveRefresh?.({ summary: repositories[0], snapshot: { id: 9, repositoryId: 1, headOid: "11111111", files: [{ path: "stale.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] } }));
   expect(screen.getByText("two.ts")).toBeInTheDocument();
   expect(screen.queryByText("stale.ts")).not.toBeInTheDocument();
 });
@@ -811,14 +812,14 @@ test("ignores a stale status response after switching repositories", async () =>
   vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
     if (command === "get_status" && args && "repositoryId" in args && args.repositoryId === 1) return new Promise((resolve) => staleResolvers.push(resolve));
-    if (command === "get_status") return Promise.resolve({ id: 2, repositoryId: 2, headOid: "22222222", files: [{ path: "new.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
+    if (command === "get_status") return Promise.resolve({ id: 2, repositoryId: 2, headOid: "22222222", files: [{ path: "new.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
     return Promise.resolve(undefined);
   });
 
   render(<App />);
   fireEvent.click(await screen.findByRole("option", { name: /Two/ }));
   expect(await screen.findByText("new.ts")).toBeInTheDocument();
-  await act(async () => staleResolvers.forEach((resolve) => resolve({ id: 1, repositoryId: 1, headOid: "11111111", files: [{ path: "old.ts", kind: "Modified", staged: false, unstaged: true, conflict: false, ignored: false }] })));
+  await act(async () => staleResolvers.forEach((resolve) => resolve({ id: 1, repositoryId: 1, headOid: "11111111", files: [{ path: "old.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] })));
   expect(screen.getByText("new.ts")).toBeInTheDocument();
   expect(screen.queryByText("old.ts")).not.toBeInTheDocument();
 });
@@ -1023,7 +1024,7 @@ test("opens the command palette and routes repository actions through existing p
   const input = await screen.findByPlaceholderText("Search commands");
   fireEvent.change(input, { target: { value: "fetch" } });
   fireEvent.keyDown(input, { key: "Enter" });
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "fetch", prune: false } }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "fetch", remote: null, prune: false } }));
 });
 
 test("keeps the More menu free of cherry-pick, favorite, and set group entries", async () => {

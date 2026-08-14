@@ -32,7 +32,7 @@ export function useOperations({
   const dismissToast = useCallback((id: number) => setToasts((current) => current.filter((toast) => toast.id !== id)), []);
 
   const startOperation = useCallback(async (repositoryId: number, request: OperationRequest, confirmed: boolean, onFinished?: OperationFinished) => {
-    const result = await api.start(repositoryId, request, confirmed);
+    const result = await api.startOperation(repositoryId, request, confirmed);
     const finished = onFinished || request.type === "commit" ? (outcome: OperationOutcome) => {
       if (outcome === "succeeded" && request.type === "commit" && historyRepositoryRef.current === repositoryId) {
         if (selectedIdRef.current === repositoryId) void refreshHistory(repositoryId); else historyRepositoryRef.current = undefined;
@@ -49,7 +49,7 @@ export function useOperations({
   const run = useCallback(async (request: OperationRequest, onFinished?: OperationFinished) => {
     if (!selectedId) { onFinished?.("failed"); return; }
     try {
-      const preview = await api.preview(selectedId, request);
+      const preview = await api.previewOperation(selectedId, request);
       if (preview.requiresConfirmation) { setPending({ repositoryId: selectedId, request, preview, onFinished }); return; }
       await startOperation(selectedId, request, false, onFinished);
     } catch (error) { onFinished?.("failed"); reportError(errorMessage(error)); }
@@ -102,7 +102,7 @@ export function useOperations({
       showDialog({
         title: t("confirm"), message: `${busyOperations.length} ${t("closeOperations")}`, danger: true,
         onSubmit: async () => {
-          await Promise.allSettled(busyOperations.map(api.cancel));
+          await Promise.allSettled(busyOperations.map(api.cancelOperation));
           allowClose.current = true;
           await getCurrentWindow().close();
         },

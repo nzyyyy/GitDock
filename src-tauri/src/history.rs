@@ -14,6 +14,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_history(
     repository_id: RepositoryId,
     cursor: Option<HistoryCursor>,
@@ -44,6 +45,7 @@ const MAX_EXPORTED_LOG_LINES: usize = 10_000;
 const MAX_EXPORTED_LOG_BYTES: usize = 5 * 1024 * 1024;
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) async fn export_session_log(
     file_name: String,
     lines: Vec<SessionLogLine>,
@@ -141,6 +143,7 @@ fn write_session_log(path: &Path, lines: Vec<SessionLogLine>) -> Result<(), Stri
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_commit_diff(
     repository_id: RepositoryId,
     oid: String,
@@ -172,6 +175,7 @@ pub(crate) fn get_commit_diff(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_rebase_commits(
     repository_id: RepositoryId,
     onto: String,
@@ -185,6 +189,7 @@ pub(crate) fn get_rebase_commits(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_file_history(
     repository_id: RepositoryId,
     path: String,
@@ -197,6 +202,7 @@ pub(crate) fn get_file_history(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_commit_file_diff(
     repository_id: RepositoryId,
     oid: String,
@@ -212,6 +218,7 @@ pub(crate) fn get_commit_file_diff(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_blame(
     repository_id: RepositoryId,
     path: String,
@@ -224,6 +231,7 @@ pub(crate) fn get_blame(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn compare_branches(
     repository_id: RepositoryId,
     base: String,
@@ -255,6 +263,7 @@ pub(crate) fn compare_branches(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn open_repository_file(
     repository_id: RepositoryId,
     path: String,
@@ -276,6 +285,7 @@ pub(crate) fn open_repository_file(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_branches(
     repository_id: RepositoryId,
     state: State<'_, AppState>,
@@ -284,6 +294,7 @@ pub(crate) fn get_branches(
     g.branches(Path::new(&state.record(repository_id)?.path))
 }
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_tags(
     repository_id: RepositoryId,
     state: State<'_, AppState>,
@@ -292,6 +303,7 @@ pub(crate) fn get_tags(
     g.tags(Path::new(&state.record(repository_id)?.path))
 }
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_remotes(
     repository_id: RepositoryId,
     state: State<'_, AppState>,
@@ -300,6 +312,7 @@ pub(crate) fn get_remotes(
     g.remotes(Path::new(&state.record(repository_id)?.path))
 }
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_stashes(
     repository_id: RepositoryId,
     state: State<'_, AppState>,
@@ -308,6 +321,7 @@ pub(crate) fn get_stashes(
     g.stashes(Path::new(&state.record(repository_id)?.path))
 }
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_submodules(
     repository_id: RepositoryId,
     state: State<'_, AppState>,

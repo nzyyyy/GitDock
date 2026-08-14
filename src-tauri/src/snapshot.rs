@@ -24,6 +24,7 @@ pub(crate) struct CachedHunk {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_status(
     repository_id: RepositoryId,
     include_ignored: bool,
@@ -62,6 +63,7 @@ pub(crate) fn cache_snapshot(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_diff(
     repository_id: RepositoryId,
     snapshot_id: u64,
@@ -104,6 +106,7 @@ pub(crate) fn get_diff(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn get_conflict_document(
     repository_id: RepositoryId,
     snapshot_id: u64,

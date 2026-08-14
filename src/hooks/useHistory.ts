@@ -23,7 +23,7 @@ export function useHistory({
     historyRepository.current = repositoryId;
     setCommits([]); setNextHistoryCursor(undefined); setSelectedCommit(undefined); setHistoryLoading(true);
     try {
-      const page = await api.history(repositoryId);
+      const page = await api.getHistory(repositoryId, null, 100);
       if (request !== historyRequest.current || repositoryId !== selectedIdRef.current) return;
       setCommits(page.commits); setNextHistoryCursor(page.nextCursor ?? undefined);
     } catch (error) {
@@ -59,7 +59,7 @@ export function useHistory({
     const request = historyRequest.current;
     setHistoryLoading(true);
     try {
-      const page = await api.history(repositoryId, nextHistoryCursor);
+      const page = await api.getHistory(repositoryId, nextHistoryCursor, 100);
       if (request !== historyRequest.current || historyRepository.current !== repositoryId) return;
       setCommits((current) => [...new Map([...current, ...page.commits].map((commit) => [commit.oid, commit])).values()]);
       setNextHistoryCursor(page.nextCursor ?? undefined);

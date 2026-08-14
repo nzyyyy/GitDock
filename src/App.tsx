@@ -27,7 +27,7 @@ import { errorMessage, FAVORITES_GROUP, shortOid, UNGROUPED_GROUP, type CommandI
 const MemoDiffView = memo(DiffView);
 
 export default function App() {
-  const [git, setGit] = useState<GitInfo>({ supported: false });
+  const [git, setGit] = useState<GitInfo>({ path: null, version: null, supported: false, error: null });
   const [selectedId, setSelectedId] = useState<number>();
   const [tab, setTab] = useState<Tab>("changes");
   const [outputOpen, setOutputOpen] = useState(false);
@@ -121,7 +121,7 @@ export default function App() {
     catch (error) { reportError(errorMessage(error)); }
   };
   const register = async () => { const path = await chooseDirectory(); if (path) await mutateRepository(() => api.addRepository(path)); };
-  const initialize = async () => { const path = await chooseDirectory(); if (path) await mutateRepository(() => api.initRepository(path)); };
+  const initialize = async () => { const path = await chooseDirectory(); if (path) await mutateRepository(() => api.initializeRepository(path)); };
   const clone = () => showDialog({ title: t("clone"), submitLabel: t("clone"), fields: [{ name: "url", label: t("remoteUrl"), required: true }], onSubmit: async ({ url }) => {
     const destination = await chooseDirectory();
     if (!destination) return;
@@ -147,14 +147,15 @@ export default function App() {
     if (typeof path === "string") setGit(await api.setGitPath(path));
   };
   const forcePush = () => {
-    if (!selectedId || !selected?.branch) return;
+    const branch = selected?.branch;
+    if (!selectedId || !branch) return;
     showDialog({ title: t("forcePush"), submitLabel: t("forcePush"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: async ({ remote }) => {
       try {
         const value = String(remote).trim();
-        const branches = await api.branches(selectedId);
-        const expectedOid = branches.find((branch) => branch.remote && branch.name === `${value}/${selected.branch}`)?.oid;
-        if (!expectedOid) throw new Error(`${t("fetch")} ${value}/${selected.branch} ${t("fetchBeforeForce")}`);
-        await run({ type: "forcePushWithLease", remote: value, branch: selected.branch, expectedOid });
+        const branches = await api.getBranches(selectedId);
+        const expectedOid = branches.find((candidate) => candidate.remote && candidate.name === `${value}/${branch}`)?.oid;
+        if (!expectedOid) throw new Error(`${t("fetch")} ${value}/${branch} ${t("fetchBeforeForce")}`);
+        await run({ type: "forcePushWithLease", remote: value, branch, expectedOid });
       } catch (error) { reportError(errorMessage(error)); }
     } });
   };
@@ -190,12 +191,12 @@ export default function App() {
     command("stashes", "stashes", () => { setTab("stashes"); closeDiff(); }, Boolean(selected)),
     command("add", "addRepository", register, git.supported), command("clone", "clone", clone, git.supported), command("init", "initialize", initialize, git.supported),
     command("refresh", "refreshAll", refreshRepositories), command("language", "language", toggleLanguage), command("git", "selectGit", selectGit),
-    command("fetch", "fetch", () => { void run({ type: "fetch", prune: false }); }, Boolean(selected?.capabilities.canManageRemotes)),
-    command("pull", "pull", () => { void run({ type: "pull" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
+    command("fetch", "fetch", () => { void run({ type: "fetch", remote: null, prune: false }); }, Boolean(selected?.capabilities.canManageRemotes)),
+    command("pull", "pull", () => { void run({ type: "pull", strategy: null }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
     command("pull-merge", "pullMerge", () => { void run({ type: "pull", strategy: "merge" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
     command("pull-rebase", "pullRebase", () => { void run({ type: "pull", strategy: "rebase" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
     command("pull-ff", "pullFf", () => { void run({ type: "pull", strategy: "fastForwardOnly" }); }, Boolean(selected?.capabilities.canWriteWorkTree)),
-    command("push", "push", () => { void run({ type: "push" }); }, Boolean(selected?.capabilities.canManageRemotes)),
+    command("push", "push", () => { void run({ type: "push", remote: null, branch: null }); }, Boolean(selected?.capabilities.canManageRemotes)),
     command("force-push", "forcePush", forcePush, Boolean(selected?.capabilities.canManageRemotes && selected.branch)),
     command("upstream", "setUpstream", () => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } }), Boolean(selected?.branch)),
     command("cherry-pick", "cherryPickCommits", () => showDialog({ title: t("cherryPickCommits"), fields: [{ name: "commits", label: t("commitOids"), required: true }], onSubmit: ({ commits }) => run({ type: "cherryPick", commits: String(commits).trim().split(/\s+/) }) }), Boolean(selected?.capabilities.canWriteWorkTree)),
@@ -209,7 +210,7 @@ export default function App() {
 
   const outputPanel = <section className={`output-panel ${outputOpen ? "open" : ""}`}>
     <button className="output-handle" onClick={() => setOutputOpen((value) => !value)}><span>{t("gitOutput")}</span><span>{busyOperations.length ? `${busyOperations.length} ${t("running")}` : `${logCount} ${t("lines")}`} {outputOpen ? "⌄" : "⌃"}</span></button>
-    {outputOpen && <><div className="resize-handle resize-output" onPointerDown={(event) => beginResize("output", event)} /><div className="log" style={{ height: outputHeight }}><div className="log-toolbar">{busyOperations.map((id) => <button key={id} onClick={() => api.cancel(id)}>{t("cancel")} #{id}</button>)}<button disabled={!logCount} onClick={exportLogs}>{t("exportLog")}</button><button onClick={clearLogs}>{t("clear")}</button></div>{readLogs(logBuffer.current).map((line) => <div key={line.id} className={`log-${line.kind}`}><time>{line.timestamp}</time> {line.message}</div>)}</div></>}
+    {outputOpen && <><div className="resize-handle resize-output" onPointerDown={(event) => beginResize("output", event)} /><div className="log" style={{ height: outputHeight }}><div className="log-toolbar">{busyOperations.map((id) => <button key={id} onClick={() => api.cancelOperation(id)}>{t("cancel")} #{id}</button>)}<button disabled={!logCount} onClick={exportLogs}>{t("exportLog")}</button><button onClick={clearLogs}>{t("clear")}</button></div>{readLogs(logBuffer.current).map((line) => <div key={line.id} className={`log-${line.kind}`}><time>{line.timestamp}</time> {line.message}</div>)}</div></>}
   </section>;
   const toastStack = <ToastStack toasts={toasts} onDismiss={dismissToast} />;
 
@@ -242,7 +243,7 @@ export default function App() {
         <header className="topbar" data-tauri-drag-region>
           <div className="repo-context"><span className="branch-dot" /> <strong>{selected?.name}</strong><code>{selected?.branch || shortOid(selected?.headOid)}</code></div>
           <nav aria-label={t("workflows")}>{(["changes", "history", "branches", "stashes"] as Tab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => { setTab(item); closeDiff(); }}>{t(item)}</button>)}</nav>
-          <div className="sync-actions"><button aria-label={t("commandPalette")} onClick={() => setPaletteOpen(true)}>⌘K</button><button disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "fetch", prune: false })}>{t("fetch")}</button><button disabled={!selected?.capabilities.canWriteWorkTree} onClick={() => run({ type: "pull" })}>{t("pull")}</button><button className="primary" disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "push" })}>{t("push")}</button><RowMenu label={t("more")}><button onClick={refreshRepositories}>{t("refreshAll")}</button><button onClick={() => run({ type: "pull", strategy: "merge" })}>{t("pullMerge")}</button><button onClick={() => run({ type: "pull", strategy: "rebase" })}>{t("pullRebase")}</button><button onClick={() => run({ type: "pull", strategy: "fastForwardOnly" })}>{t("pullFf")}</button><button onClick={forcePush}>{t("forcePush")}</button><button onClick={() => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } })}>{t("setUpstream")}</button><button onClick={() => run({ type: "undoLastCommit" })}>{t("undoCommit")}</button><button onClick={() => showDialog({ title: t("renameEntry"), fields: [{ name: "name", label: t("repositoryName"), value: selected?.name, required: true }], onSubmit: ({ name }) => updateSelected({ name: String(name).trim() }) })}>{t("renameEntry")}</button><button onClick={relocateSelected}>{t("relocate")}</button><button onClick={selectGit}>{t("selectGit")}</button><button className="menu-danger" onClick={removeSelected}>{t("removeGitDock")}</button></RowMenu></div>
+          <div className="sync-actions"><button aria-label={t("commandPalette")} onClick={() => setPaletteOpen(true)}>⌘K</button><button disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "fetch", remote: null, prune: false })}>{t("fetch")}</button><button disabled={!selected?.capabilities.canWriteWorkTree} onClick={() => run({ type: "pull", strategy: null })}>{t("pull")}</button><button className="primary" disabled={!selected?.capabilities.canManageRemotes} onClick={() => run({ type: "push", remote: null, branch: null })}>{t("push")}</button><RowMenu label={t("more")}><button onClick={refreshRepositories}>{t("refreshAll")}</button><button onClick={() => run({ type: "pull", strategy: "merge" })}>{t("pullMerge")}</button><button onClick={() => run({ type: "pull", strategy: "rebase" })}>{t("pullRebase")}</button><button onClick={() => run({ type: "pull", strategy: "fastForwardOnly" })}>{t("pullFf")}</button><button onClick={forcePush}>{t("forcePush")}</button><button onClick={() => showDialog({ title: t("setUpstream"), fields: [{ name: "remote", label: t("remote"), value: "origin", required: true }], onSubmit: ({ remote }) => { if (selected?.branch) run({ type: "setUpstream", remote: String(remote).trim(), branch: selected.branch }); } })}>{t("setUpstream")}</button><button onClick={() => run({ type: "undoLastCommit" })}>{t("undoCommit")}</button><button onClick={() => showDialog({ title: t("renameEntry"), fields: [{ name: "name", label: t("repositoryName"), value: selected?.name, required: true }], onSubmit: ({ name }) => updateSelected({ name: String(name).trim() }) })}>{t("renameEntry")}</button><button onClick={relocateSelected}>{t("relocate")}</button><button onClick={selectGit}>{t("selectGit")}</button><button className="menu-danger" onClick={removeSelected}>{t("removeGitDock")}</button></RowMenu></div>
         </header>
 
         <div className="work-area" style={{ gridTemplateColumns: `minmax(480px, 1fr) ${rightWidth}px` }}>

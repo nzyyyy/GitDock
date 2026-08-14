@@ -31,7 +31,7 @@ export function useRepositoryList({
     const request = ++repositoryListRequest.current;
     streamedSummaries.current.clear();
     try {
-      const summaries = await api.refreshRepositories(selectedIdRef.current);
+      const summaries = await api.refreshRepositories(selectedIdRef.current ?? null);
       if (request !== repositoryListRequest.current) return;
       setRepositories(summaries.map((summary) => streamedSummaries.current.get(summary.id) ?? summary));
     }
@@ -48,7 +48,8 @@ export function useRepositoryList({
       startTransition(() => {
         setRepositories((current) => current.map((item) => item.id === repositoryId ? refresh.summary : item));
         if (selected) {
-          if (refresh.snapshot) setSnapshot((current) => repositoryId === selectedIdRef.current ? refresh.snapshot : current);
+          const refreshedSnapshot = refresh.snapshot;
+          if (refreshedSnapshot) setSnapshot((current) => repositoryId === selectedIdRef.current ? refreshedSnapshot : current);
           else if (refresh.summary.kind !== "workTree") setSnapshot((current) => repositoryId === selectedIdRef.current ? undefined : current);
         }
       });
@@ -130,7 +131,7 @@ export function useRepositoryList({
     if (!moving || !target) return;
     moving = targetGroup === FAVORITES_GROUP
       ? { ...moving, favorite: true }
-      : { ...moving, favorite: false, group: targetGroup === UNGROUPED_GROUP ? undefined : targetGroup };
+      : { ...moving, favorite: false, group: targetGroup === UNGROUPED_GROUP ? null : targetGroup };
     const index = targetId ? target.repositories.findIndex((repository) => repository.id === targetId) : -1;
     target.repositories.splice(index < 0 ? target.repositories.length : index + Number(after), 0, moving);
     void persistRepositoryLayout(groups.flatMap((group) => group.repositories));
@@ -162,7 +163,7 @@ export function useRepositoryList({
   }, [customGroups, repositoryGroups, persistCustomGroups]);
 
   const updateGroup = useCallback((group: string, replacement?: string) => {
-    const ordered = [...repositories].sort((left, right) => left.order - right.order).map((repository) => repository.group === group ? { ...repository, group: replacement } : repository);
+    const ordered = [...repositories].sort((left, right) => left.order - right.order).map((repository) => repository.group === group ? { ...repository, group: replacement ?? null } : repository);
     void persistRepositoryLayout(ordered);
     const next = replacement === undefined
       ? customGroups.filter((key) => key !== group)

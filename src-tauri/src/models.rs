@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
+use specta::Type;
 
 pub type RepositoryId = u64;
 pub type OperationId = u64;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GitInfo {
     pub path: Option<String>,
@@ -12,7 +13,7 @@ pub struct GitInfo {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub git_path: Option<String>,
@@ -26,7 +27,7 @@ pub struct Settings {
     pub group_order: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub enum Language {
     #[default]
     #[serde(rename = "en")]
@@ -49,7 +50,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryRecord {
     pub id: RepositoryId,
@@ -60,7 +61,7 @@ pub struct RepositoryRecord {
     pub order: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RepositoryKind {
     WorkTree,
@@ -68,7 +69,7 @@ pub enum RepositoryKind {
     Missing,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryCapabilities {
     pub can_read: bool,
@@ -77,7 +78,7 @@ pub struct RepositoryCapabilities {
     pub can_manage_remotes: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositorySummary {
     pub id: RepositoryId,
@@ -99,14 +100,14 @@ pub struct RepositorySummary {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryRefresh {
     pub summary: RepositorySummary,
     pub snapshot: Option<WorkingTreeSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryPlacement {
     pub id: RepositoryId,
@@ -115,7 +116,7 @@ pub struct RepositoryPlacement {
     pub order: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Bootstrap {
     pub git: GitInfo,
@@ -123,7 +124,7 @@ pub struct Bootstrap {
     pub repositories: Vec<RepositorySummary>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ChangeKind {
     Added,
@@ -138,7 +139,7 @@ pub enum ChangeKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileChange {
     pub path: String,
@@ -152,7 +153,7 @@ pub struct FileChange {
     pub ignored: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkingTreeSnapshot {
     pub id: u64,
@@ -161,7 +162,7 @@ pub struct WorkingTreeSnapshot {
     pub files: Vec<FileChange>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffHunk {
     pub id: String,
@@ -169,7 +170,7 @@ pub struct DiffHunk {
     pub patch: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffFile {
     pub path: String,
@@ -180,7 +181,7 @@ pub struct DiffFile {
     pub hunks: Vec<DiffHunk>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConflictDocument {
     pub id: String,
@@ -188,7 +189,7 @@ pub struct ConflictDocument {
     pub segments: Vec<ConflictSegment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ConflictSegment {
     Context {
@@ -202,14 +203,14 @@ pub enum ConflictSegment {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConflictResolution {
     pub block_id: String,
     pub choice: ConflictChoice,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ConflictChoice {
     Current,
@@ -217,14 +218,14 @@ pub enum ConflictChoice {
     Both,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphLane {
     pub column: usize,
     pub parent_columns: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitInfo {
     pub oid: String,
@@ -236,21 +237,21 @@ pub struct CommitInfo {
     pub lane: GraphLane,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryCursor {
     pub offset: usize,
     pub active_lanes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitPage {
     pub commits: Vec<CommitInfo>,
     pub next_cursor: Option<HistoryCursor>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionLogLine {
     pub timestamp: String,
@@ -258,7 +259,7 @@ pub struct SessionLogLine {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchInfo {
     pub name: String,
@@ -268,7 +269,7 @@ pub struct BranchInfo {
     pub upstream: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TagInfo {
     pub name: String,
@@ -276,7 +277,7 @@ pub struct TagInfo {
     pub subject: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteInfo {
     pub name: String,
@@ -284,7 +285,7 @@ pub struct RemoteInfo {
     pub push_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StashInfo {
     pub index: usize,
@@ -292,7 +293,7 @@ pub struct StashInfo {
     pub subject: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmoduleInfo {
     pub path: String,
@@ -301,7 +302,7 @@ pub struct SubmoduleInfo {
     pub state: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileHistoryEntry {
     pub oid: String,
@@ -310,7 +311,7 @@ pub struct FileHistoryEntry {
     pub subject: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BlameHunk {
     pub oid: String,
@@ -320,7 +321,7 @@ pub struct BlameHunk {
     pub line_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BlameFile {
     pub path: String,
@@ -328,7 +329,7 @@ pub struct BlameFile {
     pub hunks: Vec<BlameHunk>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RebaseCommit {
     pub oid: String,
@@ -336,7 +337,7 @@ pub struct RebaseCommit {
     pub author: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RebaseAction {
     Pick,
@@ -346,7 +347,7 @@ pub enum RebaseAction {
     Drop,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RebaseStep {
     pub oid: String,
@@ -354,7 +355,7 @@ pub struct RebaseStep {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OngoingGitState {
     pub kind: OngoingKind,
@@ -363,7 +364,7 @@ pub struct OngoingGitState {
     pub can_abort: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum OngoingKind {
     Merge,
@@ -372,7 +373,7 @@ pub enum OngoingKind {
     Revert,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum RiskLevel {
     Normal,
@@ -380,7 +381,7 @@ pub enum RiskLevel {
     Destructive,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationPreview {
     pub title: String,
@@ -392,7 +393,7 @@ pub struct OperationPreview {
     pub requires_confirmation: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -559,7 +560,7 @@ pub enum OperationRequest {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum PullStrategy {
     Merge,
@@ -567,7 +568,7 @@ pub enum PullStrategy {
     FastForwardOnly,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum MergeMode {
     FastForward,
@@ -575,14 +576,14 @@ pub enum MergeMode {
     Squash,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ConflictSide {
     Ours,
     Theirs,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum OperationEventKind {
     Started,
@@ -591,7 +592,7 @@ pub enum OperationEventKind {
     Finished,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum OperationOutcome {
     Succeeded,
@@ -599,7 +600,7 @@ pub enum OperationOutcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationEvent {
     pub operation_id: OperationId,
@@ -610,7 +611,7 @@ pub struct OperationEvent {
     pub outcome: Option<OperationOutcome>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationResult {
     pub operation_id: OperationId,

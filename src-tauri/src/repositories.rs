@@ -20,6 +20,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn set_git_path(
     path: Option<String>,
     state: State<'_, AppState>,
@@ -39,6 +40,7 @@ pub(crate) fn set_git_path(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn save_layout(
     left_width: u16,
     right_width: u16,
@@ -53,6 +55,7 @@ pub(crate) fn save_layout(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn save_language(language: Language, state: State<'_, AppState>) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
     store.config.settings.language = language;
@@ -60,6 +63,7 @@ pub(crate) fn save_language(language: Language, state: State<'_, AppState>) -> R
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn add_repository(
     path: String,
     state: State<'_, AppState>,
@@ -106,6 +110,7 @@ pub(crate) fn register_repository(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn initialize_repository(
     path: String,
     state: State<'_, AppState>,
@@ -119,6 +124,7 @@ pub(crate) fn initialize_repository(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn clone_repository(
     url: String,
     destination: String,
@@ -166,6 +172,7 @@ pub(crate) fn clone_repository(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn relocate_repository(
     repository_id: RepositoryId,
     path: String,
@@ -202,6 +209,7 @@ pub(crate) fn relocate_repository(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn update_repository(
     repository: RepositoryRecord,
     state: State<'_, AppState>,
@@ -225,6 +233,7 @@ pub(crate) fn update_repository(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn reorder_repositories(
     placements: Vec<RepositoryPlacement>,
     state: State<'_, AppState>,
@@ -316,6 +325,7 @@ fn sanitize_group_order(groups: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn save_group_order(
     groups: Vec<String>,
     state: State<'_, AppState>,
@@ -326,6 +336,7 @@ pub(crate) fn save_group_order(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn remove_repository(
     repository_id: RepositoryId,
     state: State<'_, AppState>,
@@ -343,6 +354,7 @@ pub(crate) fn remove_repository(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn watch_repository(
     repository_id: RepositoryId,
     state: State<'_, AppState>,

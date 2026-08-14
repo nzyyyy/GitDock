@@ -12,7 +12,7 @@ export type DialogField = { name: string; label: string; value?: DialogValue; re
 export type DialogSpec = { title: string; message?: string; submitLabel?: string; danger?: boolean; fields?: DialogField[]; onSubmit: (values: Record<string, DialogValue>) => void | Promise<void> };
 export type CommandItem = { id: string; label: string; search: string; action: () => void };
 
-export const shortOid = (oid?: string) => oid?.slice(0, 8) ?? "—";
+export const shortOid = (oid?: string | null) => oid?.slice(0, 8) ?? "—";
 export const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 export const FAVORITES_GROUP = "\0favorites";
 export const UNGROUPED_GROUP = "\0ungrouped";

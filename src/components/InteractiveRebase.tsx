@@ -15,7 +15,7 @@ export function InteractiveRebase({ repositoryId, initialOnto, onClose, onRun }:
   const [error, setError] = useState("");
 
   useEffect(() => {
-    api.branches(repositoryId).then((all) => {
+    api.getBranches(repositoryId).then((all) => {
       const local = all.filter((branch) => !branch.remote);
       setBranches(local);
       const current = local.find((branch) => branch.current);
@@ -26,9 +26,9 @@ export function InteractiveRebase({ repositoryId, initialOnto, onClose, onRun }:
   useEffect(() => {
     if (!onto) { setCommits([]); setSteps([]); return; }
     setLoading(true); setError("");
-    api.rebaseCommits(repositoryId, onto).then((list) => {
+    api.getRebaseCommits(repositoryId, onto).then((list) => {
       setCommits(list);
-      setSteps(list.map((commit) => ({ oid: commit.oid, action: "pick" as RebaseAction })));
+      setSteps(list.map((commit) => ({ oid: commit.oid, action: "pick" as RebaseAction, message: null })));
     }).catch((cause) => { setCommits([]); setSteps([]); setError(errorMessage(cause)); })
       .finally(() => setLoading(false));
   }, [repositoryId, onto]);

@@ -18,6 +18,7 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn preview_operation(
     repository_id: RepositoryId,
     request: OperationRequest,
@@ -61,6 +62,7 @@ pub(crate) fn preview_operation(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn start_operation(
     repository_id: RepositoryId,
     request: OperationRequest,
@@ -361,6 +363,7 @@ fn replace_file(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn cancel_operation(
     operation_id: OperationId,
     state: State<'_, AppState>,
