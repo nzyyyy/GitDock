@@ -23,7 +23,7 @@ const en = {
   resolve: "Resolve", useCurrent: "Use current target", useIncoming: "Use incoming commit", openExternal: "Open externally", runMergetool: "Run configured mergetool",
   markResolved: "Mark resolved", openInternalEditor: "Open internal editor", back: "Back", binaryDiff: "Binary diff", diffTooLarge: "Diff exceeds the safe preview limit", openDifftool: "Open configured difftool",
   baseVersion: "Base", currentVersion: "Current", incomingVersion: "Incoming", conflictBlock: "Conflict block", useBoth: "Use both", resolveAndStage: "Resolve and stage", blocksRemaining: "blocks remaining", readyToResolve: "Ready to resolve",
-  diffLayout: "Diff layout", unified: "Unified", sideBySide: "Side by side", commandPalette: "Command palette", searchCommands: "Search commands",
+  diffLayout: "Diff layout", unified: "Unified", sideBySide: "Side by side", commandPalette: "Command palette", searchCommands: "Search commands", noMatchingCommands: "No matching commands",
   unstageHunk: "Unstage hunk", stageHunk: "Stage hunk", repositoryGraph: "Repository graph", commitsLoaded: "commits loaded", commits: "Commits", loadMore: "Load more",
   commitDiff: "Commit", branchComparison: "Branch comparison",
   cherryPick: "Cherry-pick", revert: "Revert", detachedHead: "detached HEAD", refsIntegration: "Refs and integration",
@@ -40,6 +40,7 @@ const en = {
   operationFailed: "Failed", operationCancelled: "Cancelled", dismissNotification: "Dismiss notification",
   interactiveRebase: "Interactive rebase", startRebase: "Start rebase", onto: "Rebase onto", pick: "Pick", reword: "Reword", squash: "Squash", fixup: "Fixup",
   rewordMessage: "New message", noCommitsToRebase: "No commits to rebase onto this base", fileHistory: "File history", blame: "Blame", historyOf: "History of", blameOf: "Blame of", author: "Author", noHistory: "No history for this file",
+  resizeRepositories: "Resize repository sidebar", resizeDetails: "Resize details pane", resizeOutput: "Resize Git output", moveCommitUp: "Move commit up", moveCommitDown: "Move commit down", rebaseAction: "Rebase action",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -65,7 +66,7 @@ const zh: Record<MessageKey, string> = {
   resolve: "解决", useCurrent: "使用当前目标", useIncoming: "使用传入提交", openExternal: "在外部打开", runMergetool: "运行已配置的合并工具",
   markResolved: "标记为已解决", openInternalEditor: "打开内部编辑器", back: "返回", binaryDiff: "二进制差异", diffTooLarge: "差异超过安全预览限制", openDifftool: "打开已配置的差异工具",
   baseVersion: "基础版本", currentVersion: "当前版本", incomingVersion: "传入版本", conflictBlock: "冲突块", useBoth: "保留两者", resolveAndStage: "解决并暂存", blocksRemaining: "个冲突块未选择", readyToResolve: "可以解决冲突",
-  diffLayout: "差异布局", unified: "统一视图", sideBySide: "并排视图", commandPalette: "命令面板", searchCommands: "搜索命令",
+  diffLayout: "差异布局", unified: "统一视图", sideBySide: "并排视图", commandPalette: "命令面板", searchCommands: "搜索命令", noMatchingCommands: "没有匹配的命令",
   unstageHunk: "取消暂存区块", stageHunk: "暂存区块", repositoryGraph: "仓库图", commitsLoaded: "个提交已加载", commits: "提交", loadMore: "加载更多",
   commitDiff: "提交", branchComparison: "分支比较",
   cherryPick: "拣选", revert: "还原", detachedHead: "分离的 HEAD", refsIntegration: "引用与集成",
@@ -82,6 +83,7 @@ const zh: Record<MessageKey, string> = {
   operationFailed: "操作失败", operationCancelled: "操作已取消", dismissNotification: "关闭通知",
   interactiveRebase: "交互式变基", startRebase: "开始变基", onto: "变基目标", pick: "保留", reword: "改写提交信息", squash: "压缩", fixup: "修复",
   rewordMessage: "新的提交信息", noCommitsToRebase: "该基础上没有可变基的提交", fileHistory: "文件历史", blame: "追溯", historyOf: "历史：", blameOf: "追溯：", author: "作者", noHistory: "该文件没有历史记录",
+  resizeRepositories: "调整仓库侧栏宽度", resizeDetails: "调整详情面板宽度", resizeOutput: "调整 Git 输出高度", moveCommitUp: "上移提交", moveCommitDown: "下移提交", rebaseAction: "变基操作",
 };
 
 const dictionaries: Record<Language, Record<MessageKey, string>> = { en, "zh-CN": zh };

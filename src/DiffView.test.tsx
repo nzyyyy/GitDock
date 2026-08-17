@@ -19,7 +19,9 @@ test("renders file headers, no-newline patches, and asymmetric changes in both l
   render(<View />);
   expect(screen.getByText(/diff --git a\/src\/file\.ts/)).toBeInTheDocument();
   expect([...document.querySelectorAll(".diff-code-delete")].some((cell) => cell.textContent === "const removed = true;")).toBe(true);
+  expect(screen.getByRole("button", { name: "Unified" })).toHaveAttribute("aria-pressed", "true");
   fireEvent.click(screen.getByRole("button", { name: "Side by side" }));
+  expect(screen.getByRole("button", { name: "Side by side" })).toHaveAttribute("aria-pressed", "true");
   expect([...document.querySelectorAll(".diff-code-insert")].some((cell) => cell.textContent === "const newValue = 2;")).toBe(true);
   expect(document.querySelector(".diff-split")).toBeInTheDocument();
 });

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type BranchInfo, type RebaseAction, type RebaseCommit, type RebaseStep } from "../api";
 import { useI18n } from "../i18n";
 import { errorMessage, shortOid, type RunOperation } from "../types";
@@ -7,12 +7,20 @@ const ACTIONS: RebaseAction[] = ["pick", "reword", "squash", "fixup", "drop"];
 
 export function InteractiveRebase({ repositoryId, initialOnto, onClose, onRun }: { repositoryId: number; initialOnto?: string; onClose: () => void; onRun: RunOperation }) {
   const { t } = useI18n();
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [onto, setOnto] = useState("");
   const [commits, setCommits] = useState<RebaseCommit[]>([]);
   const [steps, setSteps] = useState<RebaseStep[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (typeof dialog.showModal === "function") dialog.showModal(); else dialog.setAttribute("open", "");
+    return () => { if (dialog.open && typeof dialog.close === "function") dialog.close(); };
+  }, []);
 
   useEffect(() => {
     api.getBranches(repositoryId).then((all) => {
@@ -54,18 +62,18 @@ export function InteractiveRebase({ repositoryId, initialOnto, onClose, onRun }:
     onClose();
   };
 
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="form-dialog rebase-dialog" role="dialog" aria-modal="true" aria-labelledby="rebase-title" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}>
+  return <dialog ref={dialogRef} className="form-dialog rebase-dialog" aria-labelledby="rebase-title" onCancel={(event) => { event.preventDefault(); onClose(); }} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <header><h2 id="rebase-title">{t("interactiveRebase")}</h2></header>
-    <label className="dialog-field"><span>{t("onto")}</span><select value={onto} onChange={(event) => setOnto(event.target.value)}>{!branches.some((branch) => branch.name === onto) && onto && <option value={onto}>{onto}</option>}{branches.map((branch) => <option key={branch.name} value={branch.name}>{branch.name}{branch.current ? " *" : ""}</option>)}</select></label>
-    {loading && <p>{t("running")}…</p>}
-    {error && <p className="dialog-error">{error}</p>}
+    <label className="dialog-field"><span>{t("onto")}</span><select autoFocus name="onto" autoComplete="off" value={onto} onChange={(event) => setOnto(event.target.value)}>{!branches.some((branch) => branch.name === onto) && onto && <option value={onto}>{onto}</option>}{branches.map((branch) => <option key={branch.name} value={branch.name}>{branch.name}{branch.current ? " *" : ""}</option>)}</select></label>
+    {loading && <p role="status">{t("running")}…</p>}
+    {error && <p className="dialog-error" role="alert">{error}</p>}
     {!loading && steps.length > 0 && <div className="rebase-list">{steps.map((step, index) => <div className="rebase-row" key={step.oid}>
-      <span className="rebase-order"><button type="button" onClick={() => move(index, -1)} disabled={index === 0}>↑</button><button type="button" onClick={() => move(index, 1)} disabled={index === steps.length - 1}>↓</button></span>
-      <select value={step.action} onChange={(event) => setAction(index, event.target.value as RebaseAction)}>{ACTIONS.map((action) => <option key={action} value={action}>{t(action)}</option>)}</select>
+      <span className="rebase-order"><button type="button" aria-label={`${t("moveCommitUp")} ${shortOid(step.oid)}`} onClick={() => move(index, -1)} disabled={index === 0}>↑</button><button type="button" aria-label={`${t("moveCommitDown")} ${shortOid(step.oid)}`} onClick={() => move(index, 1)} disabled={index === steps.length - 1}>↓</button></span>
+      <select name={`action-${step.oid}`} autoComplete="off" aria-label={`${t("rebaseAction")} ${shortOid(step.oid)}`} value={step.action} onChange={(event) => setAction(index, event.target.value as RebaseAction)}>{ACTIONS.map((action) => <option key={action} value={action}>{t(action)}</option>)}</select>
       <span className="rebase-commit"><code>{shortOid(step.oid)}</code><span>{subjectByOid.get(step.oid)}</span></span>
-      {step.action === "reword" && <input value={step.message ?? ""} placeholder={subjectByOid.get(step.oid)} onChange={(event) => setMessage(index, event.target.value)} />}
+      {step.action === "reword" && <input name={`message-${step.oid}`} autoComplete="off" aria-label={`${t("rewordMessage")} ${shortOid(step.oid)}`} value={step.message ?? ""} placeholder={subjectByOid.get(step.oid)} onChange={(event) => setMessage(index, event.target.value)} />}
     </div>)}</div>}
     {!loading && !error && steps.length === 0 && onto && <p>{t("noCommitsToRebase")}</p>}
     <footer><button type="button" onClick={onClose}>{t("cancel")}</button><button className="danger" onClick={start} disabled={!startable}>{t("startRebase")}</button></footer>
-  </section></div>;
+  </dialog>;
 }

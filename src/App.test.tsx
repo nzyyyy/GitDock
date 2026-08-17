@@ -45,6 +45,7 @@ test("creates a branch from a branch menu", async () => {
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
     if (command === "get_branches") return Promise.resolve([
       { name: "main", oid: "12345678", current: true, remote: false },
+      { name: "feature", oid: "87654321", current: false, remote: false },
       { name: "origin/main", oid: "12345678", current: false, remote: true },
     ]);
     if (["get_tags", "get_remotes", "get_submodules"].includes(command)) return Promise.resolve([]);
@@ -54,10 +55,18 @@ test("creates a branch from a branch menu", async () => {
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Branches" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Branches" }));
   expect(await screen.findByText("Local branches")).toBeInTheDocument();
   expect(screen.getByText("Remote branches")).toBeInTheDocument();
   expect(document.querySelector(".pane-title")!.querySelectorAll("button")).toHaveLength(0);
+
+  const featureRow = screen.getByText("feature").closest(".object-action-row")!;
+  fireEvent.click(featureRow.querySelector(".object-copy")!);
+  expect(invoke).not.toHaveBeenCalledWith("preview_operation", expect.objectContaining({ request: { type: "switchBranch", name: "feature" } }));
+  const featureTrigger = featureRow.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
+  fireEvent.click(featureTrigger);
+  fireEvent.click([...featureTrigger.nextElementSibling!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Switch")!);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "switchBranch", name: "feature" } }));
 
   const row = screen.getByText("origin/main").closest(".object-action-row")!;
   const trigger = row.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
@@ -93,7 +102,7 @@ test("renders history topology and ref labels", async () => {
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   await screen.findByText("HEAD -> main");
   expect(screen.getByText("tag: v1.0")).toHaveClass("tag");
   expect(document.querySelectorAll(".graph-node")).toHaveLength(4);
@@ -112,13 +121,14 @@ test("loads more history without losing the selected commit", async () => {
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
     if (command === "get_history" && args && "cursor" in args && args.cursor && (args.cursor as { offset: number }).offset === 100) return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Older", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: undefined });
     if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Selected", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: { offset: 100, activeLanes: [] } });
-    if (command === "get_commit_diff") return Promise.resolve("diff --git a/a b/a");
+    if (command === "get_commit_diff") return Promise.resolve("commit aaaaaaaa\nAuthor: Ada\n\n    Selected\n\ndiff --git a/a.txt b/a.txt\nindex e69de29..7898192 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -0,0 +1 @@\n+hello");
     return Promise.resolve([]);
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   fireEvent.click((await screen.findAllByRole("button", { name: /Selected/ }))[0]);
+  await waitFor(() => expect(document.querySelector(".gitdock-diff")).toHaveTextContent("hello"));
   fireEvent.click(screen.getByRole("button", { name: "Load more" }));
   expect((await screen.findAllByText("Older")).length).toBeGreaterThan(0);
   expect(screen.getAllByRole("button", { name: /Selected/ }).some((button) => button.classList.contains("selected") || button.parentElement?.classList.contains("selected"))).toBe(true);
@@ -139,9 +149,9 @@ test("hides pagination when switching to a repository without another page", asy
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   expect(await screen.findByRole("button", { name: "Load more" })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("option", { name: /Small/ }));
+  fireEvent.click(screen.getByRole("button", { name: /Small/ }));
   expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
   expect((await screen.findAllByText("Small history")).length).toBeGreaterThan(0);
   expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
@@ -167,10 +177,10 @@ test("reloads history after leaving during the initial request", async () => {
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   await waitFor(() => expect(historyCalls).toBe(1));
-  fireEvent.click(screen.getByRole("button", { name: "Changes" }));
-  fireEvent.click(screen.getByRole("button", { name: "History" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+  fireEvent.click(screen.getByRole("tab", { name: "History" }));
   expect((await screen.findAllByText("Reloaded")).length).toBeGreaterThan(0);
   expect(historyCalls).toBe(2);
 });
@@ -194,6 +204,9 @@ test("starts clone from a validated in-app form", async () => {
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Clone" }));
   const input = screen.getByRole("textbox", { name: "Remote URL" });
+  expect(input).toHaveAttribute("name", "url");
+  expect(input).toHaveAttribute("type", "url");
+  expect(input).toHaveAttribute("autocomplete", "off");
   const submit = screen.getByRole("dialog").querySelector<HTMLButtonElement>("button[type='submit']")!;
   expect(submit).toBeDisabled();
   fireEvent.change(input, { target: { value: " https://example.com/repo.git " } });
@@ -232,17 +245,17 @@ test("repository list refresh preserves the current selection", async () => {
   });
 
   render(<App />);
-  const alpha = await screen.findByRole("option", { name: /Alpha/ });
+  const alpha = await screen.findByRole("button", { name: /Alpha/ });
   fireEvent.click(alpha);
-  expect(alpha).toHaveAttribute("aria-selected", "true");
+  expect(alpha).toHaveAttribute("aria-current", "true");
   await act(async () => repositorySummaryListener?.({ payload: { ...repositories[0], changedCount: 3 } }));
-  expect(screen.getByRole("option", { name: /Alpha/ })).toHaveTextContent("±3");
+  expect(screen.getByRole("button", { name: /Alpha/ })).toHaveTextContent("±3");
   act(() => { void repositoryListListener?.(); });
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("refresh_repositories", { activeRepositoryId: 1 }));
   await act(async () => repositorySummaryListener?.({ payload: { ...repositories[1], changedCount: 4 } }));
   await act(async () => resolveRefresh?.(repositories));
-  expect(screen.getByRole("option", { name: /Alpha/ })).toHaveAttribute("aria-selected", "true");
-  expect(screen.getByRole("option", { name: /Beta/ })).toHaveTextContent("±4");
+  expect(screen.getByRole("button", { name: /Alpha/ })).toHaveAttribute("aria-current", "true");
+  expect(screen.getByRole("button", { name: /Beta/ })).toHaveTextContent("±4");
 });
 
 test("ignores an older refresh-all response", async () => {
@@ -261,12 +274,12 @@ test("ignores an older refresh-all response", async () => {
   });
 
   render(<App />);
-  await screen.findByRole("option", { name: /Repo/ });
+  await screen.findByRole("button", { name: /Repo/ });
   act(() => { void repositoryListListener?.(); void repositoryListListener?.(); });
   await waitFor(() => expect(resolvers).toHaveLength(2));
   await act(async () => resolvers[1]([{ ...repository, changedCount: 2 }]));
   await act(async () => resolvers[0]([{ ...repository, changedCount: 1 }]));
-  expect(screen.getByRole("option", { name: /Repo/ })).toHaveTextContent("±2");
+  expect(screen.getByRole("button", { name: /Repo/ })).toHaveTextContent("±2");
 });
 
 test("uses light-dismiss popovers for secondary menus", async () => {
@@ -293,9 +306,11 @@ test("uses light-dismiss popovers for secondary menus", async () => {
   expect(showPopover).toHaveBeenCalledWith();
   expect(menu.style.height).toBe("122px");
   expect(more).toHaveAttribute("aria-expanded", "true");
+  expect(menu.querySelector("button")).toHaveFocus();
   fireEvent.click(menu.querySelector("button")!);
   expect(hidePopover).toHaveBeenCalled();
   expect(more).toHaveAttribute("aria-expanded", "false");
+  expect(more).toHaveFocus();
 
   fireEvent.click(more);
   hidePopover.mockClear();
@@ -304,6 +319,43 @@ test("uses light-dismiss popovers for secondary menus", async () => {
   querySelector.mockRestore();
   expect(hidePopover).toHaveBeenCalledOnce();
   expect(more).toHaveAttribute("aria-expanded", "false");
+});
+
+test("supports keyboard workflow tabs and layout separators", async () => {
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    if (command === "get_history") return Promise.resolve({ commits: [], nextCursor: null });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  const changes = await screen.findByRole("tab", { name: "Changes" });
+  fireEvent.keyDown(changes, { key: "ArrowRight" });
+  const history = screen.getByRole("tab", { name: "History" });
+  expect(history).toHaveAttribute("aria-selected", "true");
+  expect(history).toHaveFocus();
+  expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "workflow-tab-history");
+
+  const left = screen.getByRole("separator", { name: "Resize repository sidebar" });
+  fireEvent.keyDown(left, { key: "ArrowRight" });
+  expect(left).toHaveAttribute("aria-valuenow", "250");
+  expect(invoke).toHaveBeenCalledWith("save_layout", { leftWidth: 250, rightWidth: 360, outputHeight: 190 });
+  fireEvent.keyDown(left, { key: "End" });
+  expect(left).toHaveAttribute("aria-valuenow", "420");
+
+  const right = screen.getByRole("separator", { name: "Resize details pane" });
+  fireEvent.keyDown(right, { key: "ArrowLeft", shiftKey: true });
+  expect(right).toHaveAttribute("aria-valuenow", "410");
+
+  fireEvent.click(screen.getByRole("button", { name: /Git output/ }));
+  const output = screen.getByRole("separator", { name: "Resize Git output" });
+  fireEvent.keyDown(output, { key: "ArrowUp" });
+  expect(output).toHaveAttribute("aria-valuenow", "200");
 });
 
 test("switches language and persists the choice", async () => {
@@ -447,7 +499,7 @@ test("opens output on failure and confirms cancellation before close", async () 
   });
 
   render(<App />);
-  await screen.findByRole("option");
+  await screen.findByRole("listitem");
   await act(async () => operationListener?.({ payload: { operationId: 9, repositoryId: 1, kind: "started", message: "Pull" } }));
   const preventDefault = vi.fn();
   await act(async () => closeListener?.({ preventDefault }));
@@ -476,7 +528,7 @@ test("shows at most three dismissible operation results for three seconds", asyn
   });
 
   render(<App />);
-  await screen.findByRole("option");
+  await screen.findByRole("listitem");
   vi.useFakeTimers();
   for (const [operationId, title, outcome] of [[1, "Fetch", "succeeded"], [2, "Pull", "failed"], [3, "Push", "cancelled"], [4, "Create commit", "succeeded"]] as const) {
     await act(async () => operationListener?.({ payload: { operationId, repositoryId: 1, kind: "started", message: title } }));
@@ -530,7 +582,7 @@ test("clears the commit message only after a successful early completion event",
   fireEvent.change(message, { target: { value: "Ship it" } });
   fireEvent.click(commitButton);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "commit", message: "Ship it", amend: false, signoff: false } }));
-  expect(await screen.findByRole("button", { name: "running" })).toBeDisabled();
+  expect(await screen.findByRole("button", { name: "running…" })).toBeDisabled();
   await waitFor(() => expect(resolveStart).toBeDefined());
   await act(async () => operationListener?.({ payload: { operationId: 7, repositoryId: 1, kind: "started", message: "Commit" } }));
   await act(async () => operationListener?.({ payload: { operationId: 7, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
@@ -553,13 +605,13 @@ test("clears the commit message only after a successful early completion event",
   fireEvent.click(screen.getByRole("button", { name: "Commit staged changes" }));
   await waitFor(() => expect(resolveStart).toBeDefined());
   await act(async () => operationListener?.({ payload: { operationId: 9, repositoryId: 1, kind: "started", message: "Commit" } }));
-  fireEvent.click(screen.getByRole("option", { name: /Other/ }));
+  fireEvent.click(screen.getByRole("button", { name: /Other/ }));
   const otherMessage = await screen.findByRole("textbox", { name: "Commit message" });
   fireEvent.change(otherMessage, { target: { value: "Other draft" } });
   await act(async () => operationListener?.({ payload: { operationId: 9, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
   await act(async () => resolveStart?.({ operationId: 9, accepted: true }));
   expect(otherMessage).toHaveValue("Other draft");
-  fireEvent.click(screen.getByRole("option", { name: /Repo/ }));
+  fireEvent.click(screen.getByRole("button", { name: /Repo/ }));
   expect(await screen.findByRole("textbox", { name: "Commit message" })).toHaveValue("");
 });
 
@@ -626,11 +678,11 @@ test("refreshes both history views after a successful commit only", async () => 
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   expect((await screen.findAllByText("Old commit"))).toHaveLength(2);
   fireEvent.click(screen.getByRole("button", { name: "Load more" }));
   await waitFor(() => expect(resolveStalePage).toBeDefined());
-  fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
   const message = await screen.findByRole("textbox", { name: "Commit message" });
   const fileMain = document.querySelector(".file-main")!;
   expect(fileMain.querySelector("b")?.nextElementSibling).toHaveTextContent("src");
@@ -640,13 +692,13 @@ test("refreshes both history views after a successful commit only", async () => 
   await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "started", message: "Create commit" } }));
   await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
   await waitFor(() => expect(historyCalls).toBe(3));
-  fireEvent.click(screen.getByRole("button", { name: "History" }));
+  fireEvent.click(screen.getByRole("tab", { name: "History" }));
   expect((await screen.findAllByText("New commit"))).toHaveLength(2);
   await act(async () => resolveStalePage?.({ commits: [{ oid: "cccccccc", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Stale page", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: { offset: 200, activeLanes: [] } }));
   expect(screen.queryByText("Stale page")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
   fireEvent.change(await screen.findByRole("textbox", { name: "Commit message" }), { target: { value: "Try again" } });
   fireEvent.click(screen.getByRole("button", { name: "Commit staged changes" }));
   await waitFor(() => expect(operationId).toBe(2));
@@ -674,7 +726,7 @@ test("refreshes history when the selected repository changes externally", async 
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   expect((await screen.findAllByText("First")).length).toBeGreaterThan(0);
   await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
   expect((await screen.findAllByText("Refreshed")).length).toBeGreaterThan(0);
@@ -702,7 +754,7 @@ test("refreshes only the changed repository and status for the selected reposito
   });
 
   render(<App />);
-  await screen.findByRole("option", { name: /One/ });
+  await screen.findByRole("button", { name: /One/ });
   const message = screen.getByRole("textbox", { name: "Commit message" });
   fireEvent.change(message, { target: { value: "Draft while refreshing" } });
   vi.mocked(invoke).mockClear();
@@ -714,7 +766,7 @@ test("refreshes only the changed repository and status for the selected reposito
   await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
   await waitFor(() => expect(screen.getByText("fresh.ts")).toBeInTheDocument());
   expect(invoke).not.toHaveBeenCalledWith("get_status", expect.objectContaining({ repositoryId: 1 }));
-  expect(screen.getByRole("option", { name: /One/ })).toHaveTextContent("±1");
+  expect(screen.getByRole("button", { name: /One/ })).toHaveTextContent("±1");
   expect(screen.getByRole("textbox", { name: "Commit message" })).toBe(message);
   expect(message).toHaveValue("Draft while refreshing");
 });
@@ -734,7 +786,7 @@ test("falls back to status when a worktree refresh has no snapshot", async () =>
   });
 
   render(<App />);
-  await screen.findByRole("option", { name: /Repo/ });
+  await screen.findByRole("button", { name: /Repo/ });
   vi.mocked(invoke).mockClear();
   await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_status", { repositoryId: 1, includeIgnored: false }));
@@ -757,17 +809,17 @@ test("ignores an older repository summary response", async () => {
   });
 
   render(<App />);
-  await screen.findByRole("option", { name: /Repo/ });
+  await screen.findByRole("button", { name: /Repo/ });
   await act(async () => {
     repositoryChanged?.({ payload: { repositoryId: 1 } });
     repositoryChanged?.({ payload: { repositoryId: 1 } });
   });
   await waitFor(() => expect(refreshResolvers).toHaveLength(2));
   await act(async () => refreshResolvers[1]({ summary: { ...repository, branch: "newer", changedCount: 2 }, snapshot: { id: 3, repositoryId: 1, headOid: "11111111", files: [] } }));
-  await waitFor(() => expect(screen.getByRole("option", { name: /Repo/ })).toHaveTextContent("newer"));
+  await waitFor(() => expect(screen.getByRole("button", { name: /Repo/ })).toHaveTextContent("newer"));
   await act(async () => refreshResolvers[0]({ summary: { ...repository, branch: "older", changedCount: 1 }, snapshot: { id: 2, repositoryId: 1, headOid: "11111111", files: [] } }));
-  expect(screen.getByRole("option", { name: /Repo/ })).toHaveTextContent("newer");
-  expect(screen.getByRole("option", { name: /Repo/ })).not.toHaveTextContent("older");
+  expect(screen.getByRole("button", { name: /Repo/ })).toHaveTextContent("newer");
+  expect(screen.getByRole("button", { name: /Repo/ })).not.toHaveTextContent("older");
 });
 
 test("does not apply a combined snapshot after switching repositories", async () => {
@@ -795,7 +847,7 @@ test("does not apply a combined snapshot after switching repositories", async ()
   await screen.findByText("one.ts");
   act(() => { repositoryChanged?.({ payload: { repositoryId: 1 } }); });
   await waitFor(() => expect(resolveRefresh).toBeDefined());
-  fireEvent.click(screen.getByRole("option", { name: /Two/ }));
+  fireEvent.click(screen.getByRole("button", { name: /Two/ }));
   expect(await screen.findByText("two.ts")).toBeInTheDocument();
   await act(async () => resolveRefresh?.({ summary: repositories[0], snapshot: { id: 9, repositoryId: 1, headOid: "11111111", files: [{ path: "stale.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] } }));
   expect(screen.getByText("two.ts")).toBeInTheDocument();
@@ -817,7 +869,7 @@ test("ignores a stale status response after switching repositories", async () =>
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("option", { name: /Two/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Two/ }));
   expect(await screen.findByText("new.ts")).toBeInTheDocument();
   await act(async () => staleResolvers.forEach((resolve) => resolve({ id: 1, repositoryId: 1, headOid: "11111111", files: [{ path: "old.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] })));
   expect(screen.getByText("new.ts")).toBeInTheDocument();
@@ -842,7 +894,7 @@ test("does not reload branch data for unrelated operation events", async () => {
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Branches" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Branches" }));
   await screen.findByText("Local branches");
   expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_branches")).toHaveLength(1);
   await act(async () => operationListener?.({ payload: { operationId: 3, repositoryId: 1, kind: "started", message: "Fetch" } }));
@@ -868,7 +920,7 @@ test("automatically loads history at the sentinel and keeps the DOM windowed", a
     return Promise.resolve(undefined);
   });
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 1, activeLanes: [] }, limit: 100 }));
   await screen.findByText("600 commits loaded");
   expect(document.querySelectorAll(".graph-row").length).toBeLessThan(60);
@@ -897,11 +949,11 @@ test("groups repositories, moves one into favorites, and disables drag while sea
   render(<App />);
   const search = await screen.findByRole("textbox", { name: "Search repositories" });
   fireEvent.change(search, { target: { value: "a" } });
-  const filteredAlpha = await screen.findByRole("option", { name: /Alpha/ });
+  const filteredAlpha = (await screen.findByRole("button", { name: /Alpha/ })).closest<HTMLElement>("[role='listitem']")!;
   expect(filteredAlpha).toHaveAttribute("draggable", "false");
   expect([...filteredAlpha.querySelectorAll<HTMLButtonElement>(".row-menu-popover button")].every((button) => button.disabled)).toBe(true);
   fireEvent.change(search, { target: { value: "" } });
-  const alpha = await screen.findByRole("option", { name: /Alpha/ });
+  const alpha = (await screen.findByRole("button", { name: /Alpha/ })).closest<HTMLElement>("[role='listitem']")!;
   const favorites = screen.getByRole("button", { name: /Favorites0/ }).closest("section")!;
   const workButton = screen.getByRole("button", { name: /Work1/ });
   const work = workButton.closest("section")!;
@@ -950,9 +1002,9 @@ test("sorts favorite repositories before or after the dropped row", async () => 
     return Promise.resolve(undefined);
   });
   render(<App />);
-  const alpha = await screen.findByRole("option", { name: /Alpha/ });
-  const beta = screen.getByRole("option", { name: /Beta/ });
-  const gamma = screen.getByRole("option", { name: /Gamma/ });
+  const alpha = (await screen.findByRole("button", { name: /Alpha/ })).closest<HTMLElement>("[role='listitem']")!;
+  const beta = screen.getByRole("button", { name: /Beta/ }).closest<HTMLElement>("[role='listitem']")!;
+  const gamma = screen.getByRole("button", { name: /Gamma/ }).closest<HTMLElement>("[role='listitem']")!;
   vi.spyOn(alpha, "getBoundingClientRect").mockReturnValue({ top: 10, height: 40 } as DOMRect);
   vi.spyOn(beta, "getBoundingClientRect").mockReturnValue({ top: 10, height: 40 } as DOMRect);
   vi.spyOn(gamma, "getBoundingClientRect").mockReturnValue({ top: 10, height: 40 } as DOMRect);
@@ -982,8 +1034,8 @@ test("sorts favorite repositories before or after the dropped row", async () => 
   ] }));
 
   vi.mocked(invoke).mockClear();
-  const movedAlpha = screen.getByRole("option", { name: /Alpha/ });
-  const movedBeta = screen.getByRole("option", { name: /Beta/ });
+  const movedAlpha = screen.getByRole("button", { name: /Alpha/ }).closest<HTMLElement>("[role='listitem']")!;
+  const movedBeta = screen.getByRole("button", { name: /Beta/ }).closest<HTMLElement>("[role='listitem']")!;
   vi.spyOn(movedBeta, "getBoundingClientRect").mockReturnValue({ top: 10, height: 40 } as DOMRect);
   fireEvent.dragStart(movedAlpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn(), setDragImage: vi.fn() } });
   dragAt("dragover", movedBeta, 1, 20);
@@ -1021,7 +1073,11 @@ test("opens the command palette and routes repository actions through existing p
   render(<App />);
   await screen.findByRole("button", { name: "Command palette" });
   fireEvent.keyDown(window, { key: "k", metaKey: true });
-  const input = await screen.findByPlaceholderText("Search commands");
+  const input = await screen.findByRole("combobox", { name: "Search commands" });
+  expect(input).toHaveAttribute("name", "commandSearch");
+  expect(input).toHaveAttribute("autocomplete", "off");
+  fireEvent.change(input, { target: { value: "not-a-command" } });
+  expect(screen.getByRole("status")).toHaveTextContent("No matching commands");
   fireEvent.change(input, { target: { value: "fetch" } });
   fireEvent.keyDown(input, { key: "Enter" });
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "fetch", remote: null, prune: false } }));

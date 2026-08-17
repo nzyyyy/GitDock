@@ -8,7 +8,7 @@ export type OperationFinished = (outcome: OperationOutcome) => void;
 export type RunOperation = (request: OperationRequest, onFinished?: OperationFinished) => void | Promise<void>;
 export type Pending = { repositoryId: number; request: OperationRequest; preview: OperationPreview; onFinished?: OperationFinished };
 export type DialogValue = string | boolean;
-export type DialogField = { name: string; label: string; value?: DialogValue; required?: boolean; type?: "text" | "checkbox" };
+export type DialogField = { name: string; label: string; value?: DialogValue; required?: boolean; type?: "text" | "url" | "checkbox" };
 export type DialogSpec = { title: string; message?: string; submitLabel?: string; danger?: boolean; fields?: DialogField[]; onSubmit: (values: Record<string, DialogValue>) => void | Promise<void> };
 export type CommandItem = { id: string; label: string; search: string; action: () => void };
 

@@ -22,5 +22,6 @@ test("renders content lines with hunk authors and line numbers", () => {
   expect(screen.getByText("c")).toBeInTheDocument();
   expect(screen.getByText(/Alice/)).toBeInTheDocument();
   expect(screen.getByText(/Bob/)).toBeInTheDocument();
+  expect(document.querySelector(".blame-author")).toHaveTextContent(new Intl.DateTimeFormat("en").format(new Date(0)));
   expect(screen.getAllByText("1").length).toBeGreaterThan(0);
 });
