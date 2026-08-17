@@ -11,10 +11,11 @@ mod summary;
 use crate::{git::Git, models::*, store::ConfigStore, summary::SummaryRefreshState};
 use notify::RecommendedWatcher;
 use serde::Serialize;
+#[cfg(any(debug_assertions, test))]
 use specta_typescript::Typescript;
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{atomic::AtomicU64, Condvar, Mutex},
 };
 use tauri::{Manager, State};
@@ -140,8 +141,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
         .dangerously_cast_bigints_to_number()
 }
 
+#[cfg(any(debug_assertions, test))]
 fn bindings_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/bindings.ts")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src/bindings.ts")
 }
 
 pub fn run() {

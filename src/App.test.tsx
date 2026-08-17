@@ -47,6 +47,9 @@ test("creates a branch from a branch menu", async () => {
       { name: "main", oid: "12345678", current: true, remote: false },
       { name: "feature", oid: "87654321", current: false, remote: false },
       { name: "origin/main", oid: "12345678", current: false, remote: true },
+      { name: "origin/feature", oid: "87654321", current: false, remote: true },
+      { name: "origin/team/topic", oid: "abcdef12", current: false, remote: true },
+      { name: "origin/HEAD", oid: "12345678", current: false, remote: true },
     ]);
     if (["get_tags", "get_remotes", "get_submodules"].includes(command)) return Promise.resolve([]);
     if (command === "preview_operation") return Promise.resolve({ title: "Create branch", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
@@ -67,6 +70,26 @@ test("creates a branch from a branch menu", async () => {
   fireEvent.click(featureTrigger);
   fireEvent.click([...featureTrigger.nextElementSibling!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Switch")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "switchBranch", name: "feature" } }));
+
+  vi.mocked(invoke).mockClear();
+  const trackedRow = screen.getByText("origin/feature").closest(".object-action-row")!;
+  const trackedTrigger = trackedRow.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
+  fireEvent.click(trackedTrigger);
+  fireEvent.click([...trackedTrigger.nextElementSibling!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Switch")!);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "switchBranch", name: "feature" } }));
+
+  vi.mocked(invoke).mockClear();
+  const untrackedRow = screen.getByText("origin/team/topic").closest(".object-action-row")!;
+  const untrackedTrigger = untrackedRow.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
+  fireEvent.click(untrackedTrigger);
+  fireEvent.click([...untrackedTrigger.nextElementSibling!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Switch")!);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "createBranch", name: "team/topic", startPoint: "origin/team/topic", checkout: true } }));
+
+  const headRow = screen.getByText("origin/HEAD").closest(".object-action-row")!;
+  const headTrigger = headRow.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
+  fireEvent.click(headTrigger);
+  expect([...headTrigger.nextElementSibling!.querySelectorAll<HTMLButtonElement>("button")].some((button) => button.textContent === "Switch")).toBe(false);
+  fireEvent.click(headTrigger);
 
   const row = screen.getByText("origin/main").closest(".object-action-row")!;
   const trigger = row.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
