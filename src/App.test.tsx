@@ -730,6 +730,28 @@ test("refreshes both history views after a successful commit only", async () => 
   expect(historyCalls).toBe(3);
 });
 
+test("disables normal commits without staged changes but permits amend", async () => {
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "file.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  const message = await screen.findByRole("textbox", { name: "Commit message" });
+  const commitButton = screen.getByRole("button", { name: "Commit staged changes" });
+  fireEvent.change(message, { target: { value: "Amend this" } });
+  expect(commitButton).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Amend" }));
+  expect(commitButton).toBeEnabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Amend" }));
+  expect(commitButton).toBeDisabled();
+});
+
 test("refreshes history when the selected repository changes externally", async () => {
   let repositoryChanged: ((event: { payload: { repositoryId: number } }) => void) | undefined;
   let historyCalls = 0;
