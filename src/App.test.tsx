@@ -160,18 +160,67 @@ test("loads more history without losing the selected commit", async () => {
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
     if (command === "get_history" && args && "cursor" in args && args.cursor && (args.cursor as { offset: number }).offset === 100) return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Older", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: undefined });
     if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Selected", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: { offset: 100, activeLanes: [] } });
-    if (command === "get_commit_diff") return Promise.resolve("commit aaaaaaaa\nAuthor: Ada\n\n    Selected\n\ndiff --git a/a.txt b/a.txt\nindex e69de29..7898192 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -0,0 +1 @@\n+hello");
+    if (command === "get_commit_detail") return Promise.resolve({ oid: "aaaaaaaa", author: "Ada", email: "ada@example.com", authoredAt: "2026-08-09T00:00:00Z", message: "Selected", files: [{ path: "a.txt", originalPath: null, additions: 1, deletions: 0 }] });
     return Promise.resolve([]);
   });
 
   render(<App />);
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   fireEvent.click((await screen.findAllByRole("button", { name: /Selected/ }))[0]);
-  await waitFor(() => expect(document.querySelector(".gitdock-diff")).toHaveTextContent("hello"));
+  await waitFor(() => expect(document.querySelector(".commit-detail")).toBeInTheDocument());
   fireEvent.click(screen.getByRole("button", { name: "Load more" }));
   expect((await screen.findAllByText("Older")).length).toBeGreaterThan(0);
   expect(screen.getAllByRole("button", { name: /Selected/ }).some((button) => button.classList.contains("selected") || button.parentElement?.classList.contains("selected"))).toBe(true);
   expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 100, activeLanes: [] }, limit: 100 });
+});
+
+test("opens commit details then a file diff", async () => {
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaaaaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaaaaaaaaaa", files: [] });
+    if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaaaaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Selected", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: null });
+    if (command === "get_commit_detail") return Promise.resolve({
+      oid: "aaaaaaaaaaaaaaaa",
+      author: "Ada",
+      email: "ada@example.com",
+      authoredAt: "2026-08-09T00:00:00Z",
+      message: "Selected\n\nBody line",
+      files: [
+        { path: "src/a.txt", originalPath: null, additions: 1, deletions: 0 },
+        { path: "image.png", originalPath: null, additions: null, deletions: null },
+      ],
+    });
+    if (command === "get_commit_file_diff") return Promise.resolve("diff --git a/src/a.txt b/src/a.txt\nindex e69de29..7898192 100644\n--- a/src/a.txt\n+++ b/src/a.txt\n@@ -0,0 +1 @@\n+hello");
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("tab", { name: "History" }));
+  fireEvent.click((await screen.findAllByRole("button", { name: /Selected/ }))[0]);
+  expect(await screen.findByText("aaaaaaaaaaaaaaaa")).toBeInTheDocument();
+  expect(screen.getByText("Commit ID")).toBeInTheDocument();
+  expect(screen.getByText("Author")).toBeInTheDocument();
+  expect(screen.getByText("Date")).toBeInTheDocument();
+  expect(screen.getByText("Commit message")).toBeInTheDocument();
+  expect(screen.getByText("Changed files")).toBeInTheDocument();
+  expect(screen.getByText(/Ada <ada@example.com>/)).toBeInTheDocument();
+  expect(screen.getByText(/Body line/)).toBeInTheDocument();
+  expect(screen.getByText("+1")).toHaveClass("commit-stat-add");
+  expect(screen.getByText("−0")).toHaveClass("commit-stat-del");
+  expect(screen.getByText("binary")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /a\.txt/ }));
+  await waitFor(() => expect(document.querySelector(".gitdock-diff")).toHaveTextContent("hello"));
+  expect(screen.getByText("aaaaaaaa")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+  expect(await screen.findByText("aaaaaaaaaaaaaaaa")).toBeInTheDocument();
+  expect(document.querySelector(".gitdock-diff")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+  expect(document.querySelector(".commit-detail")).not.toBeInTheDocument();
+  expect(document.querySelector(".history-canvas")).toBeInTheDocument();
 });
 
 test("hides pagination when switching to a repository without another page", async () => {

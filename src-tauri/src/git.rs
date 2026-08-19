@@ -590,6 +590,23 @@ impl Git {
         Ok(parse_file_history(&String::from_utf8_lossy(&output.stdout)))
     }
 
+    pub fn commit_detail(&self, cwd: &Path, oid: &str) -> Result<CommitDetail, String> {
+        let output = ensure_success(self.run(
+            cwd,
+            &[
+                "show".into(),
+                "--first-parent".into(),
+                "--no-patch".into(),
+                "--numstat".into(),
+                "--format=%H%x1f%an%x1f%ae%x1f%aI%x1f%B%x1e".into(),
+                oid.into(),
+                "--".into(),
+            ],
+            None,
+        )?)?;
+        parse_commit_detail(&String::from_utf8_lossy(&output.stdout))
+    }
+
     pub fn commit_file_diff(&self, cwd: &Path, oid: &str, path: &str) -> Result<String, String> {
         let output = ensure_success(self.run(
             cwd,
@@ -1166,6 +1183,70 @@ fn parse_rebase_commits(text: &str) -> Vec<RebaseCommit> {
         .collect()
 }
 
+fn parse_commit_detail(text: &str) -> Result<CommitDetail, String> {
+    let (header, stats) = text.split_once('\x1e').ok_or("Invalid commit detail")?;
+    let mut fields = header.trim_start_matches('\n').splitn(5, '\x1f');
+    Ok(CommitDetail {
+        oid: fields
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or("Commit id is missing")?
+            .into(),
+        author: fields.next().ok_or("Commit author is missing")?.into(),
+        email: fields.next().ok_or("Commit email is missing")?.into(),
+        authored_at: fields.next().ok_or("Commit date is missing")?.into(),
+        message: fields.next().unwrap_or_default().trim_end().into(),
+        files: stats.lines().filter_map(parse_numstat_line).collect(),
+    })
+}
+
+fn parse_numstat_line(line: &str) -> Option<CommitFileChange> {
+    let mut fields = line.splitn(3, '\t');
+    let additions = parse_numstat_count(fields.next()?)?;
+    let deletions = parse_numstat_count(fields.next()?)?;
+    let (path, original_path) = parse_numstat_path(fields.next()?.trim());
+    if path.is_empty() {
+        return None;
+    }
+    Some(CommitFileChange {
+        path,
+        original_path,
+        additions,
+        deletions,
+    })
+}
+
+fn parse_numstat_count(value: &str) -> Option<Option<u32>> {
+    if value == "-" {
+        Some(None)
+    } else {
+        value.parse().ok().map(Some)
+    }
+}
+
+fn parse_numstat_path(path: &str) -> (String, Option<String>) {
+    if let Some(start) = path.find('{') {
+        if let Some(arrow) = path[start..].find(" => ") {
+            let old_end = start + arrow;
+            let new_start = old_end + 4;
+            if let Some(close) = path[new_start..].find('}') {
+                let prefix = &path[..start];
+                let old = &path[start + 1..old_end];
+                let new = &path[new_start..new_start + close];
+                let suffix = &path[new_start + close + 1..];
+                return (
+                    format!("{prefix}{new}{suffix}"),
+                    Some(format!("{prefix}{old}{suffix}")),
+                );
+            }
+        }
+    }
+    match path.split_once(" => ") {
+        Some((old, new)) => (new.into(), Some(old.into())),
+        None => (path.into(), None),
+    }
+}
+
 fn parse_history(text: &str) -> Vec<CommitInfo> {
     text.split('\x1e')
         .filter_map(|record| {
@@ -1544,6 +1625,139 @@ mod tests {
         assert_eq!(files[1].kind, ChangeKind::Untracked);
         assert_eq!(files[2].original_path.as_deref(), Some("old.rs"));
         assert!(files[3].ignored);
+    }
+
+    #[test]
+    fn parses_commit_detail_numstat() {
+        let detail = parse_commit_detail(
+            "aaaaaaaa\x1fAda\x1fada@example.com\x1f2026-08-09T00:00:00Z\x1fSelected\n\nBody line\n\x1e\n12\t3\tsrc/a.txt\n-\t-\timage.png\n1\t2\told.ts => new.ts\n4\t0\tsrc/{left.rs => right.rs}\n",
+        )
+        .unwrap();
+        assert_eq!(detail.oid, "aaaaaaaa");
+        assert_eq!(detail.author, "Ada");
+        assert_eq!(detail.email, "ada@example.com");
+        assert_eq!(detail.authored_at, "2026-08-09T00:00:00Z");
+        assert_eq!(detail.message, "Selected\n\nBody line");
+        assert_eq!(
+            detail.files,
+            vec![
+                CommitFileChange {
+                    path: "src/a.txt".into(),
+                    original_path: None,
+                    additions: Some(12),
+                    deletions: Some(3),
+                },
+                CommitFileChange {
+                    path: "image.png".into(),
+                    original_path: None,
+                    additions: None,
+                    deletions: None,
+                },
+                CommitFileChange {
+                    path: "new.ts".into(),
+                    original_path: Some("old.ts".into()),
+                    additions: Some(1),
+                    deletions: Some(2),
+                },
+                CommitFileChange {
+                    path: "src/right.rs".into(),
+                    original_path: Some("src/left.rs".into()),
+                    additions: Some(4),
+                    deletions: Some(0),
+                },
+            ]
+        );
+
+        let empty = parse_commit_detail(
+            "bbbbbbbb\x1fLin\x1flin@example.com\x1f2026-08-08T00:00:00Z\x1fEmpty\n\x1e\n",
+        )
+        .unwrap();
+        assert!(empty.files.is_empty());
+        assert_eq!(empty.message, "Empty");
+    }
+
+    #[test]
+    fn commit_detail_reads_git_show_numstat() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "base\n", "base");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.txt"), "hello\n").unwrap();
+        std::fs::write(dir.path().join("image.bin"), [0u8, 1, 2, 255]).unwrap();
+        std::fs::write(dir.path().join("old.ts"), "one\n").unwrap();
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["add", "--", "src/a.txt", "image.bin", "old.ts"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["commit", "-m", "files\n\nBody"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(dir.path(), &strings(&["mv", "old.ts", "new.ts"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(dir.path(), &strings(&["commit", "-m", "rename"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        let oid = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        let renamed = git.commit_detail(dir.path(), &oid).unwrap();
+        assert_eq!(renamed.message, "rename");
+        assert_eq!(renamed.files.len(), 1);
+        assert_eq!(renamed.files[0].path, "new.ts");
+        assert_eq!(renamed.files[0].original_path.as_deref(), Some("old.ts"));
+
+        let parent = git.text(dir.path(), &["rev-parse", "HEAD^"]).unwrap();
+        let files = git.commit_detail(dir.path(), &parent).unwrap();
+        assert_eq!(files.message, "files\n\nBody");
+        assert_eq!(files.author, "GitDock Test");
+        assert_eq!(files.email, "test@gitdock.local");
+        let paths: Vec<_> = files.files.iter().map(|file| file.path.as_str()).collect();
+        assert!(paths.contains(&"src/a.txt"));
+        assert!(paths.contains(&"image.bin"));
+        assert!(paths.contains(&"old.ts"));
+        let text = files
+            .files
+            .iter()
+            .find(|file| file.path == "src/a.txt")
+            .unwrap();
+        assert_eq!(text.additions, Some(1));
+        assert_eq!(text.deletions, Some(0));
+        let binary = files
+            .files
+            .iter()
+            .find(|file| file.path == "image.bin")
+            .unwrap();
+        assert_eq!(binary.additions, None);
+        assert_eq!(binary.deletions, None);
+
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["commit", "--allow-empty", "-m", "empty"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let empty_oid = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        let empty = git.commit_detail(dir.path(), &empty_oid).unwrap();
+        assert_eq!(empty.message, "empty");
+        assert!(empty.files.is_empty());
     }
 
     #[test]

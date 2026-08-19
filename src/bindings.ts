@@ -27,7 +27,7 @@ export const commands = {
 	activeLanes: string[],
 } | null, limit: number) => __TAURI_INVOKE<CommitPage>("get_history", { repositoryId, cursor, limit }),
 	exportSessionLog: (fileName: string, lines: SessionLogLine[]) => __TAURI_INVOKE<boolean>("export_session_log", { fileName, lines }),
-	getCommitDiff: (repositoryId: number, oid: string) => __TAURI_INVOKE<string>("get_commit_diff", { repositoryId, oid }),
+	getCommitDetail: (repositoryId: number, oid: string) => __TAURI_INVOKE<CommitDetail>("get_commit_detail", { repositoryId, oid }),
 	compareBranches: (repositoryId: number, base: string, head: string) => __TAURI_INVOKE<string>("compare_branches", { repositoryId, base, head }),
 	openRepositoryFile: (repositoryId: number, path: string) => __TAURI_INVOKE<null>("open_repository_file", { repositoryId, path }),
 	getBranches: (repositoryId: number) => __TAURI_INVOKE<BranchInfo[]>("get_branches", { repositoryId }),
@@ -74,6 +74,22 @@ export type BranchInfo = {
 };
 
 export type ChangeKind = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked" | "ignored" | "conflicted" | "typeChanged" | "unknown";
+
+export type CommitDetail = {
+	oid: string,
+	author: string,
+	email: string,
+	authoredAt: string,
+	message: string,
+	files: CommitFileChange[],
+};
+
+export type CommitFileChange = {
+	path: string,
+	originalPath: string | null,
+	additions: number | null,
+	deletions: number | null,
+};
 
 export type CommitInfo = {
 	oid: string,

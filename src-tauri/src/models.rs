@@ -253,6 +253,26 @@ pub struct CommitPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct CommitFileChange {
+    pub path: String,
+    pub original_path: Option<String>,
+    pub additions: Option<u32>,
+    pub deletions: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDetail {
+    pub oid: String,
+    pub author: String,
+    pub email: String,
+    pub authored_at: String,
+    pub message: String,
+    pub files: Vec<CommitFileChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionLogLine {
     pub timestamp: String,
     pub kind: String,

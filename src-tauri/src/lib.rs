@@ -120,7 +120,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             snapshot::get_conflict_document,
             history::get_history,
             history::export_session_log,
-            history::get_commit_diff,
+            history::get_commit_detail,
             history::compare_branches,
             history::open_repository_file,
             history::get_branches,

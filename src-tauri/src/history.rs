@@ -144,34 +144,16 @@ fn write_session_log(path: &Path, lines: Vec<SessionLogLine>) -> Result<(), Stri
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn get_commit_diff(
+pub(crate) fn get_commit_detail(
     repository_id: RepositoryId,
     oid: String,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<CommitDetail, String> {
     let git = state.git()?;
     let record = state.record(repository_id)?;
-    verify_commit(&git, Path::new(&record.path), &oid)?;
-    let output = ensure_success(git.run(
-        Path::new(&record.path),
-        &[
-            "show".into(),
-            "--no-ext-diff".into(),
-            "--no-color".into(),
-            "--format=fuller".into(),
-            "--stat".into(),
-            "--patch".into(),
-            oid,
-            "--".into(),
-        ],
-        None,
-    )?)?;
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
-    if text.len() > git::MAX_DIFF_BYTES || text.lines().count() > git::MAX_DIFF_LINES {
-        Err("This commit diff is too large. Open it with the configured difftool.".into())
-    } else {
-        Ok(text)
-    }
+    let cwd = Path::new(&record.path);
+    verify_commit(&git, cwd, &oid)?;
+    git.commit_detail(cwd, &oid)
 }
 
 #[tauri::command]
