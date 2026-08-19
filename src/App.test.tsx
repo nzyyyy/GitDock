@@ -108,6 +108,8 @@ test("creates a branch from a branch menu", async () => {
 });
 
 test("renders history topology and ref labels", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-08-18T12:00:00Z"));
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({
       git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
@@ -116,9 +118,9 @@ test("renders history topology and ref labels", async () => {
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
     if (command === "get_history") return Promise.resolve({ commits: [
-      { oid: "aaaaaaaa", parents: ["bbbbbbbb", "cccccccc"], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Merge feature", refs: ["HEAD -> main", "tag: v1.0"], lane: { column: 0, parentColumns: [0, 2] } },
-      { oid: "bbbbbbbb", parents: ["dddddddd"], author: "Ada", authoredAt: "2026-08-08T00:00:00Z", subject: "Main work", refs: [], lane: { column: 0, parentColumns: [0] } },
-      { oid: "cccccccc", parents: ["dddddddd"], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Feature work", refs: ["origin/feature"], lane: { column: 2, parentColumns: [0] } },
+      { oid: "aaaaaaaa", parents: ["bbbbbbbb", "cccccccc"], author: "Ada", authoredAt: "2026-08-18T07:00:00Z", subject: "Merge feature with a long message that stays on one line", refs: ["HEAD -> main", "tag: v1.0"], lane: { column: 0, parentColumns: [0, 2] } },
+      { oid: "bbbbbbbb", parents: ["dddddddd"], author: "Ada", authoredAt: "2026-08-17T12:00:00Z", subject: "Main work", refs: [], lane: { column: 0, parentColumns: [0] } },
+      { oid: "cccccccc", parents: ["dddddddd"], author: "Lin", authoredAt: "2026-08-16T12:00:00Z", subject: "Feature work", refs: ["origin/feature"], lane: { column: 2, parentColumns: [0] } },
       { oid: "dddddddd", parents: [], author: "Ada", authoredAt: "2026-08-07T00:00:00Z", subject: "Base", refs: [], lane: { column: 0, parentColumns: [] } },
     ], nextOffset: undefined });
     return Promise.resolve([]);
@@ -128,10 +130,21 @@ test("renders history topology and ref labels", async () => {
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   await screen.findByText("HEAD -> main");
   expect(screen.getByText("tag: v1.0")).toHaveClass("tag");
+  expect(screen.getByText("5 hours ago")).toBeInTheDocument();
+  expect(screen.getByText("yesterday")).toBeInTheDocument();
+  expect(screen.getByText("2 days ago")).toBeInTheDocument();
+  const commitRow = document.querySelector<HTMLElement>(".history-pane .object-action-row")!;
+  expect(commitRow.querySelector("strong")).toHaveTextContent("Merge feature with a long message that stays on one line");
+  expect(commitRow.querySelector("span")).toHaveTextContent("Ada · aaaaaaaa · 5 hours ago");
+  expect(commitRow.querySelector("time")).toHaveAttribute("dateTime", "2026-08-18T07:00:00Z");
   expect(document.querySelectorAll(".graph-node")).toHaveLength(4);
   expect(document.querySelectorAll(".graph-edge")).toHaveLength(4);
   expect(document.querySelector<HTMLElement>(".graph-list")?.style.getPropertyValue("--graph-width")).toBe("52px");
   expect(screen.getByRole("button", { name: /Git output/ })).toHaveClass("output-handle");
+  fireEvent.click(screen.getByRole("button", { name: "中文" }));
+  expect(await screen.findByText("5小时前")).toBeInTheDocument();
+  expect(screen.getByText("昨天")).toBeInTheDocument();
+  expect(screen.getByText("前天")).toBeInTheDocument();
 });
 
 test("loads more history without losing the selected commit", async () => {

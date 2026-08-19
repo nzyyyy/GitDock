@@ -4,6 +4,13 @@ import { useI18n } from "../i18n";
 import { GRAPH_EDGE_BUCKET_ROWS, shortOid, type RunOperation } from "../types";
 import { RowMenu } from "./RepositoryPane";
 
+const relativeTimeUnits = [["day", 86_400_000], ["hour", 3_600_000], ["minute", 60_000], ["second", 1_000]] as const;
+function formatRelativeTime(value: string, formatter: Intl.RelativeTimeFormat) {
+  const delta = new Date(value).getTime() - Date.now();
+  const [unit, milliseconds] = relativeTimeUnits.find(([, unitMilliseconds]) => Math.abs(delta) >= unitMilliseconds) ?? relativeTimeUnits.at(-1)!;
+  return formatter.format(Math.trunc(delta / milliseconds), unit);
+}
+
 function useVirtualRows(count: number, rowHeight: number, overscan = 12) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: Math.min(count, 40) });
@@ -64,7 +71,8 @@ export function HistoryCanvas({ commits, selectedOid, onSelect }: { commits: Com
 }
 
 export function HistoryPane({ commits, selectedOid, loading, hasMore, onLoadMore, onSelect, onRun }: { commits: CommitInfo[]; selectedOid?: string; loading: boolean; hasMore: boolean; onLoadMore: () => void; onSelect: (oid: string) => void; onRun: RunOperation }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
+  const relativeTimeFormatter = useMemo(() => new Intl.RelativeTimeFormat(language, { numeric: "auto" }), [language]);
   const rowHeight = 45;
   const { containerRef, start, end, totalHeight } = useVirtualRows(commits.length, rowHeight);
   const loadMoreRef = useRef<HTMLButtonElement>(null);
@@ -75,7 +83,7 @@ export function HistoryPane({ commits, selectedOid, loading, hasMore, onLoadMore
     observer.observe(target);
     return () => observer.disconnect();
   }, [hasMore, onLoadMore, containerRef]);
-  return <div className="history-pane"><div className="pane-title"><span>{t("commits")}</span><code>{commits.length}</code></div><div ref={containerRef} className="object-list"><div className="virtual-history" style={{ height: totalHeight + (hasMore ? 45 : 0) }}>{commits.slice(start, end).map((commit, index) => <div style={{ position: "absolute", top: (start + index) * rowHeight, width: "100%", height: rowHeight }} className={`object-action-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid}><button onClick={() => onSelect(commit.oid)}><strong>{commit.subject}</strong><span>{commit.author} · {shortOid(commit.oid)}</span></button><RowMenu><button onClick={() => onRun({ type: "cherryPick", commits: [commit.oid] })}>{t("cherryPick")}</button>{commit.parents.length === 1 && <button onClick={() => onRun({ type: "revert", oid: commit.oid })}>{t("revert")}</button>}</RowMenu></div>)}{hasMore && <button ref={loadMoreRef} style={{ position: "absolute", top: totalHeight }} className="load-more" disabled={loading} onClick={onLoadMore}>{t("loadMore")}</button>}</div></div></div>;
+  return <div className="history-pane"><div className="pane-title"><span>{t("commits")}</span><code>{commits.length}</code></div><div ref={containerRef} className="object-list"><div className="virtual-history" style={{ height: totalHeight + (hasMore ? 45 : 0) }}>{commits.slice(start, end).map((commit, index) => <div style={{ position: "absolute", top: (start + index) * rowHeight, width: "100%", height: rowHeight }} className={`object-action-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid}><button onClick={() => onSelect(commit.oid)}><strong>{commit.subject}</strong><span>{commit.author} · {shortOid(commit.oid)} · <time dateTime={commit.authoredAt}>{formatRelativeTime(commit.authoredAt, relativeTimeFormatter)}</time></span></button><RowMenu><button onClick={() => onRun({ type: "cherryPick", commits: [commit.oid] })}>{t("cherryPick")}</button>{commit.parents.length === 1 && <button onClick={() => onRun({ type: "revert", oid: commit.oid })}>{t("revert")}</button>}</RowMenu></div>)}{hasMore && <button ref={loadMoreRef} style={{ position: "absolute", top: totalHeight }} className="load-more" disabled={loading} onClick={onLoadMore}>{t("loadMore")}</button>}</div></div></div>;
 }
 
 export const MemoHistoryCanvas = memo(HistoryCanvas);
