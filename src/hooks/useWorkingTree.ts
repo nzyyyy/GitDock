@@ -50,7 +50,7 @@ export function useWorkingTree({
   }, [selectedId, snapshot, reportError, selectedIdRef]);
 
   const closeDiff = useCallback(() => { setDiff(undefined); setConflict(undefined); setDiffIsFile(false); setSelectedCommit(undefined); }, []);
-  const loadIgnored = useCallback(() => refreshStatus(selectedId, true), [selectedId, refreshStatus]);
+  const loadIgnored = useCallback(() => refreshStatus(selectedId, !(snapshot?.files.some((file) => file.ignored) ?? false)), [selectedId, snapshot, refreshStatus]);
 
   const openCommit = useCallback(async (oid: string) => {
     if (!selectedId) return;

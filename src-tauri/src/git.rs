@@ -315,7 +315,27 @@ impl Git {
         if !output.status.success() {
             return Err(error_text(&output));
         }
-        let patch = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut patch = String::from_utf8_lossy(&output.stdout).to_string();
+        if patch.is_empty() && !staged && cwd.join(path).is_file() {
+            let output = self.run(
+                cwd,
+                &strings(&[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-color",
+                    "--unified=3",
+                    "--no-index",
+                    "--",
+                    "/dev/null",
+                    path,
+                ]),
+                None,
+            )?;
+            match output.status.code() {
+                Some(0 | 1) => patch = String::from_utf8_lossy(&output.stdout).to_string(),
+                _ => return Err(error_text(&output)),
+            }
+        }
         let binary = patch.contains("GIT binary patch") || patch.contains("Binary files ");
         let too_large = patch.len() > MAX_DIFF_BYTES || patch.lines().count() > MAX_DIFF_LINES;
         let (shown, hunks) = if binary || too_large {
@@ -1560,6 +1580,18 @@ mod tests {
         assert_eq!(hunks.len(), 2);
         assert!(hunks.iter().all(|h| h.patch.starts_with("diff --git")));
         assert_ne!(hunks[0].id, hunks[1].id);
+    }
+
+    #[test]
+    fn diffs_untracked_files_against_dev_null() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "base\n", "base");
+        std::fs::write(dir.path().join("new.ts"), "hello\n").unwrap();
+        let diff = git.diff(dir.path(), "new.ts", false, 1).unwrap();
+        assert!(diff.patch.contains("+hello"));
+        assert!(!diff.hunks.is_empty());
     }
 
     #[test]

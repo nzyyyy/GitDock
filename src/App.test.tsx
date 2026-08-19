@@ -465,6 +465,43 @@ test("stages and unstages multiple selected files", async () => {
   expect(fileRow).toHaveClass("menu-open");
   fireEvent.click(fileRow.querySelector<HTMLButtonElement>(".row-menu-popover button")!);
   expect(fileRow).not.toHaveClass("menu-open");
+
+  fireEvent.click(screen.getByRole("button", { name: /Unstaged/, expanded: true }));
+  expect(screen.queryByRole("button", { name: "Stage one.ts" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select all Unstaged" }));
+  expect(screen.queryByRole("button", { name: "Stage one.ts" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Unstaged/, expanded: false }));
+  expect(screen.getByRole("button", { name: "Stage one.ts" })).toBeInTheDocument();
+});
+
+test("loads and hides ignored files", async () => {
+  const tracked = { path: "one.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false };
+  const ignored = { path: "ignored.log", kind: "ignored", staged: false, unstaged: false, conflict: false, ignored: true };
+  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190, language: "en" },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") {
+      const includeIgnored = Boolean(args && "includeIgnored" in args && args.includeIgnored);
+      return Promise.resolve({ id: includeIgnored ? 2 : 1, repositoryId: 1, headOid: "12345678", files: includeIgnored ? [tracked, ignored] : [tracked] });
+    }
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  expect(await screen.findByRole("button", { name: "Load ignored" })).toBeInTheDocument();
+  expect(screen.queryByText("ignored.log")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Load ignored" }));
+  expect(await screen.findByRole("button", { name: "Hide ignored" })).toBeInTheDocument();
+  expect(screen.getByText("ignored.log")).toBeInTheDocument();
+  expect(invoke).toHaveBeenCalledWith("get_status", { repositoryId: 1, includeIgnored: true });
+  vi.mocked(invoke).mockClear();
+  fireEvent.click(screen.getByRole("button", { name: "Hide ignored" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_status", { repositoryId: 1, includeIgnored: false }));
+  expect(screen.getByRole("button", { name: "Load ignored" })).toBeInTheDocument();
+  expect(screen.queryByText("ignored.log")).not.toBeInTheDocument();
 });
 
 test("routes conflict actions through previews and shows destructive impact", async () => {
