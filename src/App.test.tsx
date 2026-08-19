@@ -63,39 +63,36 @@ test("creates a branch from a branch menu", async () => {
   expect(screen.getByText("Remote branches")).toBeInTheDocument();
   expect(document.querySelector(".pane-title")!.querySelectorAll("button")).toHaveLength(0);
 
+  const rowMenuItem = (row: Element, text: string) => [...row.querySelectorAll<HTMLButtonElement>(".row-menu-popover button")].find((button) => button.textContent === text);
+  const openRowMenu = (row: Element) => { fireEvent.contextMenu(row, { button: 2 }); fireEvent.pointerUp(row); };
+
   const featureRow = screen.getByText("feature").closest(".object-action-row")!;
+  expect(featureRow.querySelector(".row-menu-trigger")).toBeNull();
   fireEvent.click(featureRow.querySelector(".object-copy")!);
   expect(invoke).not.toHaveBeenCalledWith("preview_operation", expect.objectContaining({ request: { type: "switchBranch", name: "feature" } }));
-  const featureTrigger = featureRow.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
-  fireEvent.click(featureTrigger);
-  fireEvent.click([...featureTrigger.nextElementSibling!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Switch")!);
+  openRowMenu(featureRow);
+  fireEvent.click(rowMenuItem(featureRow, "Switch")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "switchBranch", name: "feature" } }));
 
   vi.mocked(invoke).mockClear();
   const trackedRow = screen.getByText("origin/feature").closest(".object-action-row")!;
-  const trackedTrigger = trackedRow.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
-  fireEvent.click(trackedTrigger);
-  fireEvent.click([...trackedTrigger.nextElementSibling!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Switch")!);
+  openRowMenu(trackedRow);
+  fireEvent.click(rowMenuItem(trackedRow, "Switch")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "switchBranch", name: "feature" } }));
 
   vi.mocked(invoke).mockClear();
   const untrackedRow = screen.getByText("origin/team/topic").closest(".object-action-row")!;
-  const untrackedTrigger = untrackedRow.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
-  fireEvent.click(untrackedTrigger);
-  fireEvent.click([...untrackedTrigger.nextElementSibling!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Switch")!);
+  openRowMenu(untrackedRow);
+  fireEvent.click(rowMenuItem(untrackedRow, "Switch")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "createBranch", name: "team/topic", startPoint: "origin/team/topic", checkout: true } }));
 
   const headRow = screen.getByText("origin/HEAD").closest(".object-action-row")!;
-  const headTrigger = headRow.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
-  fireEvent.click(headTrigger);
-  expect([...headTrigger.nextElementSibling!.querySelectorAll<HTMLButtonElement>("button")].some((button) => button.textContent === "Switch")).toBe(false);
-  fireEvent.click(headTrigger);
+  openRowMenu(headRow);
+  expect(rowMenuItem(headRow, "Switch")).toBeUndefined();
 
   const row = screen.getByText("origin/main").closest(".object-action-row")!;
-  const trigger = row.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
-  fireEvent.click(trigger);
-  const menu = trigger.nextElementSibling as HTMLDivElement;
-  fireEvent.click([...menu.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "New branch")!);
+  openRowMenu(row);
+  fireEvent.click(rowMenuItem(row, "New branch")!);
 
   const name = screen.getByRole("textbox", { name: "New branch name" });
   expect(name).toHaveFocus();
@@ -134,6 +131,12 @@ test("renders history topology and ref labels", async () => {
   expect(screen.getByText("yesterday")).toBeInTheDocument();
   expect(screen.getByText("2 days ago")).toBeInTheDocument();
   const commitRow = document.querySelector<HTMLElement>(".history-pane .object-action-row")!;
+  expect(commitRow.querySelector(".row-menu-trigger")).toBeNull();
+  fireEvent.contextMenu(commitRow, { button: 2 });
+  fireEvent.pointerUp(commitRow);
+  expect([...commitRow.querySelectorAll<HTMLButtonElement>(".row-menu-popover button")].map((button) => button.textContent)).toEqual(["Cherry-pick"]);
+  fireEvent.click(commitRow.querySelector<HTMLButtonElement>(".row-menu-popover button")!);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "cherryPick", commits: ["aaaaaaaa"] } }));
   expect(commitRow.querySelector("strong")).toHaveTextContent("Merge feature with a long message that stays on one line");
   expect(commitRow.querySelector("span")).toHaveTextContent("Ada · aaaaaaaa · 5 hours ago");
   expect(commitRow.querySelector("time")).toHaveAttribute("dateTime", "2026-08-18T07:00:00Z");
@@ -342,7 +345,7 @@ test("uses light-dismiss popovers for secondary menus", async () => {
   expect(showPopover).toHaveBeenCalledWith();
   expect(menu.style.height).toBe("122px");
   expect(more).toHaveAttribute("aria-expanded", "true");
-  expect(menu.querySelector("button")).toHaveFocus();
+  expect(menu).toHaveFocus();
   fireEvent.click(menu.querySelector("button")!);
   expect(hidePopover).toHaveBeenCalled();
   expect(more).toHaveAttribute("aria-expanded", "false");
@@ -439,6 +442,21 @@ test("stages and unstages multiple selected files", async () => {
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "unstageFiles", paths: ["staged.ts"] } }));
   expect(screen.queryByRole("checkbox", { name: /conflict\.ts/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: /ignored\.log/ })).not.toBeInTheDocument();
+
+  vi.mocked(invoke).mockClear();
+  fireEvent.click(screen.getByRole("button", { name: "Stage one.ts" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "stageFiles", paths: ["one.ts"] } }));
+  fireEvent.click(screen.getByRole("button", { name: "Unstage staged.ts" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "unstageFiles", paths: ["staged.ts"] } }));
+
+  const fileRow = screen.getByRole("button", { name: "Stage one.ts" }).closest(".file-row")!;
+  expect(fileRow.querySelector(".row-menu-trigger")).toBeNull();
+  fireEvent.contextMenu(fileRow, { button: 2 });
+  fireEvent.pointerUp(fileRow);
+  expect([...fileRow.querySelectorAll<HTMLButtonElement>(".row-menu-popover button")].map((button) => button.textContent)).toEqual(["File history", "Blame"]);
+  expect(fileRow).toHaveClass("menu-open");
+  fireEvent.click(fileRow.querySelector<HTMLButtonElement>(".row-menu-popover button")!);
+  expect(fileRow).not.toHaveClass("menu-open");
 });
 
 test("routes conflict actions through previews and shows destructive impact", async () => {

@@ -1,4 +1,4 @@
-import { memo, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { GitInfo, RepositorySummary } from "../api";
 import { useI18n } from "../i18n";
 import type { LogLine } from "../lib/logBuffer";
@@ -17,26 +17,46 @@ function RepositoryRow({ repository, selected, draggable, canMoveUp, canMoveDown
   return <div role="listitem" className="repo-row-shell" data-repository-id={repository.id} draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd}><button className={`repo-row ${selected ? "selected" : ""}`} aria-current={selected ? "true" : undefined} onClick={() => onSelect(repository.id)}><span className={`status-rail ${state}`} aria-hidden="true" /><span className="repo-copy"><span className="repo-name">{repository.favorite && "★ "}{repository.name}<i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button><RowMenu><button disabled={!canMoveUp} onClick={() => onMove(-1)}>{t("moveUp")}</button><button disabled={!canMoveDown} onClick={() => onMove(1)}>{t("moveDown")}</button></RowMenu></div>;
 }
 
-export function RowMenu({ children, label }: { children: React.ReactNode; label?: string }) {
+export function RowMenu({ children, label, context }: { children: React.ReactNode; label?: string; context?: boolean }) {
   const { t } = useI18n();
   const actualLabel = label ?? t("moreActions");
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
-  const toggle = () => {
-    const button = buttonRef.current; const menu = menuRef.current;
-    if (!button || !menu) return;
-    if (open) { menu.hidePopover(); return; }
+  const openAt = (anchor: { top: number; bottom: number; left: number; right: number }, alignStart = false) => {
+    const menu = menuRef.current;
+    if (!menu) return;
     menu.showPopover();
     menu.style.height = "0";
     menu.style.height = `${Math.min(menu.scrollHeight + 2, window.innerHeight - 8)}px`;
-    const anchor = button.getBoundingClientRect(); const bounds = menu.getBoundingClientRect();
+    const bounds = menu.getBoundingClientRect();
     const top = anchor.bottom + bounds.height + 4 <= window.innerHeight ? anchor.bottom + 4 : Math.max(4, anchor.top - bounds.height - 4);
-    menu.style.left = `${Math.max(4, Math.min(anchor.right - bounds.width, window.innerWidth - bounds.width - 4))}px`;
+    menu.style.left = `${Math.max(4, Math.min(alignStart ? anchor.left : anchor.right - bounds.width, window.innerWidth - bounds.width - 4))}px`;
     menu.style.top = `${top}px`;
-    menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    menu.focus();
   };
-  return <><button ref={buttonRef} className="row-menu-trigger" type="button" aria-label={actualLabel} aria-expanded={open} onClick={toggle}>{label ? actualLabel : "•••"}</button><div ref={menuRef} className="row-menu-popover" popover="auto" onToggle={(event) => { setOpen(event.newState === "open"); if (event.newState === "closed" && menuRef.current?.contains(document.activeElement)) buttonRef.current?.focus(); }} onClick={(event) => { if ((event.target as HTMLElement).closest("button")) menuRef.current?.hidePopover(); }}>{children}</div></>;
+  const toggle = () => {
+    const button = buttonRef.current;
+    if (!button) return;
+    if (open) { menuRef.current?.hidePopover(); return; }
+    openAt(button.getBoundingClientRect());
+  };
+  useEffect(() => {
+    const row = context ? menuRef.current?.parentElement : undefined;
+    if (!row) return;
+    const openMenu = (event: MouseEvent) => {
+      event.preventDefault();
+      if (open) menuRef.current?.hidePopover();
+      const anchor = { top: event.clientY, bottom: event.clientY, left: event.clientX, right: event.clientX };
+      // The right-button pointerdown already registered outside the popover, so opening now would be
+      // light-dismissed by the trailing pointerup. Wait it out; keyboard menu keys open immediately.
+      if (event.button === 2) document.addEventListener("pointerup", () => openAt(anchor, true), { once: true });
+      else openAt(anchor, true);
+    };
+    row.addEventListener("contextmenu", openMenu);
+    return () => row.removeEventListener("contextmenu", openMenu);
+  }, [context, open]);
+  return <>{(!context || label) && <button ref={buttonRef} className="row-menu-trigger" type="button" aria-label={actualLabel} aria-expanded={open} onClick={toggle}>{label ? actualLabel : "•••"}</button>}<div ref={menuRef} className="row-menu-popover" tabIndex={-1} popover="auto" onToggle={(event) => { setOpen(event.newState === "open"); if (context) menuRef.current?.parentElement?.classList.toggle("menu-open", event.newState === "open"); if (event.newState === "closed" && menuRef.current?.contains(document.activeElement)) buttonRef.current?.focus(); }} onClick={(event) => { if ((event.target as HTMLElement).closest("button")) menuRef.current?.hidePopover(); }}>{children}</div></>;
 }
 
 export const MemoRepositoryRow = memo(RepositoryRow);
