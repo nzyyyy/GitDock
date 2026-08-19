@@ -25,6 +25,11 @@ Object.defineProperties(HTMLElement.prototype, {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+const selectFirstRepository = async () => {
+  await screen.findAllByRole("listitem");
+  fireEvent.click(document.querySelector<HTMLElement>("[data-repository-id='1'] .repo-row")!);
+};
+
 test("shows actionable first-run state", async () => {
   render(<App />);
   expect(await screen.findByText(/Put every working tree/)).toBeInTheDocument();
@@ -33,6 +38,27 @@ test("shows actionable first-run state", async () => {
   window.dispatchEvent(contextMenu);
   expect(contextMenu.defaultPrevented).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Initialize" }));
+});
+
+test("does not select a repository until the user clicks one", async () => {
+  const repositories = [
+    { id: 1, path: "/alpha", name: "Alpha", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 2, path: "/beta", name: "Beta", favorite: false, order: 1, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "bbbbbbbb", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+  ];
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 2, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  const alpha = await screen.findByRole("button", { name: /Alpha/ });
+  const beta = screen.getByRole("button", { name: /Beta/ });
+  expect(alpha).not.toHaveAttribute("aria-current");
+  expect(beta).not.toHaveAttribute("aria-current");
+  expect(screen.getByRole("heading", { name: "Select a repository" })).toBeInTheDocument();
+  fireEvent.click(alpha);
+  expect(alpha).toHaveAttribute("aria-current", "true");
+  expect(beta).not.toHaveAttribute("aria-current");
 });
 
 test("creates a branch from a branch menu", async () => {
@@ -58,6 +84,7 @@ test("creates a branch from a branch menu", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "Branches" }));
   expect(await screen.findByText("Local branches")).toBeInTheDocument();
   expect(screen.getByText("Remote branches")).toBeInTheDocument();
@@ -124,6 +151,7 @@ test("renders history topology and ref labels", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   await screen.findByText("HEAD -> main");
   expect(screen.getByText("tag: v1.0")).toHaveClass("tag");
@@ -165,6 +193,7 @@ test("loads more history without losing the selected commit", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   fireEvent.click((await screen.findAllByRole("button", { name: /Selected/ }))[0]);
   await waitFor(() => expect(document.querySelector(".commit-detail")).toBeInTheDocument());
@@ -199,6 +228,7 @@ test("opens commit details then a file diff", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   fireEvent.click((await screen.findAllByRole("button", { name: /Selected/ }))[0]);
   expect(await screen.findByText("aaaaaaaaaaaaaaaa")).toBeInTheDocument();
@@ -237,6 +267,7 @@ test("hides pagination when switching to a repository without another page", asy
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   expect(await screen.findByRole("button", { name: "Load more" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /Small/ }));
@@ -265,6 +296,7 @@ test("reloads history after leaving during the initial request", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   await waitFor(() => expect(historyCalls).toBe(1));
   fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
@@ -333,6 +365,7 @@ test("repository list refresh preserves the current selection", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   const alpha = await screen.findByRole("button", { name: /Alpha/ });
   fireEvent.click(alpha);
   expect(alpha).toHaveAttribute("aria-current", "true");
@@ -362,6 +395,7 @@ test("ignores an older refresh-all response", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   await screen.findByRole("button", { name: /Repo/ });
   act(() => { void repositoryListListener?.(); void repositoryListListener?.(); });
   await waitFor(() => expect(resolvers).toHaveLength(2));
@@ -383,6 +417,7 @@ test("uses light-dismiss popovers for secondary menus", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   const more = await screen.findByRole("button", { name: "More" });
   const menu = more.nextElementSibling as HTMLDivElement;
   Object.defineProperty(menu, "scrollHeight", { value: 120 });
@@ -422,6 +457,7 @@ test("supports keyboard workflow tabs and layout separators", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   const changes = await screen.findByRole("tab", { name: "Changes" });
   fireEvent.keyDown(changes, { key: "ArrowRight" });
   const history = screen.getByRole("tab", { name: "History" });
@@ -470,7 +506,7 @@ test("stages and unstages multiple selected files", async () => {
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [
       { path: "staged.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false },
       { path: "mixed.ts", kind: "modified", staged: true, unstaged: true, conflict: false, ignored: false },
-      { path: "one.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false },
+      { path: "one.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false, additions: 4, deletions: 2 },
       { path: "two.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false },
       { path: "new.ts", kind: "untracked", staged: false, unstaged: true, conflict: false, ignored: false },
       { path: "conflict.ts", kind: "conflicted", staged: false, unstaged: true, conflict: true, ignored: false },
@@ -482,6 +518,7 @@ test("stages and unstages multiple selected files", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("checkbox", { name: "Select all Unstaged" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage new.ts" }));
   fireEvent.click(screen.getByRole("button", { name: "Stage selected (3)" }));
@@ -507,6 +544,8 @@ test("stages and unstages multiple selected files", async () => {
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "unstageFiles", paths: ["staged.ts"] } }));
 
   const fileRow = screen.getByRole("button", { name: "Stage one.ts" }).closest(".file-row")!;
+  expect(fileRow.querySelector(".file-row-stats")).toHaveTextContent("+4");
+  expect(fileRow.querySelector(".file-row-stats")).toHaveTextContent("−2");
   expect(fileRow.querySelector(".row-menu-trigger")).toBeNull();
   fireEvent.contextMenu(fileRow, { button: 2 });
   fireEvent.pointerUp(fileRow);
@@ -540,6 +579,7 @@ test("loads and hides ignored files", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   expect(await screen.findByRole("button", { name: "Load ignored" })).toBeInTheDocument();
   expect(screen.queryByText("ignored.log")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Load ignored" }));
@@ -570,6 +610,7 @@ test("routes conflict actions through previews and shows destructive impact", as
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("button", { name: "Resolve" }));
   fireEvent.click(screen.getByRole("button", { name: "Use current target", hidden: true }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_operation", { repositoryId: 1, request: { type: "chooseConflictSide", path: "conflict.ts", side: "ours" }, confirmed: false }));
@@ -602,6 +643,7 @@ test("resolves every internal conflict block through a destructive preview", asy
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("button", { name: /conflict\.ts/ }));
   expect(await screen.findByText("Base")).toBeInTheDocument();
   expect(screen.getByText("Current")).toBeInTheDocument();
@@ -647,6 +689,7 @@ test("opens output on failure and confirms cancellation before close", async () 
   });
 
   render(<App />);
+  await selectFirstRepository();
   await screen.findByRole("listitem");
   await act(async () => operationListener?.({ payload: { operationId: 9, repositoryId: 1, kind: "started", message: "Pull" } }));
   const preventDefault = vi.fn();
@@ -676,6 +719,7 @@ test("shows at most three dismissible operation results for three seconds", asyn
   });
 
   render(<App />);
+  await selectFirstRepository();
   await screen.findByRole("listitem");
   vi.useFakeTimers();
   for (const [operationId, title, outcome] of [[1, "Fetch", "succeeded"], [2, "Pull", "failed"], [3, "Push", "cancelled"], [4, "Create commit", "succeeded"]] as const) {
@@ -715,6 +759,7 @@ test("clears the commit message only after a successful early completion event",
   });
 
   render(<App />);
+  await selectFirstRepository();
   const message = await screen.findByRole("textbox", { name: "Commit message" });
   expect(message).toHaveAttribute("autocapitalize", "none");
   expect(message).toHaveAttribute("autocorrect", "off");
@@ -782,6 +827,7 @@ test("keeps the commit message after failed and cancelled operations", async () 
   });
 
   render(<App />);
+  await selectFirstRepository();
   const message = await screen.findByRole("textbox", { name: "Commit message" });
   fireEvent.change(message, { target: { value: "Keep me" } });
   for (const outcome of ["failed", "cancelled"] as const) {
@@ -826,6 +872,7 @@ test("refreshes both history views after a successful commit only", async () => 
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   expect((await screen.findAllByText("Old commit"))).toHaveLength(2);
   fireEvent.click(screen.getByRole("button", { name: "Load more" }));
@@ -867,6 +914,7 @@ test("disables normal commits without staged changes but permits amend", async (
   });
 
   render(<App />);
+  await selectFirstRepository();
   const message = await screen.findByRole("textbox", { name: "Commit message" });
   const commitButton = screen.getByRole("button", { name: "Commit staged changes" });
   fireEvent.change(message, { target: { value: "Amend this" } });
@@ -896,6 +944,7 @@ test("refreshes history when the selected repository changes externally", async 
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   expect((await screen.findAllByText("First")).length).toBeGreaterThan(0);
   await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
@@ -924,6 +973,7 @@ test("refreshes only the changed repository and status for the selected reposito
   });
 
   render(<App />);
+  await selectFirstRepository();
   await screen.findByRole("button", { name: /One/ });
   const message = screen.getByRole("textbox", { name: "Commit message" });
   fireEvent.change(message, { target: { value: "Draft while refreshing" } });
@@ -956,6 +1006,7 @@ test("falls back to status when a worktree refresh has no snapshot", async () =>
   });
 
   render(<App />);
+  await selectFirstRepository();
   await screen.findByRole("button", { name: /Repo/ });
   vi.mocked(invoke).mockClear();
   await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
@@ -979,6 +1030,7 @@ test("ignores an older repository summary response", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   await screen.findByRole("button", { name: /Repo/ });
   await act(async () => {
     repositoryChanged?.({ payload: { repositoryId: 1 } });
@@ -1014,6 +1066,7 @@ test("does not apply a combined snapshot after switching repositories", async ()
   });
 
   render(<App />);
+  await selectFirstRepository();
   await screen.findByText("one.ts");
   act(() => { repositoryChanged?.({ payload: { repositoryId: 1 } }); });
   await waitFor(() => expect(resolveRefresh).toBeDefined());
@@ -1039,6 +1092,7 @@ test("ignores a stale status response after switching repositories", async () =>
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("button", { name: /Two/ }));
   expect(await screen.findByText("new.ts")).toBeInTheDocument();
   await act(async () => staleResolvers.forEach((resolve) => resolve({ id: 1, repositoryId: 1, headOid: "11111111", files: [{ path: "old.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] })));
@@ -1064,6 +1118,7 @@ test("does not reload branch data for unrelated operation events", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "Branches" }));
   await screen.findByText("Local branches");
   expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_branches")).toHaveLength(1);
@@ -1090,6 +1145,7 @@ test("automatically loads history at the sentinel and keeps the DOM windowed", a
     return Promise.resolve(undefined);
   });
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 1, activeLanes: [] }, limit: 100 }));
   await screen.findByText("600 commits loaded");
@@ -1117,6 +1173,7 @@ test("groups repositories, moves one into favorites, and disables drag while sea
     return Promise.resolve(undefined);
   });
   render(<App />);
+  await selectFirstRepository();
   const search = await screen.findByRole("textbox", { name: "Search repositories" });
   fireEvent.change(search, { target: { value: "a" } });
   const filteredAlpha = (await screen.findByRole("button", { name: /Alpha/ })).closest<HTMLElement>("[role='listitem']")!;
@@ -1172,6 +1229,7 @@ test("sorts favorite repositories before or after the dropped row", async () => 
     return Promise.resolve(undefined);
   });
   render(<App />);
+  await selectFirstRepository();
   const alpha = (await screen.findByRole("button", { name: /Alpha/ })).closest<HTMLElement>("[role='listitem']")!;
   const beta = screen.getByRole("button", { name: /Beta/ }).closest<HTMLElement>("[role='listitem']")!;
   const gamma = screen.getByRole("button", { name: /Gamma/ }).closest<HTMLElement>("[role='listitem']")!;
@@ -1241,6 +1299,7 @@ test("opens the command palette and routes repository actions through existing p
     return Promise.resolve([]);
   });
   render(<App />);
+  await selectFirstRepository();
   await screen.findByRole("button", { name: "Command palette" });
   fireEvent.keyDown(window, { key: "k", metaKey: true });
   const input = await screen.findByRole("combobox", { name: "Search commands" });
@@ -1262,6 +1321,7 @@ test("keeps the More menu free of cherry-pick, favorite, and set group entries",
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("button", { name: "More" }));
   expect(screen.queryByText("Cherry-pick commits")).not.toBeInTheDocument();
   expect(screen.queryByText("Add favorite")).not.toBeInTheDocument();
@@ -1279,6 +1339,7 @@ test("adds an empty group from the sidebar and persists it", async () => {
   });
 
   render(<App />);
+  await selectFirstRepository();
   fireEvent.click(await screen.findByRole("button", { name: "Add group" }));
   const input = screen.getByRole("textbox", { name: "Group" });
   expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();

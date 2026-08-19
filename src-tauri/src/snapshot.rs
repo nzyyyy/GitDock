@@ -37,7 +37,8 @@ pub(crate) fn get_status(
         return Err("Bare repositories do not have a working tree".into());
     }
     let id = state.next_snapshot_id.fetch_add(1, Ordering::Relaxed);
-    let snapshot = git.status(repository_id, &inspection.root, include_ignored, id)?;
+    let mut snapshot = git.status(repository_id, &inspection.root, include_ignored, id)?;
+    git.attach_line_stats(&inspection.root, &mut snapshot.files);
     cache_snapshot(&state, &snapshot)?;
     Ok(snapshot)
 }

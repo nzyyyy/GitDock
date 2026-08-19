@@ -14,7 +14,7 @@ export function RailMark() { return <svg className="rail-mark" viewBox="0 0 32 3
 function RepositoryRow({ repository, selected, draggable, canMoveUp, canMoveDown, onSelect, onMove, onDragStart, onDragEnd }: { repository: RepositorySummary; selected: boolean; draggable: boolean; canMoveUp: boolean; canMoveDown: boolean; onSelect: (repositoryId: number) => void; onMove: (direction: -1 | 1) => void; onDragStart: React.DragEventHandler<HTMLDivElement>; onDragEnd: () => void }) {
   const { t } = useI18n();
   const state = repository.kind === "missing" ? "missing" : repository.conflictCount ? "conflict" : repository.changedCount ? "changed" : "clean";
-  return <div role="listitem" className="repo-row-shell" data-repository-id={repository.id} draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd}><button className={`repo-row ${selected ? "selected" : ""}`} aria-current={selected ? "true" : undefined} onClick={() => onSelect(repository.id)}><span className={`status-rail ${state}`} aria-hidden="true" /><span className="repo-copy"><span className="repo-name">{repository.favorite && "★ "}{repository.name}<i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button><RowMenu><button disabled={!canMoveUp} onClick={() => onMove(-1)}>{t("moveUp")}</button><button disabled={!canMoveDown} onClick={() => onMove(1)}>{t("moveDown")}</button></RowMenu></div>;
+  return <div role="listitem" className="repo-row-shell" data-repository-id={repository.id} draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd}><button className={`repo-row ${selected ? "selected" : ""}`} aria-current={selected ? "true" : undefined} onClick={() => onSelect(repository.id)}><span className={`status-rail ${state}`} aria-hidden="true" /><span className="repo-copy"><span className="repo-name"><span>{repository.favorite && "★ "}{repository.name}</span><i>{repository.conflictCount ? `${repository.conflictCount} ${t("conflicts")}` : t(state)}</i></span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code><span>{repository.changedCount ? `±${repository.changedCount}` : t("clean")}</span>{(repository.ahead || repository.behind) ? <span>↑{repository.ahead} ↓{repository.behind}</span> : null}</span></span></button><RowMenu><button disabled={!canMoveUp} onClick={() => onMove(-1)}>{t("moveUp")}</button><button disabled={!canMoveDown} onClick={() => onMove(1)}>{t("moveDown")}</button></RowMenu></div>;
 }
 
 export function RowMenu({ children, label, context }: { children: React.ReactNode; label?: string; context?: boolean }) {
@@ -42,7 +42,7 @@ export function RowMenu({ children, label, context }: { children: React.ReactNod
     openAt(button.getBoundingClientRect());
   };
   useEffect(() => {
-    const row = context ? menuRef.current?.parentElement : undefined;
+    const row = context ? (menuRef.current?.closest(".file-row, .object-action-row, .repo-row-shell") ?? menuRef.current?.parentElement) as HTMLElement | null : undefined;
     if (!row) return;
     const openMenu = (event: MouseEvent) => {
       event.preventDefault();
@@ -56,7 +56,7 @@ export function RowMenu({ children, label, context }: { children: React.ReactNod
     row.addEventListener("contextmenu", openMenu);
     return () => row.removeEventListener("contextmenu", openMenu);
   }, [context, open]);
-  return <>{(!context || label) && <button ref={buttonRef} className="row-menu-trigger" type="button" aria-label={actualLabel} aria-expanded={open} onClick={toggle}>{label ? actualLabel : "•••"}</button>}<div ref={menuRef} className="row-menu-popover" tabIndex={-1} popover="auto" onToggle={(event) => { setOpen(event.newState === "open"); if (context) menuRef.current?.parentElement?.classList.toggle("menu-open", event.newState === "open"); if (event.newState === "closed" && menuRef.current?.contains(document.activeElement)) buttonRef.current?.focus(); }} onClick={(event) => { if ((event.target as HTMLElement).closest("button")) menuRef.current?.hidePopover(); }}>{children}</div></>;
+  return <>{(!context || label) && <button ref={buttonRef} className="row-menu-trigger" type="button" aria-label={actualLabel} aria-expanded={open} onClick={toggle}>{label ? actualLabel : "•••"}</button>}<div ref={menuRef} className="row-menu-popover" tabIndex={-1} popover="auto" onToggle={(event) => { setOpen(event.newState === "open"); if (context) (menuRef.current?.closest(".file-row, .object-action-row, .repo-row-shell") ?? menuRef.current?.parentElement)?.classList.toggle("menu-open", event.newState === "open"); if (event.newState === "closed" && menuRef.current?.contains(document.activeElement)) buttonRef.current?.focus(); }} onClick={(event) => { if ((event.target as HTMLElement).closest("button")) menuRef.current?.hidePopover(); }}>{children}</div></>;
 }
 
 export const MemoRepositoryRow = memo(RepositoryRow);

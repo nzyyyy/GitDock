@@ -151,6 +151,8 @@ pub struct FileChange {
     pub unstaged: bool,
     pub conflict: bool,
     pub ignored: bool,
+    pub additions: Option<u32>,
+    pub deletions: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]

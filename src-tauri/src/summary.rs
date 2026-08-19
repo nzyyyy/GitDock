@@ -1,5 +1,5 @@
 use crate::{models::*, snapshot::cache_snapshot, AppState};
-use std::{collections::HashMap, sync::atomic::Ordering, thread};
+use std::{collections::HashMap, path::Path, sync::atomic::Ordering, thread};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Default)]
@@ -222,10 +222,11 @@ pub(crate) fn refresh_repository(
 ) -> Result<RepositoryRefresh, String> {
     let generation = start_summary_refresh(&state)?;
     let snapshot_id = state.next_snapshot_id.fetch_add(1, Ordering::Relaxed);
-    let (summary, snapshot) = state
-        .git()?
-        .summary_with_snapshot(&state.record(repository_id)?, snapshot_id);
-    if let Some(snapshot) = &snapshot {
+    let git = state.git()?;
+    let (summary, mut snapshot) =
+        git.summary_with_snapshot(&state.record(repository_id)?, snapshot_id);
+    if let Some(snapshot) = snapshot.as_mut() {
+        git.attach_line_stats(Path::new(&summary.path), &mut snapshot.files);
         cache_snapshot(&state, snapshot)?;
     }
     publish_summary_batch(&state, generation, std::slice::from_ref(&summary), |_| {});

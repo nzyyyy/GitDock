@@ -148,6 +148,8 @@ export type FileChange = {
 	unstaged: boolean,
 	conflict: boolean,
 	ignored: boolean,
+	additions: number | null,
+	deletions: number | null,
 };
 
 export type FileHistoryEntry = {

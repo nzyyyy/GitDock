@@ -72,7 +72,6 @@ export default function App() {
   useEffect(() => {
     api.bootstrap().then((value) => {
       setGit(value.git); setRepositories(value.repositories); setCustomGroups(value.settings.groupOrder ?? []);
-      setSelectedId(value.settings.selectedRepositoryId ?? value.repositories[0]?.id);
       setLeftWidth(value.settings.leftWidth); setRightWidth(value.settings.rightWidth); setOutputHeight(value.settings.outputHeight);
       setLanguage(value.settings.language ?? "en");
     }).catch((error) => { reportError(errorMessage(error)); });
@@ -276,13 +275,13 @@ export default function App() {
 
         <div id="workflow-panel" className="work-area" role="tabpanel" aria-labelledby={`workflow-tab-${tab}`} style={{ gridTemplateColumns: `minmax(480px, 1fr) ${rightWidth}px` }}>
           <section className="canvas">
-            {conflict ? <ConflictEditor key={conflict.id} document={conflict} onBack={closeDiff} onResolve={resolveConflict} /> : fileView === "history" && filePath ? <FileHistoryView path={filePath} entries={fileHistoryEntries} selectedOid={fileHistoryOid} diff={fileDiff} onBack={closeFileView} onSelect={selectHistoryOid} /> : fileView === "blame" && blameFile ? <BlameView blame={blameFile} onBack={closeFileView} /> : diff ? <MemoDiffView diff={diff} snapshotId={snapshot?.id} mode={diffMode} onModeChange={setDiffMode} onBack={commitDetail ? closeCommitFile : closeDiff} onRun={run} fileActions={diffIsFile} onFileHistory={openFileHistory} onBlame={openBlame} caption={commitDetail ? shortOid(commitDetail.oid) : undefined} /> : commitDetail ? <CommitDetailView detail={commitDetail} onBack={closeDiff} onOpenFile={openCommitFile} /> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
+            {conflict ? <ConflictEditor key={conflict.id} document={conflict} onBack={closeDiff} onResolve={resolveConflict} /> : fileView === "history" && filePath ? <FileHistoryView path={filePath} entries={fileHistoryEntries} selectedOid={fileHistoryOid} diff={fileDiff} onBack={closeFileView} onSelect={selectHistoryOid} /> : fileView === "blame" && blameFile ? <BlameView blame={blameFile} onBack={closeFileView} /> : diff ? <MemoDiffView diff={diff} snapshotId={snapshot?.id} mode={diffMode} onModeChange={setDiffMode} onBack={commitDetail ? closeCommitFile : closeDiff} onRun={run} fileActions={diffIsFile} onFileHistory={openFileHistory} onBlame={openBlame} caption={commitDetail ? shortOid(commitDetail.oid) : undefined} /> : commitDetail ? <CommitDetailView detail={commitDetail} onBack={closeDiff} onOpenFile={openCommitFile} /> : !selected ? <div className="canvas-empty"><h2>{t("selectRepository")}</h2><p>{t("selectRepositoryHint")}</p></div> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
           </section>
           <aside className="tool-pane"><div className="resize-handle resize-right" role="separator" tabIndex={0} aria-label={t("resizeDetails")} aria-orientation="vertical" aria-valuemin={LAYOUT_LIMITS.right[0]} aria-valuemax={LAYOUT_LIMITS.right[1]} aria-valuenow={rightWidth} onKeyDown={(event) => resizeWithKeyboard("right", event)} onPointerDown={(event) => beginResize("right", event)} />
             {tab === "changes" && <MemoChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={openRepositoryFile} onLoadIgnored={loadIgnored} onRun={run} onFileHistory={openFileHistory} onBlame={openBlame} />}
             {tab === "history" && <MemoHistoryPane commits={commits} selectedOid={selectedCommit} loading={historyLoading} hasMore={hasMore} onLoadMore={loadMoreHistory} onSelect={openCommit} onRun={run} />}
-            {tab === "branches" && <MemoBranchesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onDiff={showBranchDiff} onError={reportError} onInteractiveRebase={(onto) => selectedId && setRebaseDialog({ repositoryId: selectedId, onto })} />}
-            {tab === "stashes" && <MemoStashesPane repositoryId={selectedId!} onRun={run} onDialog={showDialog} onError={reportError} />}
+            {tab === "branches" && selectedId && <MemoBranchesPane repositoryId={selectedId} onRun={run} onDialog={showDialog} onDiff={showBranchDiff} onError={reportError} onInteractiveRebase={(onto) => selectedId && setRebaseDialog({ repositoryId: selectedId, onto })} />}
+            {tab === "stashes" && selectedId && <MemoStashesPane repositoryId={selectedId} onRun={run} onDialog={showDialog} onError={reportError} />}
           </aside>
         </div>
 

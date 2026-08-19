@@ -299,6 +299,51 @@ impl Git {
         })
     }
 
+    pub fn attach_line_stats(&self, cwd: &Path, files: &mut [FileChange]) {
+        if files.is_empty() {
+            return;
+        }
+        let mut stats = HashMap::new();
+        for line in self.numstat(cwd).lines() {
+            if let Some(change) = parse_numstat_line(line) {
+                stats.insert(change.path, (change.additions, change.deletions));
+            }
+        }
+        for file in files {
+            if file.ignored {
+                continue;
+            }
+            if file.kind == ChangeKind::Untracked {
+                let (additions, deletions) = untracked_line_stats(cwd, &file.path);
+                file.additions = additions;
+                file.deletions = deletions;
+                continue;
+            }
+            if let Some((additions, deletions)) = stats.get(&file.path).copied() {
+                file.additions = additions;
+                file.deletions = deletions;
+            }
+        }
+    }
+
+    fn numstat(&self, cwd: &Path) -> String {
+        let head = self.run(cwd, &strings(&["diff", "--numstat", "HEAD", "--"]), None);
+        if let Ok(output) = head {
+            if output.status.success() {
+                return String::from_utf8_lossy(&output.stdout).into_owned();
+            }
+        }
+        self.run(
+            cwd,
+            &strings(&["diff", "--cached", "--numstat", "--"]),
+            None,
+        )
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+    }
+
     pub fn diff(
         &self,
         cwd: &Path,
@@ -1064,6 +1109,8 @@ fn change(
         unstaged: !matches!(worktree, "." | "!"),
         conflict,
         ignored,
+        additions: None,
+        deletions: None,
     }
 }
 
@@ -1245,6 +1292,25 @@ fn parse_numstat_path(path: &str) -> (String, Option<String>) {
         Some((old, new)) => (new.into(), Some(old.into())),
         None => (path.into(), None),
     }
+}
+
+fn untracked_line_stats(cwd: &Path, path: &str) -> (Option<u32>, Option<u32>) {
+    let bytes = match fs::read(cwd.join(path)) {
+        Ok(bytes) if bytes.len() <= MAX_DIFF_BYTES => bytes,
+        _ => return (None, None),
+    };
+    if bytes.contains(&0) {
+        return (None, None);
+    }
+    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count() as u32;
+    let additions = if bytes.is_empty() {
+        0
+    } else if bytes.ends_with(b"\n") {
+        newlines
+    } else {
+        newlines + 1
+    };
+    (Some(additions), Some(0))
 }
 
 fn parse_history(text: &str) -> Vec<CommitInfo> {
@@ -1625,6 +1691,32 @@ mod tests {
         assert_eq!(files[1].kind, ChangeKind::Untracked);
         assert_eq!(files[2].original_path.as_deref(), Some("old.rs"));
         assert!(files[3].ignored);
+    }
+
+    #[test]
+    fn attaches_line_stats_for_modified_and_untracked_files() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "one\ntwo\n", "initial");
+        std::fs::write(dir.path().join("file.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.path().join("new.txt"), "alpha\nbeta\n").unwrap();
+        let mut snapshot = git.status(1, dir.path(), false, 1).unwrap();
+        git.attach_line_stats(dir.path(), &mut snapshot.files);
+        let modified = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == "file.txt")
+            .unwrap();
+        let untracked = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == "new.txt")
+            .unwrap();
+        assert_eq!(modified.additions, Some(1));
+        assert_eq!(modified.deletions, Some(0));
+        assert_eq!(untracked.additions, Some(2));
+        assert_eq!(untracked.deletions, Some(0));
     }
 
     #[test]
