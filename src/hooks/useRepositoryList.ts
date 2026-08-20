@@ -12,7 +12,7 @@ export function useRepositoryList({
   reportError: (message: string) => void;
   selectedIdRef: React.MutableRefObject<number | undefined>;
   setSnapshot: React.Dispatch<React.SetStateAction<WorkingTreeSnapshot | undefined>>;
-  refreshStatus: (repositoryId?: number, includeIgnored?: boolean) => Promise<void>;
+  refreshStatus: (repositoryId?: number, includeIgnored?: boolean) => Promise<WorkingTreeSnapshot | undefined>;
   t: Translate;
   language: "en" | "zh-CN";
 }) {

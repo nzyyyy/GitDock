@@ -1114,6 +1114,234 @@ fn change(
     }
 }
 
+enum HunkLine {
+    Context(String),
+    Delete(String),
+    Insert(String),
+    NoEol,
+}
+
+fn parse_hunk_range(text: &str) -> Option<((u32, u32), &str)> {
+    let digits = text
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(text.len());
+    if digits == 0 {
+        return None;
+    }
+    let start = text[..digits].parse().ok()?;
+    let rest = &text[digits..];
+    if let Some(rest) = rest.strip_prefix(',') {
+        let count_len = rest
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if count_len == 0 {
+            return None;
+        }
+        let count = rest[..count_len].parse().ok()?;
+        Some(((start, count), &rest[count_len..]))
+    } else {
+        Some(((start, 1), rest))
+    }
+}
+
+fn parse_hunk_header(line: &str) -> Option<(u32, u32, u32, u32)> {
+    let rest = line.strip_prefix("@@")?.trim_start().strip_prefix('-')?;
+    let (old, rest) = parse_hunk_range(rest)?;
+    let rest = rest.trim_start().strip_prefix('+')?;
+    let (new, _) = parse_hunk_range(rest)?;
+    Some((old.0, old.1, new.0, new.1))
+}
+
+fn parse_hunk_line(line: &str) -> HunkLine {
+    if line.starts_with('\\') {
+        HunkLine::NoEol
+    } else if let Some(content) = line.strip_prefix('-') {
+        HunkLine::Delete(content.to_string())
+    } else if let Some(content) = line.strip_prefix('+') {
+        HunkLine::Insert(content.to_string())
+    } else if let Some(content) = line.strip_prefix(' ') {
+        HunkLine::Context(content.to_string())
+    } else {
+        HunkLine::Context(line.to_string())
+    }
+}
+
+fn format_hunk_range(start: u32, count: u32) -> String {
+    if count == 1 {
+        format!("{start}")
+    } else {
+        format!("{start},{count}")
+    }
+}
+
+fn write_hunk_lines(lines: &[HunkLine]) -> String {
+    let mut body = String::new();
+    for line in lines {
+        match line {
+            HunkLine::Context(content) => {
+                body.push(' ');
+                body.push_str(content);
+            }
+            HunkLine::Delete(content) => {
+                body.push('-');
+                body.push_str(content);
+            }
+            HunkLine::Insert(content) => {
+                body.push('+');
+                body.push_str(content);
+            }
+            HunkLine::NoEol => body.push_str("\\ No newline at end of file"),
+        }
+        body.push('\n');
+    }
+    body
+}
+
+fn number_hunk_lines(old_start: u32, new_start: u32, lines: &[HunkLine]) -> Vec<(u32, u32)> {
+    let mut old = old_start;
+    let mut new = new_start;
+    let mut numbers = Vec::with_capacity(lines.len());
+    for line in lines {
+        numbers.push((old, new));
+        match line {
+            HunkLine::Context(_) => {
+                old += 1;
+                new += 1;
+            }
+            HunkLine::Delete(_) => old += 1,
+            HunkLine::Insert(_) => new += 1,
+            HunkLine::NoEol => {}
+        }
+    }
+    numbers
+}
+
+fn change_islands(lines: &[HunkLine]) -> Vec<(usize, usize)> {
+    let mut islands = Vec::new();
+    let mut start = None;
+    let mut end = 0;
+    for (index, line) in lines.iter().enumerate() {
+        match line {
+            HunkLine::Delete(_) | HunkLine::Insert(_) => {
+                if start.is_none() {
+                    start = Some(index);
+                }
+                end = index;
+            }
+            HunkLine::NoEol => {
+                if start.is_some() {
+                    end = index;
+                }
+            }
+            HunkLine::Context(_) => {
+                if let Some(from) = start.take() {
+                    islands.push((from, end));
+                }
+            }
+        }
+    }
+    if let Some(from) = start {
+        islands.push((from, end));
+    }
+    islands
+}
+
+fn island_span(lines: &[HunkLine], from: usize, to: usize) -> (usize, usize) {
+    let start = if from > 0 && matches!(lines[from - 1], HunkLine::Context(_)) {
+        from - 1
+    } else {
+        from
+    };
+    let mut end = to;
+    if end + 1 < lines.len() && matches!(lines[end + 1], HunkLine::Context(_)) {
+        end += 1;
+        if end + 1 < lines.len() && matches!(lines[end + 1], HunkLine::NoEol) {
+            end += 1;
+        }
+    } else if end + 1 < lines.len() && matches!(lines[end + 1], HunkLine::NoEol) {
+        end += 1;
+    }
+    (start, end)
+}
+
+fn island_header(lines: &[HunkLine], numbers: &[(u32, u32)]) -> String {
+    let old_count = lines
+        .iter()
+        .filter(|line| matches!(line, HunkLine::Context(_) | HunkLine::Delete(_)))
+        .count() as u32;
+    let new_count = lines
+        .iter()
+        .filter(|line| matches!(line, HunkLine::Context(_) | HunkLine::Insert(_)))
+        .count() as u32;
+    let old_start = lines
+        .iter()
+        .zip(numbers)
+        .find_map(|(line, (old, _))| match line {
+            HunkLine::Context(_) | HunkLine::Delete(_) => Some(*old),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            lines
+                .iter()
+                .zip(numbers)
+                .find_map(|(line, (old, _))| match line {
+                    HunkLine::Insert(_) => Some(old.saturating_sub(1)),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        });
+    let new_start = lines
+        .iter()
+        .zip(numbers)
+        .find_map(|(line, (_, new))| match line {
+            HunkLine::Context(_) | HunkLine::Insert(_) => Some(*new),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            lines
+                .iter()
+                .zip(numbers)
+                .find_map(|(line, (_, new))| match line {
+                    HunkLine::Delete(_) => Some(new.saturating_sub(1)),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        });
+    format!(
+        "@@ -{} +{} @@\n",
+        format_hunk_range(old_start, old_count),
+        format_hunk_range(new_start, new_count)
+    )
+}
+
+fn split_islands(file_header: &str, body: &str) -> Option<Vec<(String, String)>> {
+    let mut lines = body.lines();
+    let header_line = lines.next()?;
+    let (old_start, _, new_start, _) = parse_hunk_header(header_line)?;
+    let lines: Vec<HunkLine> = lines.map(parse_hunk_line).collect();
+    let islands = change_islands(&lines);
+    if islands.is_empty() {
+        return None;
+    }
+    let numbers = number_hunk_lines(old_start, new_start, &lines);
+    Some(
+        islands
+            .into_iter()
+            .map(|(from, to)| {
+                let (start, end) = island_span(&lines, from, to);
+                let island_lines = &lines[start..=end];
+                let island_numbers = &numbers[start..=end];
+                let hunk_header = island_header(island_lines, island_numbers);
+                let complete = format!(
+                    "{file_header}{hunk_header}{}",
+                    write_hunk_lines(island_lines)
+                );
+                (hunk_header.trim_end().to_string(), complete)
+            })
+            .collect(),
+    )
+}
+
 fn split_hunks(snapshot_id: u64, path: &str, staged: bool, patch: &str) -> Vec<DiffHunk> {
     let Some(first) = patch.find("@@") else {
         return Vec::new();
@@ -1125,13 +1353,21 @@ fn split_hunks(snapshot_id: u64, path: &str, staged: bool, patch: &str) -> Vec<D
         .map(|(i, _)| i)
         .collect();
     starts.push(patch.len());
-    starts
-        .windows(2)
+    let mut hunks = Vec::new();
+    for range in starts.windows(2) {
+        let body = &patch[range[0]..range[1]];
+        match split_islands(header, body) {
+            Some(islands) if !islands.is_empty() => hunks.extend(islands),
+            _ => hunks.push((
+                body.lines().next().unwrap_or("@@").to_string(),
+                format!("{header}{body}"),
+            )),
+        }
+    }
+    hunks
+        .into_iter()
         .enumerate()
-        .map(|(index, range)| {
-            let body = &patch[range[0]..range[1]];
-            let hunk_header = body.lines().next().unwrap_or("@@").to_string();
-            let complete = format!("{header}{body}");
+        .map(|(index, (hunk_header, complete))| {
             let mut hasher = DefaultHasher::new();
             (snapshot_id, path, staged, index, &complete).hash(&mut hasher);
             DiffHunk {
@@ -1886,6 +2122,43 @@ mod tests {
         assert_eq!(hunks.len(), 2);
         assert!(hunks.iter().all(|h| h.patch.starts_with("diff --git")));
         assert_ne!(hunks[0].id, hunks[1].id);
+    }
+
+    #[test]
+    fn splits_change_islands_inside_one_git_hunk() {
+        let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,5 +1,5 @@\n context\n-oldA\n+newA\n mid\n-oldB\n+newB\n";
+        let hunks = split_hunks(1, "a", false, patch);
+        assert_eq!(hunks.len(), 2);
+        assert!(hunks[0].patch.contains("-oldA"));
+        assert!(hunks[0].patch.contains("+newA"));
+        assert!(!hunks[0].patch.contains("-oldB"));
+        assert!(hunks[1].patch.contains("-oldB"));
+        assert!(!hunks[1].patch.contains("-oldA"));
+        assert!(hunks[0].header.starts_with("@@"));
+    }
+
+    #[test]
+    fn stages_one_change_island_from_a_shared_hunk() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "keep\noldA\nmid\noldB\nend\n", "base");
+        std::fs::write(dir.path().join("file.txt"), "keep\nnewA\nmid\nnewB\nend\n").unwrap();
+        let diff = git.diff(dir.path(), "file.txt", false, 1).unwrap();
+        assert_eq!(diff.hunks.len(), 2);
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["apply", "--cached", "--whitespace=nowarn", "-"]),
+                Some(diff.hunks[0].patch.as_bytes()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            git.text(dir.path(), &["show", ":file.txt"]).unwrap(),
+            "keep\nnewA\nmid\noldB\nend"
+        );
     }
 
     #[test]
