@@ -1,1 +1,1 @@
-{"main-capability":{"identifier":"main-capability","description":"Permissions for the GitDock main window","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open"]}}
+{"main-capability":{"identifier":"main-capability","description":"Permissions for the GitDock main window","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-start-dragging","dialog:allow-open"]}}

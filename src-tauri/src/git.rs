@@ -686,22 +686,26 @@ impl Git {
     }
 
     pub fn branches(&self, cwd: &Path) -> Result<Vec<BranchInfo>, String> {
-        let text = self.text(
+        let output = self.run(
             cwd,
-            &[
+            &strings(&[
                 "for-each-ref",
                 "--format=%(refname)%09%(objectname)%09%(HEAD)%09%(upstream:short)",
                 "refs/heads",
                 "refs/remotes",
-            ],
+            ]),
+            None,
         )?;
-        Ok(text
+        if !output.status.success() {
+            return Err(error_text(&output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| {
                 let mut p = line.split('\t');
                 let full = p.next()?;
                 let oid = p.next()?.into();
-                let current = p.next()? == "*";
+                let current = p.next() == Some("*");
                 let upstream = p.next().filter(|s| !s.is_empty()).map(Into::into);
                 let remote = full.starts_with("refs/remotes/");
                 Some(BranchInfo {
@@ -2462,6 +2466,35 @@ mod tests {
             git.inspect_repository(&main).unwrap().common_git_dir,
             git.inspect_repository(&linked).unwrap().common_git_dir
         );
+    }
+
+    #[test]
+    fn listing_branches_keeps_created_branch_after_switch() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "base\n", "base");
+        ensure_success(
+            git.run(dir.path(), &strings(&["switch", "-c", "test"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(dir.path(), &strings(&["switch", "main"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        let branches = git.branches(dir.path()).unwrap();
+        let test = branches
+            .iter()
+            .find(|branch| !branch.remote && branch.name == "test")
+            .unwrap();
+        let main = branches
+            .iter()
+            .find(|branch| !branch.remote && branch.name == "main")
+            .unwrap();
+        assert!(!test.current);
+        assert!(main.current);
     }
 
     #[test]

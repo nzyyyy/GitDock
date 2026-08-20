@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api, type RepositorySummary, type StashInfo } from "../api";
 import { useI18n } from "../i18n";
 import { errorMessage, type DialogSpec, type RunOperation } from "../types";
@@ -8,7 +9,17 @@ export function StashCanvas({ repository }: { repository?: RepositorySummary }) 
 export function StashesPane({ repositoryId, onRun, onDialog, onError }: { repositoryId: number; onRun: RunOperation; onDialog: (spec: DialogSpec) => void; onError: (message: string) => void }) {
   const { t } = useI18n();
   const [stashes, setStashes] = useState<StashInfo[]>([]);
-  useEffect(() => { api.getStashes(repositoryId).then(setStashes).catch((error) => onError(errorMessage(error))); }, [repositoryId, onError]);
+  useEffect(() => {
+    let cancelled = false;
+    let generation = 0;
+    const load = () => {
+      const current = ++generation;
+      api.getStashes(repositoryId).then((next) => { if (!cancelled && current === generation) setStashes(next); }).catch((error) => { if (!cancelled && current === generation) onError(errorMessage(error)); });
+    };
+    load();
+    const unlisten = listen<{ repositoryId: number }>("repository-changed", ({ payload }) => { if (payload.repositoryId === repositoryId) load(); });
+    return () => { cancelled = true; void unlisten.then((stop) => stop()); };
+  }, [repositoryId, onError]);
   const create = () => onDialog({ title: t("create"), fields: [{ name: "message", label: t("stashMessage") }, { name: "includeUntracked", label: t("includeUntracked"), value: false, type: "checkbox" }], onSubmit: ({ message, includeUntracked }) => onRun({ type: "stashCreate", message: String(message).trim() || null, includeUntracked: Boolean(includeUntracked) }) });
   return <div><div className="pane-title"><span>{t("stashes")}</span><button aria-label={`${t("create")} ${t("stashes")}`} onClick={create}>＋</button></div><div className="object-list">{stashes.map((stash) => <div className="stash-row" key={stash.oid}><div className="object-copy"><strong>stash@{`{${stash.index}}`}</strong><span>{stash.subject}</span></div><div><button onClick={() => onRun({ type: "stashApply", index: stash.index, pop: false })}>{t("apply")}</button><button onClick={() => onRun({ type: "stashApply", index: stash.index, pop: true })}>{t("pop")}</button><button onClick={() => onRun({ type: "stashDrop", index: stash.index })}>{t("drop")}</button></div></div>)}</div></div>;
 }

@@ -970,6 +970,41 @@ test("refreshes history when the selected repository changes externally", async 
   expect(historyCalls).toBe(2);
 });
 
+test("refreshes branches when the selected repository changes externally", async () => {
+  let repositoryChanged: ((event: { payload: { repositoryId: number } }) => void) | undefined;
+  let branchCalls = 0;
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "11111111", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof repositoryChanged) => {
+    if (event === "repository-changed") repositoryChanged = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "11111111", files: [] });
+    if (command === "get_branches") {
+      branchCalls += 1;
+      return Promise.resolve(branchCalls === 1
+        ? [{ name: "main", oid: "12345678", current: true, remote: false }]
+        : [{ name: "main", oid: "12345678", current: false, remote: false }, { name: "test", oid: "87654321", current: true, remote: false }]);
+    }
+    if (["get_tags", "get_remotes", "get_submodules"].includes(command)) return Promise.resolve([]);
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await selectFirstRepository();
+  fireEvent.click(await screen.findByRole("tab", { name: "Branches" }));
+  expect(await screen.findByText("● main")).toBeInTheDocument();
+  expect(screen.queryByText("test")).not.toBeInTheDocument();
+  await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
+  expect(await screen.findByText("● test")).toBeInTheDocument();
+  expect([...document.querySelectorAll(".object-list .object-copy")].map((row) => ({ name: row.querySelector("strong")?.textContent, current: row.classList.contains("current") }))).toEqual([
+    { name: "main", current: false },
+    { name: "● test", current: true },
+  ]);
+  expect(branchCalls).toBe(2);
+});
+
 test("refreshes only the changed repository and status for the selected repository", async () => {
   let repositoryChanged: ((event: { payload: { repositoryId: number } }) => void) | undefined;
   const repositories = [

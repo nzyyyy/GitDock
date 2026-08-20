@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api, type BranchInfo, type RemoteInfo, type RepositorySummary, type SubmoduleInfo, type TagInfo } from "../api";
 import { useI18n } from "../i18n";
 import { errorMessage, shortOid, type DialogSpec, type RunOperation } from "../types";
@@ -10,7 +11,20 @@ export function BranchesPane({ repositoryId, onRun, onDialog, onDiff, onError, o
   const { t } = useI18n();
   const [section, setSection] = useState<"branches" | "tags" | "remotes" | "submodules">("branches");
   const [branches, setBranches] = useState<BranchInfo[]>([]); const [tags, setTags] = useState<TagInfo[]>([]); const [remotes, setRemotes] = useState<RemoteInfo[]>([]); const [submodules, setSubmodules] = useState<SubmoduleInfo[]>([]);
-  useEffect(() => { Promise.all([api.getBranches(repositoryId), api.getTags(repositoryId), api.getRemotes(repositoryId), api.getSubmodules(repositoryId)]).then(([b, t, r, s]) => { setBranches(b); setTags(t); setRemotes(r); setSubmodules(s); }).catch((error) => onError(errorMessage(error))); }, [repositoryId, onError]);
+  useEffect(() => {
+    let cancelled = false;
+    let generation = 0;
+    const load = () => {
+      const current = ++generation;
+      Promise.all([api.getBranches(repositoryId), api.getTags(repositoryId), api.getRemotes(repositoryId), api.getSubmodules(repositoryId)]).then(([nextBranches, nextTags, nextRemotes, nextSubmodules]) => {
+        if (cancelled || current !== generation) return;
+        setBranches(nextBranches); setTags(nextTags); setRemotes(nextRemotes); setSubmodules(nextSubmodules);
+      }).catch((error) => { if (!cancelled && current === generation) onError(errorMessage(error)); });
+    };
+    load();
+    const unlisten = listen<{ repositoryId: number }>("repository-changed", ({ payload }) => { if (payload.repositoryId === repositoryId) load(); });
+    return () => { cancelled = true; void unlisten.then((stop) => stop()); };
+  }, [repositoryId, onError]);
   const currentBranch = branches.find((branch) => branch.current)?.name;
   const compareWith = (name: string) => { if (currentBranch) api.compareBranches(repositoryId, currentBranch, name).then(onDiff).catch((error) => onError(errorMessage(error))); };
   const switchRemoteBranch = (name: string) => { const localName = name.split("/").slice(1).join("/"); onRun(branches.some((branch) => !branch.remote && branch.name === localName) ? { type: "switchBranch", name: localName } : { type: "createBranch", name: localName, startPoint: name, checkout: true }); };
