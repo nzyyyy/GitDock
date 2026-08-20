@@ -4,9 +4,10 @@ mod models;
 mod operations;
 mod process;
 mod repositories;
-mod snapshot;
+mod repository_path;
 mod store;
 mod summary;
+mod working_tree;
 
 use crate::{git::Git, models::*, store::ConfigStore, summary::SummaryRefreshState};
 use notify::RecommendedWatcher;
@@ -24,7 +25,7 @@ use tauri_specta::{collect_commands, Builder, ErrorHandlingMode};
 pub struct AppState {
     pub(crate) store: Mutex<ConfigStore>,
     pub(crate) git: Mutex<Result<Git, String>>,
-    pub(crate) snapshots: Mutex<HashMap<u64, snapshot::SnapshotCache>>,
+    pub(crate) working_tree: Mutex<working_tree::Cache>,
     pub(crate) next_snapshot_id: AtomicU64,
     pub(crate) next_operation_id: AtomicU64,
     pub(crate) write_locks: Mutex<HashSet<PathBuf>>,
@@ -80,7 +81,12 @@ fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
     let git = state.git.lock().map_err(|_| "Git state is busy")?.clone();
     let repositories: Vec<RepositorySummary> = git
         .as_ref()
-        .map(|git| records.iter().map(|record| git.summary(record)).collect())
+        .map(|git| {
+            records
+                .iter()
+                .map(|record| summary::repository_summary(git, record))
+                .collect()
+        })
         .unwrap_or_default();
     state
         .summary_refresh
@@ -115,9 +121,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
             repositories::save_group_order,
             repositories::remove_repository,
             repositories::watch_repository,
-            snapshot::get_status,
-            snapshot::get_diff,
-            snapshot::get_conflict_document,
+            working_tree::get_status,
+            working_tree::get_diff,
+            working_tree::get_conflict_document,
             history::get_history,
             history::export_session_log,
             history::get_commit_detail,
@@ -169,7 +175,7 @@ pub fn run() {
             app.manage(AppState {
                 store: Mutex::new(store),
                 git: Mutex::new(git),
-                snapshots: Mutex::new(HashMap::new()),
+                working_tree: Mutex::new(working_tree::Cache::default()),
                 next_snapshot_id: AtomicU64::new(1),
                 next_operation_id: AtomicU64::new(1),
                 write_locks: Mutex::new(HashSet::new()),
@@ -223,7 +229,7 @@ pub(crate) mod test_util {
         AppState {
             store: Mutex::new(ConfigStore::load(config_path).unwrap()),
             git: Mutex::new(Ok(git)),
-            snapshots: Mutex::new(HashMap::new()),
+            working_tree: Mutex::new(working_tree::Cache::default()),
             next_snapshot_id: AtomicU64::new(1),
             next_operation_id: AtomicU64::new(1),
             write_locks: Mutex::new(HashSet::new()),

@@ -281,9 +281,7 @@ pub(crate) fn finish_operation(
     }
     resume_watch(&state, repository_id);
     release_lock(&state, common);
-    if let Ok(mut snapshots) = state.snapshots.lock() {
-        snapshots.retain(|_, s| s.repository_id != repository_id);
-    }
+    crate::working_tree::invalidate_repository(&state, repository_id);
     let _ = app.emit("repository-changed", RepositoryChanged { repository_id });
 }
 
@@ -379,7 +377,12 @@ fn cancelled_repository_message(app: &AppHandle, repository_id: RepositoryId) ->
     let ongoing = state
         .record(repository_id)
         .ok()
-        .and_then(|record| state.git().ok().map(|git| git.summary(&record)))
+        .and_then(|record| {
+            state
+                .git()
+                .ok()
+                .map(|git| crate::summary::repository_summary(&git, &record))
+        })
         .and_then(|summary| summary.ongoing);
     match ongoing.map(|state| state.kind) {
         Some(OngoingKind::Merge) => "Operation cancelled. Repository remains in a merge state.",

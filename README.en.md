@@ -84,8 +84,9 @@ Both `dist/` and `src-tauri/target/` are generated directories and must not be c
   - `src/types.ts`: shared types and constants; `src/api.ts`: Tauri command wrappers
   - `src/App.test.tsx`: frontend regression tests
 - `src-tauri/src/`: Rust backend, split by responsibility
-  - `lib.rs`: `AppState` and Tauri command registration; `summary.rs`: repository summary refresh; `repositories.rs`: repository management and settings; `snapshot.rs`: working-tree snapshots/diffs/conflicts; `history.rs`: history and reference queries; `operations.rs`: Git operation engine and validation; `process.rs`: child processes, streams, and locks
-  - `git.rs`: Git process wrapper and output parsing; `models.rs`: shared data types; `store.rs`: persisted settings
+  - `lib.rs`: `AppState` and Tauri command registration; `summary.rs`: repository summary refresh; `repositories.rs`: repository management and settings; `history.rs`: history and reference queries; `operations.rs`: Git operation engine and validation; `process.rs`: child processes, streams, and locks
+  - `working_tree/`: working-tree snapshots, diffs, conflict caching, and stale-view validation; `repository_path.rs`: repository-relative path validation
+  - `git.rs`: Git process adapter and remaining read queries; `models.rs`: shared data types; `store.rs`: persisted settings
 - `src-tauri/icons/`: application icons
 
 ## Safety

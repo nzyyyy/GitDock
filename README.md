@@ -84,8 +84,9 @@ dist/GitDock.app
   - `src/types.ts`：跨组件共享类型与常量；`src/api.ts`：Tauri 命令封装
   - `src/App.test.tsx`：前端回归测试
 - `src-tauri/src/`：Rust 后端，按职责拆分为模块
-  - `lib.rs`：`AppState` 与 Tauri 命令注册；`summary.rs`：仓库摘要刷新；`repositories.rs`：仓库管理与配置；`snapshot.rs`：工作区快照/差异/冲突；`history.rs`：历史与引用查询；`operations.rs`：Git 操作引擎与校验；`process.rs`：子进程、流与锁
-  - `git.rs`：Git 进程封装与输出解析；`models.rs`：共享数据类型；`store.rs`：配置持久化
+  - `lib.rs`：`AppState` 与 Tauri 命令注册；`summary.rs`：仓库摘要刷新；`repositories.rs`：仓库管理与配置；`history.rs`：历史与引用查询；`operations.rs`：Git 操作引擎与校验；`process.rs`：子进程、流与锁
+  - `working_tree/`：工作区快照、差异、冲突缓存与过期校验；`repository_path.rs`：仓库相对路径校验
+  - `git.rs`：Git 进程适配与其余读取查询；`models.rs`：共享数据类型；`store.rs`：配置持久化
 - `src-tauri/icons/`：应用图标
 
 ## 安全说明

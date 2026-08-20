@@ -5,7 +5,7 @@ use crate::{
     store::ConfigStore,
     summary::{
         clear_summary_cache, invalidate_summary_refresh, remove_cached_summary,
-        replace_cached_summary,
+        replace_cached_summary, repository_summary,
     },
     AppState, RepositoryChanged, RepositoryListChanged,
 };
@@ -106,7 +106,7 @@ pub(crate) fn register_repository(
         record
     };
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
-    replace_cached_summary(state, git.summary(&record))
+    replace_cached_summary(state, repository_summary(&git, &record))
 }
 
 #[tauri::command]
@@ -205,7 +205,7 @@ pub(crate) fn relocate_repository(
         result
     };
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
-    replace_cached_summary(&state, git.summary(&record))
+    replace_cached_summary(&state, repository_summary(&git, &record))
 }
 
 #[tauri::command]

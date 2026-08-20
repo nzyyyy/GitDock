@@ -1,17 +1,17 @@
 use crate::{
-    git::{ensure_success, file_executable, render_conflict_resolution, strings, Git},
+    git::{ensure_success, strings, Git},
     models::*,
     process::{
         acquire_lock, emit, finish_operation, release_lock, resume_watch, spawn_git_operation,
         suppress_watch, terminate_process_group, OperationContext,
     },
-    AppState,
+    repository_path::validate_relative_path,
+    working_tree, AppState,
 };
 use std::{
     collections::HashSet,
     fs,
-    io::Write,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::atomic::Ordering,
     thread,
 };
@@ -104,7 +104,7 @@ pub(crate) fn start_operation(
                 None,
                 None,
             );
-            let result = resolve_conflict_blocks(
+            let result = working_tree::resolve_conflict_blocks(
                 &git,
                 &root,
                 &app.state::<AppState>(),
@@ -249,117 +249,6 @@ fn remove_dir(dir: &Option<PathBuf>) {
     if let Some(dir) = dir {
         let _ = fs::remove_dir_all(dir);
     }
-}
-
-fn resolve_conflict_blocks(
-    git: &Git,
-    root: &Path,
-    state: &AppState,
-    repository_id: RepositoryId,
-    snapshot_id: u64,
-    document_id: &str,
-    path: &str,
-    choices: &[ConflictResolution],
-) -> Result<(), String> {
-    validate_relative_path(path)?;
-    let target = safe_worktree_file(root, path)?;
-    let source = {
-        let snapshots = state
-            .snapshots
-            .lock()
-            .map_err(|_| "Snapshot cache is busy")?;
-        let snapshot = snapshots
-            .get(&snapshot_id)
-            .ok_or("This conflict view is stale. Refresh and try again.")?;
-        if snapshot.repository_id != repository_id {
-            return Err("Snapshot does not belong to this repository".into());
-        }
-        let current_head = git.text(root, &["rev-parse", "--verify", "HEAD"]).ok();
-        if snapshot.head_oid != current_head {
-            return Err("HEAD changed. Refresh the repository and try again.".into());
-        }
-        snapshot
-            .conflicts
-            .get(document_id)
-            .filter(|source| source.document.path == path)
-            .cloned()
-            .ok_or("Conflict document is not available in this snapshot")?
-    };
-    if git.conflict_stages(root, path)? != source.stages {
-        return Err(
-            "Conflict stages changed after this editor was opened. Refresh and try again.".into(),
-        );
-    }
-    if fs::read(&target).map_err(|error| error.to_string())? != source.worktree {
-        return Err(
-            "The working-tree file changed after this editor was opened. Refresh and try again."
-                .into(),
-        );
-    }
-    if file_executable(&target)? != source.worktree_executable {
-        return Err(
-            "The working-tree file mode changed after this editor was opened. Refresh and try again."
-                .into(),
-        );
-    }
-    let result = render_conflict_resolution(&source.document.segments, choices)?;
-    let permissions = fs::metadata(&target)
-        .map_err(|error| error.to_string())?
-        .permissions();
-    replace_file(&target, &result, permissions.clone())?;
-    let add = ensure_success(git.run(root, &with_paths(&["add"], &[path.into()]), None)?);
-    if let Err(error) = add {
-        if let Err(restore_error) = replace_file(&target, &source.worktree, permissions) {
-            return Err(format!(
-                "{error}; restoring the original file also failed: {restore_error}"
-            ));
-        }
-        return Err(error);
-    }
-    Ok(())
-}
-
-pub(crate) fn safe_worktree_file(root: &Path, path: &str) -> Result<PathBuf, String> {
-    let root = root.canonicalize().map_err(|error| error.to_string())?;
-    let target = root.join(path);
-    let metadata = fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
-    if !metadata.file_type().is_file() {
-        return Err("Only regular files can use the internal conflict editor".into());
-    }
-    let parent = target
-        .parent()
-        .ok_or("Conflict path has no parent")?
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
-    if !parent.starts_with(&root) {
-        return Err("Conflict path resolves outside the repository".into());
-    }
-    Ok(target)
-}
-
-fn replace_file(
-    target: &Path,
-    contents: &[u8],
-    permissions: fs::Permissions,
-) -> Result<(), String> {
-    let parent = target.parent().ok_or("Conflict path has no parent")?;
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
-    temporary
-        .write_all(contents)
-        .map_err(|error| error.to_string())?;
-    temporary
-        .as_file()
-        .set_permissions(permissions)
-        .map_err(|error| error.to_string())?;
-    temporary
-        .as_file()
-        .sync_all()
-        .map_err(|error| error.to_string())?;
-    temporary
-        .persist(target)
-        .map_err(|error| error.to_string())?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -685,7 +574,7 @@ pub(crate) fn command_spec(
             snapshot_id,
             hunk_id,
         } => {
-            input = Some(cached_hunk(
+            input = Some(working_tree::cached_hunk(
                 &state.git()?,
                 cwd,
                 state,
@@ -700,7 +589,7 @@ pub(crate) fn command_spec(
             snapshot_id,
             hunk_id,
         } => {
-            input = Some(cached_hunk(
+            input = Some(working_tree::cached_hunk(
                 &state.git()?,
                 cwd,
                 state,
@@ -715,7 +604,7 @@ pub(crate) fn command_spec(
             snapshot_id,
             hunk_id,
         } => {
-            input = Some(cached_hunk(
+            input = Some(working_tree::cached_hunk(
                 &state.git()?,
                 cwd,
                 state,
@@ -947,7 +836,7 @@ fn validate_request(git: &Git, cwd: &Path, request: &OperationRequest) -> Result
     }
     match request {
         OperationRequest::TrashUntracked { paths } => {
-            let status = git.status(0, cwd, false, 0)?;
+            let status = working_tree::read_snapshot(git, 0, cwd, false, 0)?;
             let untracked: HashSet<&str> = status
                 .files
                 .iter()
@@ -1001,21 +890,6 @@ fn validate_request(git: &Git, cwd: &Path, request: &OperationRequest) -> Result
     }
 }
 
-pub(crate) fn validate_relative_path(path: &str) -> Result<(), String> {
-    if path.is_empty()
-        || Path::new(path).components().any(|c| {
-            matches!(
-                c,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
-        Err("Invalid repository-relative path".into())
-    } else {
-        Ok(())
-    }
-}
-
 fn validate_branch(git: &Git, cwd: &Path, branch: &str) -> Result<(), String> {
     ensure_success(git.run(
         cwd,
@@ -1066,39 +940,6 @@ fn validate_undo(git: &Git, cwd: &Path) -> Result<(), String> {
         return Err("HEAD is already reachable from its upstream. Use Revert instead.".into());
     }
     Ok(())
-}
-
-fn cached_hunk(
-    git: &Git,
-    cwd: &Path,
-    state: &AppState,
-    repository_id: RepositoryId,
-    snapshot_id: u64,
-    hunk_id: &str,
-    worktree_only: bool,
-) -> Result<Vec<u8>, String> {
-    let snapshots = state
-        .snapshots
-        .lock()
-        .map_err(|_| "Snapshot cache is busy")?;
-    let snapshot = snapshots
-        .get(&snapshot_id)
-        .ok_or("This diff is stale. Refresh and try again.")?;
-    if snapshot.repository_id != repository_id {
-        return Err("Snapshot does not belong to this repository".into());
-    }
-    let hunk = snapshot
-        .hunks
-        .get(hunk_id)
-        .ok_or("Hunk is not available in this snapshot")?;
-    if worktree_only && hunk.staged {
-        return Err("Only unstaged hunks can be discarded".into());
-    }
-    let current = git.diff(cwd, &hunk.path, hunk.staged, snapshot_id)?;
-    if current.patch != hunk.source_diff {
-        return Err("This diff changed after it was displayed. Refresh and try again.".into());
-    }
-    Ok(hunk.patch.clone())
 }
 
 fn with_paths(prefix: &[&str], paths: &[String]) -> Vec<String> {
@@ -1198,10 +1039,34 @@ mod tests {
     use super::*;
     use crate::{
         git::{ensure_success, strings, Git},
-        snapshot::{CachedHunk, SnapshotCache},
         test_util::{commit_file, git_ok, init_repo, run_request, test_state},
+        working_tree,
     };
-    use std::collections::HashMap;
+
+    fn cache_diff(
+        state: &AppState,
+        git: &Git,
+        root: &Path,
+        snapshot_id: u64,
+        path: &str,
+        staged: bool,
+    ) -> DiffFile {
+        let snapshot = working_tree::read_snapshot(git, 1, root, false, snapshot_id).unwrap();
+        working_tree::cache_snapshot(state, &snapshot).unwrap();
+        working_tree::load_diff(git, root, state, 1, snapshot_id, path, staged).unwrap()
+    }
+
+    fn cache_conflict(
+        state: &AppState,
+        git: &Git,
+        root: &Path,
+        snapshot_id: u64,
+        path: &str,
+    ) -> ConflictDocument {
+        let snapshot = working_tree::read_snapshot(git, 1, root, false, snapshot_id).unwrap();
+        working_tree::cache_snapshot(state, &snapshot).unwrap();
+        working_tree::load_conflict_document(git, root, state, 1, snapshot_id, path).unwrap()
+    }
 
     #[test]
     fn destructive_actions_always_require_confirmation() {
@@ -1440,13 +1305,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_paths_outside_repository() {
-        assert!(validate_relative_path("../secret").is_err());
-        assert!(validate_relative_path("/tmp/secret").is_err());
-        assert!(validate_relative_path("src/main.rs").is_ok());
-    }
-
-    #[test]
     fn file_commit_stash_hunk_and_undo_requests_change_the_repository() {
         let git = Git::discover(None).unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -1478,25 +1336,8 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        let diff = git.diff(dir.path(), "a.txt", false, 7).unwrap();
+        let diff = cache_diff(&state, &git, dir.path(), 7, "a.txt", false);
         let hunk = diff.hunks[0].clone();
-        state.snapshots.lock().unwrap().insert(
-            7,
-            SnapshotCache {
-                repository_id: 1,
-                head_oid: Some(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap()),
-                hunks: HashMap::from([(
-                    hunk.id.clone(),
-                    CachedHunk {
-                        path: "a.txt".into(),
-                        staged: false,
-                        patch: hunk.patch.into_bytes(),
-                        source_diff: diff.patch,
-                    },
-                )]),
-                conflicts: HashMap::new(),
-            },
-        );
         run_request(
             &state,
             dir.path(),
@@ -1506,25 +1347,8 @@ mod tests {
             },
         );
         assert_eq!(git.text(dir.path(), &["show", ":a.txt"]).unwrap(), "two");
-        let staged = git.diff(dir.path(), "a.txt", true, 8).unwrap();
+        let staged = cache_diff(&state, &git, dir.path(), 8, "a.txt", true);
         let staged_hunk = staged.hunks[0].clone();
-        state.snapshots.lock().unwrap().insert(
-            8,
-            SnapshotCache {
-                repository_id: 1,
-                head_oid: Some(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap()),
-                hunks: HashMap::from([(
-                    staged_hunk.id.clone(),
-                    CachedHunk {
-                        path: "a.txt".into(),
-                        staged: true,
-                        patch: staged_hunk.patch.into_bytes(),
-                        source_diff: staged.patch,
-                    },
-                )]),
-                conflicts: HashMap::new(),
-            },
-        );
         run_request(
             &state,
             dir.path(),
@@ -1639,26 +1463,9 @@ mod tests {
         );
         fs::write(dir.path().join("file.txt"), "keep\nnewA\nmid\nnewB\nend\n").unwrap();
         let state = test_state(git.clone(), dir.path().join("config.json"));
-        let diff = git.diff(dir.path(), "file.txt", false, 1).unwrap();
+        let diff = cache_diff(&state, &git, dir.path(), 1, "file.txt", false);
         assert_eq!(diff.hunks.len(), 2);
         let hunk = diff.hunks[0].clone();
-        state.snapshots.lock().unwrap().insert(
-            1,
-            SnapshotCache {
-                repository_id: 1,
-                head_oid: Some(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap()),
-                hunks: HashMap::from([(
-                    hunk.id.clone(),
-                    CachedHunk {
-                        path: "file.txt".into(),
-                        staged: false,
-                        patch: hunk.patch.into_bytes(),
-                        source_diff: diff.patch,
-                    },
-                )]),
-                conflicts: HashMap::new(),
-            },
-        );
         run_request(
             &state,
             dir.path(),
@@ -1983,9 +1790,9 @@ mod tests {
                 .status
                 .success());
 
-            let source = git.conflict_source(dir.path(), "file.txt", 7).unwrap();
-            let block_id = source
-                .document
+            let state = test_state(git.clone(), dir.path().join("config.json"));
+            let document = cache_conflict(&state, &git, dir.path(), 7, "file.txt");
+            let block_id = document
                 .segments
                 .iter()
                 .find_map(|segment| match segment {
@@ -1993,18 +1800,8 @@ mod tests {
                     ConflictSegment::Context { .. } => None,
                 })
                 .unwrap();
-            let document_id = source.document.id.clone();
-            let state = test_state(git.clone(), dir.path().join("config.json"));
-            state.snapshots.lock().unwrap().insert(
-                7,
-                SnapshotCache {
-                    repository_id: 1,
-                    head_oid: Some(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap()),
-                    hunks: HashMap::new(),
-                    conflicts: HashMap::from([(document_id.clone(), source)]),
-                },
-            );
-            resolve_conflict_blocks(
+            let document_id = document.id.clone();
+            working_tree::resolve_conflict_blocks(
                 &git,
                 dir.path(),
                 &state,
@@ -2045,11 +1842,11 @@ mod tests {
             .unwrap()
             .status
             .success());
-        let source = git.conflict_source(dir.path(), "file.txt", 8).unwrap();
-        let document_id = source.document.id.clone();
-        let original_worktree = source.worktree.clone();
-        let block_id = source
-            .document
+        let state = test_state(git.clone(), dir.path().join("config.json"));
+        let document = cache_conflict(&state, &git, dir.path(), 8, "file.txt");
+        let document_id = document.id.clone();
+        let original_worktree = fs::read(dir.path().join("file.txt")).unwrap();
+        let block_id = document
             .segments
             .iter()
             .find_map(|segment| match segment {
@@ -2057,20 +1854,12 @@ mod tests {
                 ConflictSegment::Context { .. } => None,
             })
             .unwrap();
-        let state = test_state(git.clone(), dir.path().join("config.json"));
-        state.snapshots.lock().unwrap().insert(
-            8,
-            SnapshotCache {
-                repository_id: 1,
-                head_oid: Some(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap()),
-                hunks: HashMap::new(),
-                conflicts: HashMap::from([(document_id.clone(), source)]),
-            },
-        );
         fs::write(dir.path().join("file.txt"), "external edit\n").unwrap();
-        let refreshed = git.conflict_source(dir.path(), "file.txt", 8).unwrap();
-        assert_ne!(document_id, refreshed.document.id);
-        let error = resolve_conflict_blocks(
+        let refreshed =
+            working_tree::load_conflict_document(&git, dir.path(), &state, 1, 8, "file.txt")
+                .unwrap();
+        assert_ne!(document_id, refreshed.id);
+        let error = working_tree::resolve_conflict_blocks(
             &git,
             dir.path(),
             &state,
@@ -2098,7 +1887,27 @@ mod tests {
             let mut permissions = fs::metadata(&target).unwrap().permissions();
             permissions.set_mode(permissions.mode() ^ 0o100);
             fs::set_permissions(&target, permissions).unwrap();
-            let error = resolve_conflict_blocks(
+            let error = working_tree::resolve_conflict_blocks(
+                &git,
+                dir.path(),
+                &state,
+                1,
+                8,
+                &document_id,
+                "file.txt",
+                &[ConflictResolution {
+                    block_id: block_id.clone(),
+                    choice: ConflictChoice::Current,
+                }],
+            )
+            .unwrap_err();
+            assert!(error.contains("file mode changed"));
+
+            let mut permissions = fs::metadata(&target).unwrap().permissions();
+            permissions.set_mode(permissions.mode() ^ 0o100);
+            fs::set_permissions(&target, permissions).unwrap();
+            git_ok(&git, dir.path(), &["add", "file.txt"]);
+            let error = working_tree::resolve_conflict_blocks(
                 &git,
                 dir.path(),
                 &state,
@@ -2112,7 +1921,7 @@ mod tests {
                 }],
             )
             .unwrap_err();
-            assert!(error.contains("file mode changed"));
+            assert!(error.contains("does not have base"));
         }
     }
 
@@ -2547,31 +2356,17 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.path().join("file.txt"), "two\n").unwrap();
-        let state = test_state(git, dir.path().join("config.json"));
-        state.snapshots.lock().unwrap().insert(
-            1,
-            SnapshotCache {
-                repository_id: 1,
-                head_oid: None,
-                hunks: HashMap::from([(
-                    "hunk".into(),
-                    CachedHunk {
-                        path: "file.txt".into(),
-                        staged: false,
-                        patch: b"invalid".to_vec(),
-                        source_diff: "previous diff".into(),
-                    },
-                )]),
-                conflicts: HashMap::new(),
-            },
-        );
+        let state = test_state(git.clone(), dir.path().join("config.json"));
+        let diff = cache_diff(&state, &git, dir.path(), 1, "file.txt", false);
+        let hunk_id = diff.hunks[0].id.clone();
+        fs::write(dir.path().join("file.txt"), "three\n").unwrap();
         let error = command_spec(
             &state,
             1,
             dir.path(),
             &OperationRequest::StageHunk {
                 snapshot_id: 1,
-                hunk_id: "hunk".into(),
+                hunk_id,
             },
         )
         .err()

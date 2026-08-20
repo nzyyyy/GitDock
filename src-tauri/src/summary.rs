@@ -1,4 +1,9 @@
-use crate::{models::*, snapshot::cache_snapshot, AppState};
+use crate::{
+    git::{capabilities, ongoing_state, Git},
+    models::*,
+    working_tree::{self, cache_snapshot},
+    AppState,
+};
 use std::{collections::HashMap, path::Path, sync::atomic::Ordering, thread};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -9,6 +14,106 @@ pub(crate) struct SummaryRefreshState {
 }
 
 pub(crate) struct SummaryRefreshPermit<'a>(&'a AppState);
+
+pub(crate) fn repository_summary(git: &Git, record: &RepositoryRecord) -> RepositorySummary {
+    repository_summary_with_snapshot(git, record, 0).0
+}
+
+pub(crate) fn repository_summary_with_snapshot(
+    git: &Git,
+    record: &RepositoryRecord,
+    snapshot_id: u64,
+) -> (RepositorySummary, Option<WorkingTreeSnapshot>) {
+    let missing = || RepositorySummary {
+        id: record.id,
+        path: record.path.clone(),
+        name: record.name.clone(),
+        group: record.group.clone(),
+        favorite: record.favorite,
+        order: record.order,
+        kind: RepositoryKind::Missing,
+        capabilities: capabilities(RepositoryKind::Missing),
+        branch: None,
+        head_oid: None,
+        changed_count: 0,
+        conflict_count: 0,
+        ahead: 0,
+        behind: 0,
+        last_commit: None,
+        ongoing: None,
+        error: Some("Repository path is unavailable. Relocate or remove this entry.".into()),
+    };
+    let path = Path::new(&record.path);
+    if !path.exists() {
+        return (missing(), None);
+    }
+    let Ok(inspection) = git.inspect_repository(path) else {
+        return (missing(), None);
+    };
+    let kind = if inspection.bare {
+        RepositoryKind::Bare
+    } else {
+        RepositoryKind::WorkTree
+    };
+    let snapshot = (!inspection.bare)
+        .then(|| {
+            working_tree::read_snapshot(git, record.id, &inspection.root, false, snapshot_id).ok()
+        })
+        .flatten();
+    let branch = git
+        .text(&inspection.root, &["branch", "--show-current"])
+        .ok()
+        .filter(|branch| !branch.is_empty());
+    let head_oid = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.head_oid.clone())
+        .or_else(|| {
+            git.text(&inspection.root, &["rev-parse", "--verify", "HEAD"])
+                .ok()
+        });
+    let (ahead, behind) = git
+        .text(
+            &inspection.root,
+            &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        )
+        .ok()
+        .and_then(|counts| {
+            let mut counts = counts.split_whitespace();
+            Some((counts.next()?.parse().ok()?, counts.next()?.parse().ok()?))
+        })
+        .unwrap_or((0, 0));
+    let (changed_count, conflict_count) = snapshot
+        .as_ref()
+        .map(|snapshot| {
+            (
+                snapshot.files.len(),
+                snapshot.files.iter().filter(|file| file.conflict).count(),
+            )
+        })
+        .unwrap_or((0, 0));
+    let summary = RepositorySummary {
+        id: record.id,
+        path: record.path.clone(),
+        name: record.name.clone(),
+        group: record.group.clone(),
+        favorite: record.favorite,
+        order: record.order,
+        kind: kind.clone(),
+        capabilities: capabilities(kind),
+        branch,
+        head_oid,
+        changed_count,
+        conflict_count,
+        ahead,
+        behind,
+        last_commit: git
+            .text(&inspection.root, &["log", "-1", "--format=%s"])
+            .ok(),
+        ongoing: ongoing_state(&inspection.git_dir),
+        error: None,
+    };
+    (summary, snapshot)
+}
 
 impl Drop for SummaryRefreshPermit<'_> {
     fn drop(&mut self) {
@@ -37,7 +142,7 @@ pub(crate) fn refresh_repositories(
     let generation = start_summary_refresh(&state)?;
     let active = active_repository_id
         .and_then(|id| records.iter().find(|record| record.id == id))
-        .map(|record| git.summary(record));
+        .map(|record| repository_summary(&git, record));
     let mut refresh = state
         .summary_refresh
         .lock()
@@ -62,7 +167,7 @@ pub(crate) fn refresh_repositories(
                 .cloned()
                 .map(|summary| summary_with_record(summary, record))
                 .unwrap_or_else(|| {
-                    let summary = git.summary(record);
+                    let summary = repository_summary(&git, record);
                     if current {
                         refresh.cache.insert(record.id, summary.clone());
                     }
@@ -92,7 +197,7 @@ pub(crate) fn refresh_repositories(
                             scope.spawn(move || {
                                 let _permit = acquire_summary_refresh_permit(state)?;
                                 summary_refresh_is_current(state, generation)
-                                    .then(|| git.summary(record))
+                                    .then(|| repository_summary(&git, record))
                                     .ok_or_else(|| "stale summary refresh".to_string())
                             })
                         })
@@ -224,9 +329,9 @@ pub(crate) fn refresh_repository(
     let snapshot_id = state.next_snapshot_id.fetch_add(1, Ordering::Relaxed);
     let git = state.git()?;
     let (summary, mut snapshot) =
-        git.summary_with_snapshot(&state.record(repository_id)?, snapshot_id);
+        repository_summary_with_snapshot(&git, &state.record(repository_id)?, snapshot_id);
     if let Some(snapshot) = snapshot.as_mut() {
-        git.attach_line_stats(Path::new(&summary.path), &mut snapshot.files);
+        working_tree::attach_line_stats(&git, Path::new(&summary.path), &mut snapshot.files);
         cache_snapshot(&state, snapshot)?;
     }
     publish_summary_batch(&state, generation, std::slice::from_ref(&summary), |_| {});
@@ -241,9 +346,37 @@ mod tests {
         test_util::{commit_file, init_repo, test_state},
     };
     use std::{
+        fs,
         sync::{atomic::AtomicUsize, Arc, Barrier},
         time::Duration,
     };
+
+    #[test]
+    fn summary_and_snapshot_share_worktree_status() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        commit_file(&git, dir.path(), "file.txt", "base\n", "base");
+        let head = git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        fs::write(dir.path().join("file.txt"), "changed\n").unwrap();
+        let record = RepositoryRecord {
+            id: 7,
+            path: dir.path().to_string_lossy().into_owned(),
+            name: "repo".into(),
+            group: None,
+            favorite: false,
+            order: 0,
+        };
+
+        let (summary, snapshot) = repository_summary_with_snapshot(&git, &record, 42);
+        let snapshot = snapshot.unwrap();
+        assert_eq!(snapshot.id, 42);
+        assert_eq!(snapshot.head_oid.as_deref(), Some(head.as_str()));
+        assert_eq!(summary.head_oid, snapshot.head_oid);
+        assert_eq!(summary.changed_count, snapshot.files.len());
+        assert_eq!(summary.conflict_count, 0);
+        assert_eq!(snapshot.files[0].path, "file.txt");
+    }
 
     #[test]
     fn cached_summary_uses_current_repository_metadata_and_generation() {
@@ -259,7 +392,7 @@ mod tests {
             favorite: false,
             order: 0,
         };
-        let summary = git.summary(&original);
+        let summary = repository_summary(&git, &original);
         let current = RepositoryRecord {
             name: "new".into(),
             group: Some("work".into()),
@@ -341,11 +474,11 @@ mod tests {
                 order: id as u32,
             })
             .collect::<Vec<_>>();
-        let cached = git.summary(&records[1]);
+        let cached = repository_summary(&git, &records[1]);
         let mut samples = Vec::new();
         for _ in 0..20 {
             let started = std::time::Instant::now();
-            let active = git.summary(&records[0]);
+            let active = repository_summary(&git, &records[0]);
             let summaries = std::iter::once(active)
                 .chain(
                     records[1..]

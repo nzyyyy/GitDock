@@ -1,7 +1,8 @@
 use crate::{
     git::{self, ensure_success},
     models::*,
-    operations::{validate_relative_path, verify_commit},
+    operations::verify_commit,
+    repository_path::validate_relative_path,
     AppState,
 };
 use std::{
