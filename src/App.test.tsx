@@ -517,15 +517,41 @@ test("stages and unstages multiple selected files", async () => {
     return Promise.resolve(undefined);
   });
 
+  const batchMenuItem = (text: string) => {
+    const menu = screen.getByRole("button", { name: "▾" }).nextElementSibling as HTMLDivElement;
+    return [...menu.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === text);
+  };
+
   render(<App />);
   await selectFirstRepository();
   fireEvent.click(await screen.findByRole("checkbox", { name: "Select all Unstaged" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage new.ts" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to unstage staged.ts" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage or unstage mixed.ts" }));
+  expect(screen.getByRole("button", { name: "Stage selected (4)" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Unstage selected/ })).not.toBeInTheDocument();
+  expect(batchMenuItem("Unstage selected (2)")).toBeEnabled();
+  expect(batchMenuItem("Discard (2)")).toBeEnabled();
+  expect(batchMenuItem("Trash (1)")).toBeEnabled();
+  fireEvent.click(batchMenuItem("Unstage selected (2)")!);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "unstageFiles", paths: ["staged.ts", "mixed.ts"] } }));
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select all Unstaged" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage new.ts" }));
+  fireEvent.click(batchMenuItem("Discard (2)")!);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "discardTracked", paths: ["one.ts", "two.ts"] } }));
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage new.ts" }));
+  fireEvent.click(batchMenuItem("Trash (1)")!);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "trashUntracked", paths: ["new.ts"] } }));
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select all Unstaged" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage new.ts" }));
   fireEvent.click(screen.getByRole("button", { name: "Stage selected (3)" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "stageFiles", paths: ["one.ts", "two.ts", "new.ts"] } }));
 
   fireEvent.click(screen.getByRole("checkbox", { name: "Select file to unstage staged.ts" }));
-  fireEvent.click(screen.getByRole("button", { name: "Unstage selected (1)" }));
+  fireEvent.click(batchMenuItem("Unstage selected (1)")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "unstageFiles", paths: ["staged.ts"] } }));
   expect(screen.queryByRole("checkbox", { name: /conflict\.ts/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: /ignored\.log/ })).not.toBeInTheDocument();
@@ -534,7 +560,8 @@ test("stages and unstages multiple selected files", async () => {
   fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage or unstage mixed.ts" }));
   fireEvent.click(screen.getByRole("button", { name: "Stage selected (1)" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "stageFiles", paths: ["mixed.ts"] } }));
-  fireEvent.click(screen.getByRole("button", { name: "Unstage selected (1)" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage or unstage mixed.ts" }));
+  fireEvent.click(batchMenuItem("Unstage selected (1)")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "unstageFiles", paths: ["mixed.ts"] } }));
   expect(screen.getByRole("checkbox", { name: "Select all Partially staged" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Stage mixed.ts" })).toBeInTheDocument();
@@ -566,35 +593,22 @@ test("stages and unstages multiple selected files", async () => {
   expect(screen.getByRole("button", { name: "Stage one.ts" })).toBeInTheDocument();
 });
 
-test("loads and hides ignored files", async () => {
-  const tracked = { path: "one.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false };
-  const ignored = { path: "ignored.log", kind: "ignored", staged: false, unstaged: false, conflict: false, ignored: true };
-  vi.mocked(invoke).mockImplementation((command: string, args?: Parameters<typeof invoke>[1]) => {
+test("does not offer an ignored-file toggle", async () => {
+  vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({
       git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
       settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190, language: "en" },
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 }],
     });
-    if (command === "get_status") {
-      const includeIgnored = Boolean(args && "includeIgnored" in args && args.includeIgnored);
-      return Promise.resolve({ id: includeIgnored ? 2 : 1, repositoryId: 1, headOid: "12345678", files: includeIgnored ? [tracked, ignored] : [tracked] });
-    }
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "one.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
     return Promise.resolve(undefined);
   });
 
   render(<App />);
   await selectFirstRepository();
-  expect(await screen.findByRole("button", { name: "Load ignored" })).toBeInTheDocument();
-  expect(screen.queryByText("ignored.log")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Load ignored" }));
-  expect(await screen.findByRole("button", { name: "Hide ignored" })).toBeInTheDocument();
-  expect(screen.getByText("ignored.log")).toBeInTheDocument();
-  expect(invoke).toHaveBeenCalledWith("get_status", { repositoryId: 1, includeIgnored: true });
-  vi.mocked(invoke).mockClear();
-  fireEvent.click(screen.getByRole("button", { name: "Hide ignored" }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_status", { repositoryId: 1, includeIgnored: false }));
-  expect(screen.getByRole("button", { name: "Load ignored" })).toBeInTheDocument();
-  expect(screen.queryByText("ignored.log")).not.toBeInTheDocument();
+  expect(await screen.findByRole("checkbox", { name: "Select file to stage one.ts" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Load ignored" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Hide ignored" })).not.toBeInTheDocument();
 });
 
 test("routes conflict actions through previews and shows destructive impact", async () => {

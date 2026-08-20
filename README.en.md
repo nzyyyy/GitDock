@@ -9,7 +9,7 @@ GitDock is a macOS Git desktop client built with Tauri, React, TypeScript, and R
 - Add, asynchronously clone, initialize, and manage local repositories; clone streams progress and can be cancelled
 - Inspect working-tree status in a compact filename-and-path row, and review unified diffs (deleted lines have no number; added lines show the new-file number) with on-demand highlighting for common languages
 - Stage, unstage, or discard files and individual change blocks and create commits; partially staged files show both staged and unstaged sides on the same diff page and can be batch-selected; resolve ordinary three-stage UTF-8 text conflicts block by block in Base / Current / Incoming panes, then stage the result
-- Select multiple files to stage or unstage them in one operation, including partially staged files
+- Select multiple files to stage, unstage, discard, or trash them from one dropdown, including partially staged files
 - Switch between English and Simplified Chinese with a remembered preference
 - Smoothly scroll through a windowed commit topology graph whose lanes continue across pages; commits refresh the graph and list automatically, with commit details (metadata and the changed-file list), per-file diffs, cherry-pick, and revert actions
 - Organize repositories with collapsible groups, a pinned Favorites group, new empty groups, drag sorting, and keyboard ordering within a group

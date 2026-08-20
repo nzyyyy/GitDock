@@ -11,12 +11,11 @@ export function ChangesOverview({ repository, snapshot }: { repository?: Reposit
   return <div className="canvas-empty"><div className="change-tally"><strong>{changed}</strong><span>{t("workingTreeChanges")}</span></div><h2>{t("selectFile")}</h2><p>{t("inspectHint")}</p></div>;
 }
 
-export function ChangesPane({ repository, snapshot, onOpen, onOpenExternal, onLoadIgnored, onRun, onFileHistory, onBlame }: { repository?: RepositorySummary; snapshot?: WorkingTreeSnapshot; onOpen: (file: FileChange, staged: boolean) => void; onOpenExternal: (path: string) => void; onLoadIgnored: () => void; onRun: RunOperation; onFileHistory: (path: string) => void; onBlame: (path: string) => void }) {
+export function ChangesPane({ repository, snapshot, onOpen, onOpenExternal, onRun, onFileHistory, onBlame }: { repository?: RepositorySummary; snapshot?: WorkingTreeSnapshot; onOpen: (file: FileChange, staged: boolean) => void; onOpenExternal: (path: string) => void; onRun: RunOperation; onFileHistory: (path: string) => void; onBlame: (path: string) => void }) {
   const { t } = useI18n();
   const [stageSelection, setStageSelection] = useState<string[]>([]); const [unstageSelection, setUnstageSelection] = useState<string[]>([]);
   const repositoryId = repository?.id;
   const files = snapshot?.files ?? [];
-  const ignoredVisible = files.some((file) => file.ignored);
   const hasStagedChanges = files.some((file) => file.staged && !file.conflict);
   const groups = [
     [t("conflictsGroup"), files.filter((f) => f.conflict), "conflict"],
@@ -33,8 +32,12 @@ export function ChangesPane({ repository, snapshot, onOpen, onOpenExternal, onLo
     setUnstageSelection((current) => current.filter((path) => validUnstagePaths.has(path)));
   }, [snapshot?.id, repository?.id]);
   const toggle = (path: string, selected: string[], setSelected: React.Dispatch<React.SetStateAction<string[]>>) => setSelected(selected.includes(path) ? selected.filter((item) => item !== path) : [...selected, path]);
-  const batch = (type: "stageFiles" | "unstageFiles", paths: string[], clear: () => void) => { onRun({ type, paths }); clear(); };
-  return <div className="changes-pane"><div className="pane-title"><span>{t("workingTree")}</span><span className="batch-actions">{stageSelection.length > 0 && <button onClick={() => batch("stageFiles", stageSelection, () => setStageSelection([]))}>{t("stageSelected")} ({stageSelection.length})</button>}{unstageSelection.length > 0 && <button onClick={() => batch("unstageFiles", unstageSelection, () => setUnstageSelection([]))}>{t("unstageSelected")} ({unstageSelection.length})</button>}{stageSelection.length === 0 && unstageSelection.length === 0 && <button onClick={onLoadIgnored}>{t(ignoredVisible ? "hideIgnored" : "loadIgnored")}</button>}</span></div><div className="change-groups">{repository?.ongoing && <div className="ongoing"><strong>{repository.ongoing.kind} {t("inProgress")}</strong>{repository.ongoing.canContinue && <button onClick={() => onRun({ type: "continue", kind: repository.ongoing!.kind })}>{t("continue")}</button>}{repository.ongoing.canSkip && <button onClick={() => onRun({ type: "skip", kind: repository.ongoing!.kind })}>{t("skip")}</button>}{repository.ongoing.canAbort && <button onClick={() => onRun({ type: "abort", kind: repository.ongoing!.kind })}>{t("abort")}</button>}</div>}{groups.map(([name, entries, type]) => {
+  const discardPaths = files.filter((file) => stageSelection.includes(file.path) && file.unstaged && !file.staged && file.kind !== "untracked" && !file.conflict).map((file) => file.path);
+  const trashPaths = files.filter((file) => stageSelection.includes(file.path) && file.kind === "untracked").map((file) => file.path);
+  const hasSelection = stageSelection.length > 0 || unstageSelection.length > 0;
+  const clearSelection = () => { setStageSelection([]); setUnstageSelection([]); };
+  const batch = (request: { type: "stageFiles" | "unstageFiles" | "discardTracked" | "trashUntracked"; paths: string[] }) => { onRun(request); clearSelection(); };
+  return <div className="changes-pane"><div className="pane-title"><span>{t("workingTree")}</span><span className="batch-actions">{hasSelection && <><button disabled={!stageSelection.length} onClick={() => batch({ type: "stageFiles", paths: stageSelection })}>{t("stageSelected")} ({stageSelection.length})</button><RowMenu label="▾"><button disabled={!unstageSelection.length} onClick={() => batch({ type: "unstageFiles", paths: unstageSelection })}>{t("unstageSelected")} ({unstageSelection.length})</button><button disabled={!discardPaths.length} onClick={() => batch({ type: "discardTracked", paths: discardPaths })}>{t("discard")} ({discardPaths.length})</button><button disabled={!trashPaths.length} onClick={() => batch({ type: "trashUntracked", paths: trashPaths })}>{t("trash")} ({trashPaths.length})</button></RowMenu></>}</span></div><div className="change-groups">{repository?.ongoing && <div className="ongoing"><strong>{repository.ongoing.kind} {t("inProgress")}</strong>{repository.ongoing.canContinue && <button onClick={() => onRun({ type: "continue", kind: repository.ongoing!.kind })}>{t("continue")}</button>}{repository.ongoing.canSkip && <button onClick={() => onRun({ type: "skip", kind: repository.ongoing!.kind })}>{t("skip")}</button>}{repository.ongoing.canAbort && <button onClick={() => onRun({ type: "abort", kind: repository.ongoing!.kind })}>{t("abort")}</button>}</div>}{groups.map(([name, entries, type]) => {
     const selected = type === "staged" ? unstageSelection : stageSelection;
     const setSelected = type === "staged" ? setUnstageSelection : setStageSelection;
     const onToggle = type === "mixed"

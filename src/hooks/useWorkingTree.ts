@@ -82,7 +82,6 @@ export function useWorkingTree({
 
   const closeDiff = useCallback(() => { clearFileDiff(); setConflict(undefined); setSelectedCommit(undefined); setCommitDetail(undefined); }, []);
   const closeCommitFile = useCallback(() => { clearFileDiff(); }, []);
-  const loadIgnored = useCallback(() => refreshStatus(selectedId, !(snapshot?.files.some((file) => file.ignored) ?? false)), [selectedId, snapshot, refreshStatus]);
 
   const reloadOpenDiff = useCallback(async () => {
     const current = diffRef.current;
@@ -141,6 +140,6 @@ export function useWorkingTree({
 
   return {
     snapshot, setSnapshot, diff, companionDiff, diffSnapshotId, conflict, setConflict, selectedCommit, setSelectedCommit, commitDetail, diffIsFile,
-    statusRequest, refreshStatus, reloadOpenDiff, openDiff, closeDiff, closeCommitFile, loadIgnored, openCommit, openCommitFile, showBranchDiff,
+    statusRequest, refreshStatus, reloadOpenDiff, openDiff, closeDiff, closeCommitFile, openCommit, openCommitFile, showBranchDiff,
   };
 }
