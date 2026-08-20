@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Decoration, Diff, Hunk, getChangeKey, parseDiff, tokenize, type ChangeData } from "react-diff-view";
 import "react-diff-view/style/index.css";
 import refractor from "refractor/core";
@@ -92,7 +92,7 @@ function firstChangeHunks(fileHunks: { changes: ChangeData[] }[], owned: DiffHun
   return first;
 }
 
-export function DiffView({ diff, snapshotId, onBack, onRun, onHunkSettled, fileActions, onFileHistory, onBlame, caption }: { diff: DiffFile; snapshotId?: number; onBack: () => void; onRun: (request: OperationRequest, onFinished?: OperationFinished) => void | Promise<void>; onHunkSettled?: () => void; fileActions?: boolean; onFileHistory?: (path: string) => void; onBlame?: (path: string) => void; caption?: string }) {
+function FileDiff({ diff, snapshotId, busy, onHunk, onRun }: { diff: DiffFile; snapshotId?: number; busy: boolean; onHunk: (type: "stageHunk" | "unstageHunk" | "discardHunk", hunkId: string) => void; onRun: (request: OperationRequest, onFinished?: OperationFinished) => void | Promise<void> }) {
   const { t } = useI18n();
   const file = useMemo(() => {
     const start = diff.patch.indexOf("diff --git ");
@@ -102,20 +102,33 @@ export function DiffView({ diff, snapshotId, onBack, onRun, onHunkSettled, fileA
   const tokens = useMemo(() => file && language ? tokenize(file.hunks, { highlight: true, refractor, language }) : null, [file, language]);
   const preamble = diff.patch.slice(0, diff.patch.indexOf("@@")).trimEnd();
   const islandStarts = useMemo(() => file ? firstChangeHunks(file.hunks, diff.hunks) : new Map<string, DiffHunk>(), [file, diff.hunks]);
-  const runHunk = (hunkId: string) => {
-    if (snapshotId == null) return;
-    onRun({ type: diff.staged ? "unstageHunk" : "stageHunk", snapshotId, hunkId }, (outcome) => { if (outcome === "succeeded") onHunkSettled?.(); });
-  };
-  const header = <header className="canvas-header"><button onClick={onBack}>← {t("back")}</button><strong>{diff.path}</strong>{fileActions && <div className="file-actions"><button onClick={() => onFileHistory?.(diff.path)}>{t("fileHistory")}</button><button onClick={() => onBlame?.(diff.path)}>{t("blame")}</button></div>}<span>{caption ?? (diff.staged ? "INDEX ↔ HEAD" : "WORKTREE ↔ INDEX")}</span></header>;
-  if (diff.binary || diff.tooLarge) return <div className="diff-view">{header}<div className="canvas-empty"><h2>{diff.binary ? t("binaryDiff") : t("diffTooLarge")}</h2><button onClick={() => onRun({ type: "runDifftool", path: diff.path, staged: diff.staged })}>{t("openDifftool")}</button></div></div>;
-  if (!file?.hunks.length) return <div className="diff-view">{header}<div className="diff-lines raw-diff">{diff.patch.split("\n").map((line, index) => <div className="meta" key={index}><span>{index + 1}</span><code>{line || " "}</code></div>)}</div></div>;
-  return <div className="diff-view">{header}<div className="diff-lines"><Diff diffType={file.type} hunks={file.hunks} viewType="unified" tokens={tokens} className="gitdock-diff" renderGutter={({ change, side }) => {
+  if (diff.binary || diff.tooLarge) return <div className="canvas-empty"><h2>{diff.binary ? t("binaryDiff") : t("diffTooLarge")}</h2><button onClick={() => onRun({ type: "runDifftool", path: diff.path, staged: diff.staged })}>{t("openDifftool")}</button></div>;
+  if (!file?.hunks.length) return <div className="raw-diff">{diff.patch.split("\n").map((line, index) => <div className="meta" key={index}><span>{index + 1}</span><code>{line || " "}</code></div>)}</div>;
+  return <Diff diffType={file.type} hunks={file.hunks} viewType="unified" tokens={tokens} className="gitdock-diff" renderGutter={({ change, side }) => {
     if (side === "old") {
       const owned = islandStarts.get(getChangeKey(change));
       if (!owned || snapshotId == null) return null;
-      return <button type="button" className={diff.staged ? "diff-stage unstage" : "diff-stage"} aria-label={diff.staged ? t("unstageHunk") : t("stageHunk")} onClick={() => runHunk(owned.id)}>{diff.staged ? "−" : "+"}</button>;
+      if (diff.staged) return <button type="button" className="diff-stage unstage" aria-label={t("unstageHunk")} disabled={busy} onClick={() => onHunk("unstageHunk", owned.id)}>−</button>;
+      return <span className="diff-hunk-actions"><button type="button" className="diff-stage" aria-label={t("stageHunk")} disabled={busy} onClick={() => onHunk("stageHunk", owned.id)}>+</button><button type="button" className="diff-stage discard" aria-label={t("discardHunk")} disabled={busy} onClick={() => onHunk("discardHunk", owned.id)}>↶</button></span>;
     }
     const line = newLineNumber(change);
     return line == null ? null : String(line);
-  }}>{(hunks) => hunks.flatMap((hunk, index) => [index === 0 && <Decoration key="file-header"><pre>{preamble}</pre></Decoration>, <Decoration key={`header-${hunk.content}`}><div className="hunk-decoration"><code>{hunk.content}</code></div></Decoration>, <Hunk key={hunk.content} hunk={hunk} />]).filter(Boolean) as React.ReactElement[]}</Diff></div></div>;
+  }}>{(hunks) => hunks.flatMap((hunk, index) => [index === 0 && <Decoration key="file-header"><pre>{preamble}</pre></Decoration>, <Decoration key={`header-${hunk.content}`}><div className="hunk-decoration"><code>{hunk.content}</code></div></Decoration>, <Hunk key={hunk.content} hunk={hunk} />]).filter(Boolean) as React.ReactElement[]}</Diff>;
+}
+
+export function DiffView({ diff, companionDiff, snapshotId, onBack, onRun, onHunkSettled, fileActions, onFileHistory, onBlame, caption }: { diff: DiffFile; companionDiff?: DiffFile; snapshotId?: number; onBack: () => void; onRun: (request: OperationRequest, onFinished?: OperationFinished) => void | Promise<void>; onHunkSettled?: () => void | Promise<void>; fileActions?: boolean; onFileHistory?: (path: string) => void; onBlame?: (path: string) => void; caption?: string }) {
+  const { t } = useI18n();
+  const [hunkBusy, setHunkBusy] = useState(false);
+  const sections = companionDiff ? (diff.staged ? [diff, companionDiff] : [companionDiff, diff]) : [diff];
+  const runHunk = (type: "stageHunk" | "unstageHunk" | "discardHunk", hunkId: string) => {
+    if (snapshotId == null || hunkBusy) return;
+    setHunkBusy(true);
+    onRun({ type, snapshotId, hunkId }, (outcome) => {
+      void (async () => {
+        try { if (outcome === "succeeded") await onHunkSettled?.(); } finally { setHunkBusy(false); }
+      })();
+    });
+  };
+  const label = (section: DiffFile) => section.staged ? "INDEX ↔ HEAD" : "WORKTREE ↔ INDEX";
+  return <div className="diff-view"><header className="canvas-header"><button onClick={onBack}>← {t("back")}</button><strong>{diff.path}</strong>{fileActions && <div className="file-actions"><button onClick={() => onFileHistory?.(diff.path)}>{t("fileHistory")}</button><button onClick={() => onBlame?.(diff.path)}>{t("blame")}</button></div>}<span>{caption ?? (companionDiff ? undefined : label(diff))}</span></header><div className="diff-lines">{sections.map((section) => <section className="diff-section" key={section.staged ? "staged" : "unstaged"}>{companionDiff && <div className="diff-section-label">{label(section)}</div>}<FileDiff diff={section} snapshotId={snapshotId} busy={hunkBusy} onHunk={runHunk} onRun={onRun} /></section>)}</div></div>;
 }

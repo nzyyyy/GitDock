@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import type { DiffFile, OperationRequest } from "./api";
 import { DiffView } from "./DiffView";
@@ -9,8 +9,8 @@ const patch = "diff --git a/src/file.ts b/src/file.ts\n--- a/src/file.ts\n+++ b/
 const diff: DiffFile = { path: "src/file.ts", staged: false, binary: false, tooLarge: false, patch, hunks: [{ id: "h1", header: "@@ -2,3 +2,2 @@", patch }] };
 afterEach(cleanup);
 
-function View({ value = diff, onRun = vi.fn(), onHunkSettled, snapshotId = 7 }: { value?: DiffFile; onRun?: (request: OperationRequest, onFinished?: (outcome: "succeeded" | "failed" | "cancelled") => void) => void; onHunkSettled?: () => void; snapshotId?: number }) {
-  return <I18nProvider language="en"><DiffView diff={value} snapshotId={snapshotId} onBack={() => {}} onRun={onRun} onHunkSettled={onHunkSettled} /></I18nProvider>;
+function View({ value = diff, companion, onRun = vi.fn(), onHunkSettled, snapshotId = 7 }: { value?: DiffFile; companion?: DiffFile; onRun?: (request: OperationRequest, onFinished?: (outcome: "succeeded" | "failed" | "cancelled") => void) => void; onHunkSettled?: () => void; snapshotId?: number }) {
+  return <I18nProvider language="en"><DiffView diff={value} companionDiff={companion} snapshotId={snapshotId} onBack={() => {}} onRun={onRun} onHunkSettled={onHunkSettled} /></I18nProvider>;
 }
 
 test("renders file headers, no-newline patches, and grouped replacements", () => {
@@ -32,20 +32,26 @@ test("shows new-file line numbers on inserts and none on deletes", () => {
   expect(insertGutters[1].textContent).toBe("2");
 });
 
-test("maps staged and unstaged hunk actions to backend-owned ids", () => {
+test("maps staged, unstaged, and discard hunk actions to backend-owned ids", async () => {
   const onRun = vi.fn();
   const onHunkSettled = vi.fn();
   const { rerender } = render(<View onRun={onRun} onHunkSettled={onHunkSettled} />);
+  expect(screen.getByRole("button", { name: "Discard hunk" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Stage hunk" }));
   expect(onRun).toHaveBeenLastCalledWith({ type: "stageHunk", snapshotId: 7, hunkId: "h1" }, expect.any(Function));
   onRun.mock.calls.at(-1)?.[1]("succeeded");
-  expect(onHunkSettled).toHaveBeenCalled();
+  await waitFor(() => expect(onHunkSettled).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "Discard hunk" }));
+  expect(onRun).toHaveBeenLastCalledWith({ type: "discardHunk", snapshotId: 7, hunkId: "h1" }, expect.any(Function));
+  onRun.mock.calls.at(-1)?.[1]("succeeded");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Stage hunk" })).toBeEnabled());
   rerender(<View value={{ ...diff, staged: true }} onRun={onRun} />);
+  expect(screen.queryByRole("button", { name: "Discard hunk" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Unstage hunk" }));
   expect(onRun).toHaveBeenLastCalledWith({ type: "unstageHunk", snapshotId: 7, hunkId: "h1" }, expect.any(Function));
 });
 
-test("stages each change island inside one git hunk", () => {
+test("stages each change island inside one git hunk", async () => {
   const onRun = vi.fn();
   const filePatch = "diff --git a/src/file.ts b/src/file.ts\n--- a/src/file.ts\n+++ b/src/file.ts\n@@ -1,5 +1,5 @@\n context\n-oldA\n+newA\n mid\n-oldB\n+newB\n";
   render(<View onRun={onRun} value={{
@@ -61,10 +67,24 @@ test("stages each change island inside one git hunk", () => {
   }} />);
   const buttons = screen.getAllByRole("button", { name: "Stage hunk" });
   expect(buttons).toHaveLength(2);
+  expect(screen.getAllByRole("button", { name: "Discard hunk" })).toHaveLength(2);
   fireEvent.click(buttons[0]);
   expect(onRun).toHaveBeenLastCalledWith({ type: "stageHunk", snapshotId: 7, hunkId: "h1" }, expect.any(Function));
-  fireEvent.click(buttons[1]);
+  onRun.mock.calls.at(-1)?.[1]("succeeded");
+  await waitFor(() => expect(screen.getAllByRole("button", { name: "Stage hunk" })[1]).toBeEnabled());
+  fireEvent.click(screen.getAllByRole("button", { name: "Stage hunk" })[1]);
   expect(onRun).toHaveBeenLastCalledWith({ type: "stageHunk", snapshotId: 7, hunkId: "h2" }, expect.any(Function));
+});
+
+test("stacks staged and unstaged sections for a mixed file", () => {
+  const staged = { ...diff, staged: true };
+  const unstaged = { ...diff, staged: false, hunks: [{ id: "h2", header: "@@ -2,3 +2,2 @@", patch }] };
+  render(<View value={staged} companion={unstaged} />);
+  expect(screen.getByText("INDEX ↔ HEAD")).toBeInTheDocument();
+  expect(screen.getByText("WORKTREE ↔ INDEX")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Unstage hunk" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Stage hunk" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Discard hunk" })).toBeInTheDocument();
 });
 
 test("keeps syntax highlighting on code but not hunk headers", () => {

@@ -530,9 +530,13 @@ test("stages and unstages multiple selected files", async () => {
   expect(screen.queryByRole("checkbox", { name: /conflict\.ts/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: /ignored\.log/ })).not.toBeInTheDocument();
 
-  // A partially staged file gets one row in its own group, offering both directions, and stays out of batch selection.
-  expect(screen.queryByRole("checkbox", { name: /mixed\.ts/ })).not.toBeInTheDocument();
-  expect(screen.queryByRole("checkbox", { name: "Select all Partially staged" })).not.toBeInTheDocument();
+  // A partially staged file gets one row in its own group and can be batch staged or unstaged.
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage or unstage mixed.ts" }));
+  fireEvent.click(screen.getByRole("button", { name: "Stage selected (1)" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "stageFiles", paths: ["mixed.ts"] } }));
+  fireEvent.click(screen.getByRole("button", { name: "Unstage selected (1)" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "unstageFiles", paths: ["mixed.ts"] } }));
+  expect(screen.getByRole("checkbox", { name: "Select all Partially staged" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Stage mixed.ts" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Unstage mixed.ts" })).toBeInTheDocument();
   expect([...document.querySelectorAll(".file-row")].filter((row) => row.textContent?.includes("mixed.ts"))).toHaveLength(1);

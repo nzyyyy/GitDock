@@ -436,6 +436,10 @@ pub enum OperationRequest {
         snapshot_id: u64,
         hunk_id: String,
     },
+    DiscardHunk {
+        snapshot_id: u64,
+        hunk_id: String,
+    },
     DiscardTracked {
         paths: Vec<String>,
     },

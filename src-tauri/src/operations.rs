@@ -396,6 +396,14 @@ fn preview(
             vec![],
             false,
         ),
+        OperationRequest::DiscardHunk { .. } => (
+            "Discard hunk",
+            "Restore this unstaged change in the working tree from the index.",
+            RiskLevel::Destructive,
+            vec![],
+            vec![],
+            false,
+        ),
         OperationRequest::TrashUntracked { paths } => (
             "Move untracked files to Trash",
             "Move selected untracked paths to macOS Trash.",
@@ -684,6 +692,7 @@ pub(crate) fn command_spec(
                 repository_id,
                 *snapshot_id,
                 hunk_id,
+                false,
             )?);
             strings(&["apply", "--cached", "--whitespace=nowarn", "-"])
         }
@@ -698,8 +707,24 @@ pub(crate) fn command_spec(
                 repository_id,
                 *snapshot_id,
                 hunk_id,
+                false,
             )?);
             strings(&["apply", "--cached", "--reverse", "--whitespace=nowarn", "-"])
+        }
+        OperationRequest::DiscardHunk {
+            snapshot_id,
+            hunk_id,
+        } => {
+            input = Some(cached_hunk(
+                &state.git()?,
+                cwd,
+                state,
+                repository_id,
+                *snapshot_id,
+                hunk_id,
+                true,
+            )?);
+            strings(&["apply", "--reverse", "--whitespace=nowarn", "-"])
         }
         OperationRequest::DiscardTracked { paths } => with_paths(&["restore", "--worktree"], paths),
         OperationRequest::Commit {
@@ -1050,6 +1075,7 @@ fn cached_hunk(
     repository_id: RepositoryId,
     snapshot_id: u64,
     hunk_id: &str,
+    worktree_only: bool,
 ) -> Result<Vec<u8>, String> {
     let snapshots = state
         .snapshots
@@ -1065,6 +1091,9 @@ fn cached_hunk(
         .hunks
         .get(hunk_id)
         .ok_or("Hunk is not available in this snapshot")?;
+    if worktree_only && hunk.staged {
+        return Err("Only unstaged hunks can be discarded".into());
+    }
     let current = git.diff(cwd, &hunk.path, hunk.staged, snapshot_id)?;
     if current.patch != hunk.source_diff {
         return Err("This diff changed after it was displayed. Refresh and try again.".into());
@@ -1138,6 +1167,9 @@ fn operation_title(request: &OperationRequest) -> &'static str {
         OperationRequest::UnstageFiles { .. } | OperationRequest::UnstageHunk { .. } => {
             "Unstage changes"
         }
+        OperationRequest::DiscardTracked { .. } | OperationRequest::DiscardHunk { .. } => {
+            "Discard tracked changes"
+        }
         OperationRequest::Commit { amend: true, .. } => "Amend commit",
         OperationRequest::Commit { .. } => "Create commit",
         OperationRequest::Fetch { .. } => "Fetch",
@@ -1190,6 +1222,16 @@ mod tests {
         .unwrap();
         assert_eq!(discard_preview.risk, RiskLevel::Destructive);
         assert!(discard_preview.requires_confirmation);
+        let discard_hunk = preview(
+            &record,
+            &OperationRequest::DiscardHunk {
+                snapshot_id: 1,
+                hunk_id: "hunk".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(discard_hunk.risk, RiskLevel::Destructive);
+        assert!(discard_hunk.requires_confirmation);
         let conflict = preview(
             &record,
             &OperationRequest::ResolveConflictBlocks {
@@ -1364,6 +1406,10 @@ mod tests {
                 hunk_id: "missing".into(),
             },
             OperationRequest::UnstageHunk {
+                snapshot_id: 1,
+                hunk_id: "missing".into(),
+            },
+            OperationRequest::DiscardHunk {
                 snapshot_id: 1,
                 hunk_id: "missing".into(),
             },
@@ -1577,6 +1623,54 @@ mod tests {
             .text(dir.path(), &["diff", "--cached", "--name-only"])
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn discards_one_change_island_and_leaves_the_other() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        commit_file(
+            &git,
+            dir.path(),
+            "file.txt",
+            "keep\noldA\nmid\noldB\nend\n",
+            "base",
+        );
+        fs::write(dir.path().join("file.txt"), "keep\nnewA\nmid\nnewB\nend\n").unwrap();
+        let state = test_state(git.clone(), dir.path().join("config.json"));
+        let diff = git.diff(dir.path(), "file.txt", false, 1).unwrap();
+        assert_eq!(diff.hunks.len(), 2);
+        let hunk = diff.hunks[0].clone();
+        state.snapshots.lock().unwrap().insert(
+            1,
+            SnapshotCache {
+                repository_id: 1,
+                head_oid: Some(git.text(dir.path(), &["rev-parse", "HEAD"]).unwrap()),
+                hunks: HashMap::from([(
+                    hunk.id.clone(),
+                    CachedHunk {
+                        path: "file.txt".into(),
+                        staged: false,
+                        patch: hunk.patch.into_bytes(),
+                        source_diff: diff.patch,
+                    },
+                )]),
+                conflicts: HashMap::new(),
+            },
+        );
+        run_request(
+            &state,
+            dir.path(),
+            OperationRequest::DiscardHunk {
+                snapshot_id: 1,
+                hunk_id: hunk.id,
+            },
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+            "keep\noldA\nmid\nnewB\nend\n"
+        );
     }
 
     #[test]
