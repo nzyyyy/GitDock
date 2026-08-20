@@ -21,8 +21,11 @@ export function useRepositoryList({
   const [filter, setFilter] = useState("");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const draggingRepositoryId = useRef<number | undefined>(undefined);
-  const dropTargetGroup = useRef<HTMLElement | undefined>(undefined);
-  const dropTargetRow = useRef<HTMLElement | undefined>(undefined);
+  const draggingHeight = useRef(0);
+  const dropHintRef = useRef<{ groupKey: string; index: number } | null>(null);
+  const dragSlots = useRef(new Map<string, number[]>());
+  const [draggingId, setDraggingId] = useState<number>();
+  const [dropHint, setDropHint] = useState<{ groupKey: string; index: number } | null>(null);
   const repositoryListRequest = useRef(0);
   const repositoryRequests = useRef(new Map<number, number>());
   const streamedSummaries = useRef(new Map<number, RepositorySummary>());
@@ -178,38 +181,85 @@ export function useRepositoryList({
     event.preventDefault(); event.dataTransfer.dropEffect = "move";
   }, [filter]);
 
-  const clearRepositoryDropHint = useCallback(() => {
-    dropTargetGroup.current?.classList.remove("drop-target");
-    dropTargetRow.current?.classList.remove("drop-before", "drop-after");
-    dropTargetGroup.current = undefined;
-    dropTargetRow.current = undefined;
+  const setHint = (hint: { groupKey: string; index: number } | null) => {
+    dropHintRef.current = hint;
+    setDropHint((current) => current?.groupKey === hint?.groupKey && current?.index === hint?.index ? current : hint);
+  };
+
+  const clearRepositoryDropHint = useCallback(() => setHint(null), []);
+
+  const captureGroupSlots = (groupEl: HTMLElement, groupKey: string) => {
+    if (dragSlots.current.has(groupKey)) return;
+    const dragging = draggingRepositoryId.current;
+    dragSlots.current.set(
+      groupKey,
+      [...groupEl.querySelectorAll<HTMLElement>(".repo-row-shell")]
+        .filter((row) => Number(row.dataset.repositoryId) !== dragging)
+        .map((row) => {
+          const rect = row.getBoundingClientRect();
+          return rect.top + rect.height / 2;
+        }),
+    );
+  };
+
+  const beginRepositoryDrag = useCallback((repositoryId: number, height: number, groupKey: string, groupEl?: HTMLElement | null) => {
+    if (filter.trim()) return;
+    const group = repositoryGroups.find((item) => item.key === groupKey);
+    const index = group?.repositories.findIndex((repository) => repository.id === repositoryId) ?? 0;
+    draggingRepositoryId.current = repositoryId;
+    draggingHeight.current = height;
+    dragSlots.current.clear();
+    if (groupEl) captureGroupSlots(groupEl, groupKey);
+    setDraggingId(repositoryId);
+    setHint({ groupKey, index });
+  }, [filter, repositoryGroups]);
+
+  const endRepositoryDrag = useCallback(() => {
+    draggingRepositoryId.current = undefined;
+    draggingHeight.current = 0;
+    dragSlots.current.clear();
+    setDraggingId(undefined);
+    setHint(null);
   }, []);
 
-  const hintRepositoryDrop = useCallback((event: React.DragEvent<HTMLElement>) => {
-    if (filter.trim()) return;
+  const hintRepositoryDrop = useCallback((event: React.DragEvent<HTMLElement>, groupKey: string) => {
+    if (filter.trim() || draggingRepositoryId.current === undefined) return;
     event.preventDefault(); event.dataTransfer.dropEffect = "move";
-    const group = event.currentTarget;
-    const row = (event.target as Element).closest<HTMLElement>(".repo-row-shell");
-    const targetRow = row && Number(row.dataset.repositoryId) !== draggingRepositoryId.current ? row : undefined;
-    const bounds = targetRow?.getBoundingClientRect();
-    const after = Boolean(bounds && event.clientY >= bounds.top + bounds.height / 2);
-    if (dropTargetGroup.current !== group) {
-      dropTargetGroup.current?.classList.remove("drop-target");
-      group.classList.add("drop-target");
-      dropTargetGroup.current = group;
-    }
-    const rowClass = after ? "drop-after" : "drop-before";
-    if (dropTargetRow.current !== targetRow || (targetRow && !targetRow.classList.contains(rowClass))) {
-      dropTargetRow.current?.classList.remove("drop-before", "drop-after");
-      targetRow?.classList.add(rowClass);
-      dropTargetRow.current = targetRow;
-    }
+    captureGroupSlots(event.currentTarget, groupKey);
+    const slots = dragSlots.current.get(groupKey) ?? [];
+    const found = slots.findIndex((mid) => event.clientY < mid);
+    setHint({ groupKey, index: found < 0 ? slots.length : found });
   }, [filter]);
+
+  const dropRepository = useCallback((groupKey: string) => {
+    const repositoryId = draggingRepositoryId.current;
+    if (filter.trim() || !repositoryId) return;
+    const hint = dropHintRef.current?.groupKey === groupKey ? dropHintRef.current : undefined;
+    const remaining = (repositoryGroups.find((group) => group.key === groupKey)?.repositories ?? [])
+      .filter((repository) => repository.id !== repositoryId);
+    const targetId = hint ? remaining[hint.index]?.id : undefined;
+    moveRepository(repositoryId, groupKey, targetId, false);
+  }, [filter, moveRepository, repositoryGroups]);
+
+  const repositoryRowShift = useCallback((groupKey: string, repositoryId: number) => {
+    if (!dropHint || !draggingId || repositoryId === draggingId) return 0;
+    const group = repositoryGroups.find((item) => item.key === groupKey);
+    if (!group) return 0;
+    const height = draggingHeight.current;
+    const oldIndex = group.repositories.findIndex((repository) => repository.id === repositoryId);
+    if (oldIndex < 0) return 0;
+    const dragIndex = group.repositories.findIndex((repository) => repository.id === draggingId);
+    if (dropHint.groupKey !== groupKey) return dragIndex >= 0 && oldIndex > dragIndex ? -height : 0;
+    if (dragIndex < 0) return oldIndex >= dropHint.index ? height : 0;
+    let next = oldIndex > dragIndex ? oldIndex - 1 : oldIndex;
+    if (next >= dropHint.index) next += 1;
+    return (next - oldIndex) * height;
+  }, [dropHint, draggingId, repositoryGroups]);
 
   return {
     repositories, setRepositories, customGroups, setCustomGroups, filter, setFilter, collapsedGroups, setCollapsedGroups,
-    draggingRepositoryId, dropTargetGroup, refreshRepositories, refreshRepository,
+    draggingId, draggingHeight: draggingId ? draggingHeight.current : 0, dropHint, refreshRepositories, refreshRepository,
     repositoryGroups, moveRepository, moveRepositoryBy, addGroup, updateGroup,
-    acceptRepositoryDrop, hintRepositoryDrop, clearRepositoryDropHint,
+    acceptRepositoryDrop, hintRepositoryDrop, clearRepositoryDropHint, beginRepositoryDrag, endRepositoryDrag, dropRepository, repositoryRowShift,
   };
 }

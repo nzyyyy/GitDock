@@ -31,6 +31,18 @@ type LayoutSide = "left" | "right" | "output";
 const LAYOUT_LIMITS: Record<LayoutSide, readonly [number, number]> = { left: [190, 420], right: [300, 560], output: [120, 420] };
 const clampLayout = (side: LayoutSide, value: number) => Math.max(LAYOUT_LIMITS[side][0], Math.min(LAYOUT_LIMITS[side][1], value));
 
+function setRepositoryDragImage(event: React.DragEvent<HTMLElement>) {
+  const source = event.currentTarget;
+  const rect = source.getBoundingClientRect();
+  const ghost = source.cloneNode(true) as HTMLElement;
+  ghost.ariaHidden = "true";
+  ghost.style.cssText = `position:fixed;left:-9999px;top:0;width:${rect.width}px;opacity:1;pointer-events:none;background:var(--panel)`;
+  ghost.querySelectorAll<HTMLElement>(".repo-row").forEach((row) => { row.style.contentVisibility = "visible"; });
+  document.body.appendChild(ghost);
+  event.dataTransfer.setDragImage(ghost, event.clientX - rect.left, event.clientY - rect.top);
+  return { ghost, height: rect.height };
+}
+
 export default function App() {
   const [git, setGit] = useState<GitInfo>({ path: null, version: null, supported: false, error: null });
   const [selectedId, setSelectedId] = useState<number>();
@@ -45,6 +57,7 @@ export default function App() {
   const [rebaseDialog, setRebaseDialog] = useState<{ repositoryId: number; onto?: string }>();
   const selectedIdRef = useRef<number | undefined>(undefined);
   selectedIdRef.current = selectedId;
+  const dragGhost = useRef<HTMLElement>(undefined);
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
   const showDialog = useCallback((spec: DialogSpec) => setDialog(spec), []);
 
@@ -57,7 +70,8 @@ export default function App() {
   const operations = useOperations({ pushLog, reportError, t, showDialog, setSelectedId, setOutputOpen, refreshRepositories: list.refreshRepositories, refreshHistory: history.refreshHistory, selectedId, selectedIdRef, historyRepositoryRef: history.historyRepositoryRef });
   const fileInspection = useFileInspection({ reportError, selectedId, selectedIdRef });
 
-  const { repositories, setRepositories, setCustomGroups, filter, setFilter, collapsedGroups, setCollapsedGroups, draggingRepositoryId, dropTargetGroup, refreshRepositories, repositoryGroups, moveRepository, moveRepositoryBy, addGroup, updateGroup, acceptRepositoryDrop, hintRepositoryDrop, clearRepositoryDropHint } = list;
+  const { repositories, setRepositories, setCustomGroups, filter, setFilter, collapsedGroups, setCollapsedGroups, draggingId, draggingHeight, dropHint, refreshRepositories, repositoryGroups, moveRepositoryBy, addGroup, updateGroup, acceptRepositoryDrop, hintRepositoryDrop, clearRepositoryDropHint, beginRepositoryDrag, endRepositoryDrag, dropRepository, repositoryRowShift } = list;
+  const finishRepositoryDrag = () => { dragGhost.current?.remove(); dragGhost.current = undefined; endRepositoryDrag(); };
   const { snapshot, setSnapshot, diff, companionDiff, diffSnapshotId, conflict, setConflict, selectedCommit, commitDetail, diffIsFile, statusRequest, refreshStatus, reloadOpenDiff, openDiff, closeDiff, closeCommitFile, openCommit, openCommitFile, showBranchDiff } = workingTree;
   const { view: fileView, path: filePath, entries: fileHistoryEntries, selectedOid: fileHistoryOid, diff: fileDiff, blameFile, openFileHistory, openBlame, selectHistoryOid, close: closeFileView } = fileInspection;
   const { commits, historyLoading, hasMore, loadMoreHistory } = history;
@@ -248,19 +262,11 @@ export default function App() {
       <aside className="repo-sidebar">
         <header className="brand" data-tauri-drag-region="deep"><RailMark /><div><strong>GitDock</strong><span>{git.supported ? `Git ${git.version}` : t("gitUnavailable")}</span></div></header>
         <label className="search"><span aria-hidden="true">⌕</span><input name="repositorySearch" autoComplete="off" aria-label={t("searchRepositories")} placeholder={t("findRepository")} value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
-        <div className="repo-list" role="list" aria-label={t("repositories")} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) clearRepositoryDropHint(); }} onDragEnd={clearRepositoryDropHint}>
-          {repositoryGroups.map((group) => <section role="group" aria-label={group.label} className={`repo-group ${!collapsedGroups.has(group.key) && !group.repositories.length ? "empty" : ""}`} key={group.key} onDragEnter={acceptRepositoryDrop} onDragOver={hintRepositoryDrop} onDragLeave={(event) => { if (dropTargetGroup.current === event.currentTarget && !event.currentTarget.contains(event.relatedTarget as Node | null)) clearRepositoryDropHint(); }} onDrop={(event) => {
-            event.preventDefault();
-            const repositoryId = Number(event.dataTransfer.getData("text/plain")) || draggingRepositoryId.current;
-            const row = (event.target as Element).closest<HTMLElement>(".repo-row-shell");
-            const targetId = row ? Number(row.dataset.repositoryId) : undefined;
-            const bounds = row?.getBoundingClientRect();
-            if (!filter.trim() && repositoryId) moveRepository(repositoryId, group.key, targetId, Boolean(bounds && event.clientY >= bounds.top + bounds.height / 2));
-            draggingRepositoryId.current = undefined;
-            clearRepositoryDropHint();
-          }}>
+        <div className="repo-list" role="list" aria-label={t("repositories")} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) clearRepositoryDropHint(); }} onDragEnd={finishRepositoryDrag}>
+          {repositoryGroups.map((group) => <section role="group" aria-label={group.label} className={`repo-group ${!collapsedGroups.has(group.key) && !group.repositories.length ? "empty" : ""} ${dropHint?.groupKey === group.key ? "drop-target" : ""}`} key={group.key} onDragEnter={acceptRepositoryDrop} onDragOver={(event) => hintRepositoryDrop(event, group.key)} onDrop={(event) => { event.preventDefault(); dropRepository(group.key); finishRepositoryDrag(); }}>
             <header><button aria-expanded={!collapsedGroups.has(group.key)} onClick={() => setCollapsedGroups((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span className="group-label">{group.label}<span className="group-chevron" aria-hidden="true">{collapsedGroups.has(group.key) ? "▸" : "▾"}</span></span><code>{group.repositories.length}</code></button>{group.key !== FAVORITES_GROUP && group.key !== UNGROUPED_GROUP && <RowMenu><button onClick={() => showDialog({ title: t("renameGroup"), fields: [{ name: "group", label: t("group"), value: group.label, required: true }], onSubmit: ({ group: value }) => updateGroup(group.key, String(value).trim()) })}>{t("rename")}</button><button onClick={() => updateGroup(group.key)}>{t("ungroup")}</button></RowMenu>}</header>
-            {!collapsedGroups.has(group.key) && group.repositories.map((repository, index) => <MemoRepositoryRow key={repository.id} repository={repository} selected={repository.id === selectedId} draggable={!filter.trim()} canMoveUp={!filter.trim() && index > 0} canMoveDown={!filter.trim() && index < group.repositories.length - 1} onSelect={selectRepository} onMove={(direction) => moveRepositoryBy(repository.id, direction)} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(repository.id)); const image = event.currentTarget.querySelector<HTMLElement>(".repo-name"); if (image) event.dataTransfer.setDragImage(image, 12, 12); draggingRepositoryId.current = repository.id; }} onDragEnd={() => { draggingRepositoryId.current = undefined; clearRepositoryDropHint(); }} />)}
+            {!collapsedGroups.has(group.key) && group.repositories.map((repository, index) => <MemoRepositoryRow key={repository.id} repository={repository} selected={repository.id === selectedId} draggable={!filter.trim()} dragging={repository.id === draggingId} shift={repositoryRowShift(group.key, repository.id)} canMoveUp={!filter.trim() && index > 0} canMoveDown={!filter.trim() && index < group.repositories.length - 1} onSelect={selectRepository} onMove={(direction) => moveRepositoryBy(repository.id, direction)} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(repository.id)); dragGhost.current?.remove(); const { ghost, height } = setRepositoryDragImage(event); dragGhost.current = ghost; beginRepositoryDrag(repository.id, height, group.key, event.currentTarget.closest<HTMLElement>(".repo-group")); }} onDragEnd={finishRepositoryDrag} />)}
+            {dropHint?.groupKey === group.key && draggingHeight > 0 && !group.repositories.some((repository) => repository.id === draggingId) && <div className="repo-drop-slot" style={{ height: draggingHeight }} aria-hidden="true" />}
           </section>)}
         </div>
         <footer className="sidebar-actions"><button onClick={register}>{t("add")}</button><button onClick={clone}>{t("clone")}</button><button onClick={initialize}>{t("init")}</button><button onClick={() => showDialog({ title: t("addGroup"), fields: [{ name: "group", label: t("group"), required: true }], onSubmit: ({ group }) => addGroup(String(group).trim()) })}>{t("addGroup")}</button><button onClick={toggleLanguage}>{t("language")}</button></footer><div className="resize-handle resize-left" role="separator" tabIndex={0} aria-label={t("resizeRepositories")} aria-orientation="vertical" aria-valuemin={LAYOUT_LIMITS.left[0]} aria-valuemax={LAYOUT_LIMITS.left[1]} aria-valuenow={leftWidth} onKeyDown={(event) => resizeWithKeyboard("left", event)} onPointerDown={(event) => beginResize("left", event)} />
