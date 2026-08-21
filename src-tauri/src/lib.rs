@@ -19,7 +19,7 @@ use std::{
     path::PathBuf,
     sync::{atomic::AtomicU64, Condvar, Mutex},
 };
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_specta::{collect_commands, Builder, ErrorHandlingMode};
 
 pub struct AppState {
@@ -32,6 +32,7 @@ pub struct AppState {
     pub(crate) mutating_repositories: Mutex<HashSet<RepositoryId>>,
     pub(crate) running: Mutex<HashMap<OperationId, process::RunningOperation>>,
     pub(crate) watcher: Mutex<Option<RecommendedWatcher>>,
+    pub(crate) watch_routes: Mutex<HashMap<RepositoryId, (PathBuf, std::sync::mpsc::Sender<()>)>>,
     pub(crate) summary_refresh: Mutex<SummaryRefreshState>,
     pub(crate) summary_refresh_running: Mutex<usize>,
     pub(crate) summary_refresh_ready: Condvar,
@@ -70,7 +71,7 @@ impl AppState {
 
 #[tauri::command]
 #[specta::specta]
-fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
+fn bootstrap(state: State<'_, AppState>, app: AppHandle) -> Result<Bootstrap, String> {
     let (settings, records) = {
         let store = state.store.lock().map_err(|_| "Settings are busy")?;
         (
@@ -96,6 +97,9 @@ fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
         .iter()
         .map(|summary| (summary.id, summary.clone()))
         .collect();
+    for record in &records {
+        let _ = repositories::ensure_watch(record.id, PathBuf::from(&record.path), &state, &app);
+    }
     Ok(Bootstrap {
         git: Git::info(&git),
         settings,
@@ -182,6 +186,7 @@ pub fn run() {
                 mutating_repositories: Mutex::new(HashSet::new()),
                 running: Mutex::new(HashMap::new()),
                 watcher: Mutex::new(None),
+                watch_routes: Mutex::new(HashMap::new()),
                 summary_refresh: Mutex::new(SummaryRefreshState::default()),
                 summary_refresh_running: Mutex::new(0),
                 summary_refresh_ready: Condvar::new(),
@@ -236,6 +241,7 @@ pub(crate) mod test_util {
             mutating_repositories: Mutex::new(HashSet::new()),
             running: Mutex::new(HashMap::new()),
             watcher: Mutex::new(None),
+            watch_routes: Mutex::new(HashMap::new()),
             summary_refresh: Mutex::new(SummaryRefreshState::default()),
             summary_refresh_running: Mutex::new(0),
             summary_refresh_ready: Condvar::new(),

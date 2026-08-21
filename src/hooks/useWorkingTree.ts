@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { api, type CommitDetail, type ConflictDocument, type DiffFile, type FileChange, type WorkingTreeSnapshot } from "../api";
+import { api, type CommitDetail, type ConflictDocument, type DiffFile, type FileChange, type RepositorySummary, type WorkingTreeSnapshot } from "../api";
 import { translate } from "../i18n";
 import { errorMessage } from "../types";
 
@@ -11,13 +11,14 @@ async function loadFileDiffs(repositoryId: number, snapshotId: number, file: Fil
 }
 
 export function useWorkingTree({
-  reportError, selectedIdRef, historyRepositoryRef, selectedId, language,
+  reportError, selectedIdRef, historyRepositoryRef, selectedId, language, setRepositoriesRef,
 }: {
   reportError: (message: string) => void;
   selectedIdRef: React.MutableRefObject<number | undefined>;
   historyRepositoryRef: React.MutableRefObject<number | undefined>;
   selectedId?: number;
   language: "en" | "zh-CN";
+  setRepositoriesRef: React.MutableRefObject<React.Dispatch<React.SetStateAction<RepositorySummary[]>>>;
 }) {
   const [snapshot, setSnapshot] = useState<WorkingTreeSnapshot>();
   const [diff, setDiff] = useState<DiffFile>();
@@ -57,12 +58,19 @@ export function useWorkingTree({
       const value = await api.getStatus(repositoryId, includeIgnored);
       if (request !== statusRequest.current || repositoryId !== selectedIdRef.current) return;
       setSnapshot(value);
+      const changedCount = value.files.length;
+      const conflictCount = value.files.filter((file) => file.conflict).length;
+      setRepositoriesRef.current((current) => current.map((item) => (
+        item.id === repositoryId && (item.changedCount !== changedCount || item.conflictCount !== conflictCount)
+          ? { ...item, changedCount, conflictCount }
+          : item
+      )));
       return value;
     } catch (error) {
       if (request !== statusRequest.current || repositoryId !== selectedIdRef.current) return;
       setSnapshot(undefined); reportError(errorMessage(error));
     }
-  }, [reportError, selectedIdRef]);
+  }, [reportError, selectedIdRef, setRepositoriesRef]);
 
   const openDiff = useCallback(async (file: FileChange, _staged?: boolean) => {
     if (!selectedId || !snapshot) return;

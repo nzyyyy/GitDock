@@ -460,6 +460,59 @@ test("repository list refresh preserves the current selection", async () => {
   expect(screen.getByRole("button", { name: /Beta/ })).toHaveTextContent("±4");
 });
 
+test("in-flight list refresh does not overwrite a newer repository refresh", async () => {
+  let repositoryListListener: (() => void) | undefined;
+  let repositoryChanged: ((event: { payload: { repositoryId: number } }) => void) | undefined;
+  const repositories = [
+    { id: 1, path: "/alpha", name: "Alpha", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 2, path: "/beta", name: "Beta", favorite: false, order: 1, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "bbbbbbbb", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+  ];
+  let resolveRefresh: ((value: typeof repositories) => void) | undefined;
+  vi.mocked(listen).mockImplementation(((event: string, handler: (...args: never[]) => void) => {
+    if (event === "repository-list-changed") repositoryListListener = handler;
+    if (event === "repository-changed") repositoryChanged = handler as typeof repositoryChanged;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    if (command === "refresh_repositories") return new Promise((resolve) => { resolveRefresh = resolve; });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    if (command === "refresh_repository") return Promise.resolve({ summary: { ...repositories[0], changedCount: 3 }, snapshot: { id: 2, repositoryId: 1, headOid: "aaaaaaaa", files: [{ path: "fresh.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] } });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  await selectFirstRepository();
+  await screen.findByRole("button", { name: /Alpha/ });
+  act(() => { void repositoryListListener?.(); });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("refresh_repositories", { activeRepositoryId: 1 }));
+  await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
+  await waitFor(() => expect(screen.getByRole("button", { name: /Alpha/ })).toHaveTextContent("±3"));
+  await act(async () => resolveRefresh?.(repositories));
+  expect(screen.getByRole("button", { name: /Alpha/ })).toHaveTextContent("±3");
+});
+
+test("selecting a repository copies working tree counts onto the list row", async () => {
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({
+      id: 1, repositoryId: 1, headOid: "aaaaaaaa",
+      files: [
+        { path: "a.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false },
+        { path: "b.ts", kind: "modified", staged: false, unstaged: true, conflict: true, ignored: false },
+      ],
+    });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  await selectFirstRepository();
+  expect(await screen.findByText("a.ts")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Repo/ })).toHaveTextContent("±2");
+  expect(document.querySelector(".status-rail.conflict")).not.toBeNull();
+});
+
 test("ignores an older refresh-all response", async () => {
   let repositoryListListener: (() => void) | undefined;
   const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };

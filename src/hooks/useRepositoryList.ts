@@ -47,6 +47,7 @@ export function useRepositoryList({
     try {
       const refresh = await api.refreshRepository(repositoryId);
       if (repositoryRequests.current.get(repositoryId) !== request) return;
+      streamedSummaries.current.set(repositoryId, refresh.summary);
       const selected = repositoryId === selectedIdRef.current;
       startTransition(() => {
         setRepositories((current) => current.map((item) => item.id === repositoryId ? refresh.summary : item));

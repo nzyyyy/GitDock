@@ -57,6 +57,7 @@ export default function App() {
   const [rebaseDialog, setRebaseDialog] = useState<{ repositoryId: number; onto?: string }>();
   const selectedIdRef = useRef<number | undefined>(undefined);
   selectedIdRef.current = selectedId;
+  const setRepositoriesRef = useRef<React.Dispatch<React.SetStateAction<RepositorySummary[]>>>(() => {});
   const dragGhost = useRef<HTMLElement>(undefined);
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
   const showDialog = useCallback((spec: DialogSpec) => setDialog(spec), []);
@@ -65,8 +66,9 @@ export default function App() {
   const reportError = useCallback((message: string) => { pushLog("error", message); setOutputOpen(true); }, [pushLog]);
 
   const history = useHistory({ reportError, selectedIdRef, selectedId, tab });
-  const workingTree = useWorkingTree({ reportError, selectedIdRef, historyRepositoryRef: history.historyRepositoryRef, selectedId, language });
+  const workingTree = useWorkingTree({ reportError, selectedIdRef, historyRepositoryRef: history.historyRepositoryRef, selectedId, language, setRepositoriesRef });
   const list = useRepositoryList({ reportError, selectedIdRef, setSnapshot: workingTree.setSnapshot, refreshStatus: workingTree.refreshStatus, t, language });
+  setRepositoriesRef.current = list.setRepositories;
   const operations = useOperations({ pushLog, reportError, t, showDialog, setSelectedId, setOutputOpen, refreshRepositories: list.refreshRepositories, refreshRepository: list.refreshRepository, refreshHistory: history.refreshHistory, selectedId, selectedIdRef, historyRepositoryRef: history.historyRepositoryRef });
   const fileInspection = useFileInspection({ reportError, selectedId, selectedIdRef });
 

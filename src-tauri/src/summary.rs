@@ -325,7 +325,13 @@ pub(crate) fn refresh_repository(
     repository_id: RepositoryId,
     state: State<'_, AppState>,
 ) -> Result<RepositoryRefresh, String> {
-    let generation = start_summary_refresh(&state)?;
+    refresh_one_repository(repository_id, &state)
+}
+
+fn refresh_one_repository(
+    repository_id: RepositoryId,
+    state: &AppState,
+) -> Result<RepositoryRefresh, String> {
     let snapshot_id = state.next_snapshot_id.fetch_add(1, Ordering::Relaxed);
     let git = state.git()?;
     let (summary, mut snapshot) =
@@ -334,7 +340,7 @@ pub(crate) fn refresh_repository(
         working_tree::attach_line_stats(&git, Path::new(&summary.path), &mut snapshot.files);
         cache_snapshot(&state, snapshot)?;
     }
-    publish_summary_batch(&state, generation, std::slice::from_ref(&summary), |_| {});
+    replace_cached_summary(state, summary.clone())?;
     Ok(RepositoryRefresh { summary, snapshot })
 }
 
@@ -425,6 +431,55 @@ mod tests {
         ));
         assert!(!published);
         assert!(state.summary_refresh.lock().unwrap().cache.is_empty());
+    }
+
+    #[test]
+    fn refresh_repository_writes_cache_after_list_refresh_bumps_generation() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(&git, dir.path());
+        commit_file(&git, dir.path(), "file.txt", "base\n", "base");
+        fs::write(dir.path().join("file.txt"), "changed\n").unwrap();
+        let record = RepositoryRecord {
+            id: 1,
+            path: dir.path().to_string_lossy().into(),
+            name: "repo".into(),
+            group: None,
+            favorite: false,
+            order: 0,
+        };
+        let state = test_state(git, dir.path().join("config.json"));
+        state
+            .store
+            .lock()
+            .unwrap()
+            .update(|config| {
+                config.repositories.push(record);
+                config.next_repository_id = 2;
+                Ok(())
+            })
+            .unwrap();
+
+        let stale_generation = start_summary_refresh(&state).unwrap();
+        invalidate_summary_refresh(&state);
+        let refresh = refresh_one_repository(1, &state).unwrap();
+        assert!(refresh.summary.changed_count > 0);
+        assert!(!publish_summary_batch(
+            &state,
+            stale_generation,
+            std::slice::from_ref(&refresh.summary),
+            |_| {},
+        ));
+        assert_eq!(
+            state
+                .summary_refresh
+                .lock()
+                .unwrap()
+                .cache
+                .get(&1)
+                .map(|summary| summary.changed_count),
+            Some(refresh.summary.changed_count)
+        );
     }
 
     #[test]

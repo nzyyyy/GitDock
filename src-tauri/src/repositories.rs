@@ -10,7 +10,7 @@ use crate::{
 };
 use notify::{RecursiveMode, Watcher};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{atomic::Ordering, mpsc},
     thread,
@@ -107,7 +107,9 @@ pub(crate) fn register_repository(
         })?
     };
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
-    replace_cached_summary(state, repository_summary(&git, &record))
+    let summary = replace_cached_summary(state, repository_summary(&git, &record))?;
+    let _ = ensure_watch(record.id, PathBuf::from(&record.path), state, app);
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -204,7 +206,9 @@ pub(crate) fn relocate_repository(
         })?
     };
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
-    replace_cached_summary(&state, repository_summary(&git, &record))
+    let summary = replace_cached_summary(&state, repository_summary(&git, &record))?;
+    let _ = ensure_watch(record.id, PathBuf::from(&record.path), &state, &app);
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -341,6 +345,7 @@ pub(crate) fn remove_repository(
         Ok(())
     })?;
     remove_cached_summary(&state, repository_id);
+    stop_watch(repository_id, &state);
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
     Ok(())
 }
@@ -353,32 +358,112 @@ pub(crate) fn watch_repository(
     app: AppHandle,
 ) -> Result<(), String> {
     let record = state.record(repository_id)?;
-    let path = PathBuf::from(record.path);
+    ensure_watch(repository_id, PathBuf::from(record.path), &state, &app)
+}
+
+pub(crate) fn ensure_watch(
+    repository_id: RepositoryId,
+    path: PathBuf,
+    state: &AppState,
+    app: &AppHandle,
+) -> Result<(), String> {
+    if !path.exists() {
+        stop_watch(repository_id, state);
+        return Ok(());
+    }
+    let mut routes = state
+        .watch_routes
+        .lock()
+        .map_err(|_| "File watcher is busy")?;
+    if routes
+        .get(&repository_id)
+        .is_some_and(|(existing, _)| existing == &path)
+    {
+        return Ok(());
+    }
+    let old_path = routes.remove(&repository_id).map(|(path, _)| path);
     let (events, pending) = mpsc::channel();
-    let watch_app = app.clone();
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        let suppressed = watch_app
-            .state::<AppState>()
-            .mutating_repositories
-            .lock()
-            .map(|repositories| repositories.contains(&repository_id))
-            .unwrap_or(true);
-        if event.is_ok() && !suppressed {
-            let _ = events.send(());
-        }
-    })
-    .map_err(|e| e.to_string())?;
+    routes.insert(repository_id, (path.clone(), events));
+    drop(routes);
+
     let event_app = app.clone();
     thread::spawn(move || {
         while wait_for_quiet(&pending) {
             let _ = event_app.emit("repository-changed", RepositoryChanged { repository_id });
         }
     });
+
+    let mut watcher_slot = state.watcher.lock().map_err(|_| "File watcher is busy")?;
+    if watcher_slot.is_none() {
+        let watch_app = app.clone();
+        *watcher_slot = Some(
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                dispatch_watch_event(&watch_app, event);
+            })
+            .map_err(|e| e.to_string())?,
+        );
+    }
+    let watcher = watcher_slot.as_mut().ok_or("File watcher is unavailable")?;
+    if let Some(old_path) = old_path {
+        let _ = watcher.unwatch(&old_path);
+    }
     watcher
         .watch(&path, RecursiveMode::Recursive)
-        .map_err(|e| e.to_string())?;
-    *state.watcher.lock().map_err(|_| "File watcher is busy")? = Some(watcher);
-    Ok(())
+        .map_err(|e| e.to_string())
+}
+
+fn stop_watch(repository_id: RepositoryId, state: &AppState) {
+    let Ok(mut routes) = state.watch_routes.lock() else {
+        return;
+    };
+    let Some((path, _)) = routes.remove(&repository_id) else {
+        return;
+    };
+    drop(routes);
+    if let Ok(mut watcher) = state.watcher.lock() {
+        if let Some(watcher) = watcher.as_mut() {
+            let _ = watcher.unwatch(&path);
+        }
+    }
+}
+
+fn dispatch_watch_event(app: &AppHandle, event: notify::Result<notify::Event>) {
+    let Ok(event) = event else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let Ok(mutating) = state.mutating_repositories.lock() else {
+        return;
+    };
+    let Ok(routes) = state.watch_routes.lock() else {
+        return;
+    };
+    let mut notified = HashSet::new();
+    for path in &event.paths {
+        let Some(repository_id) = match_watch_path(
+            routes.iter().map(|(id, (root, _))| (*id, root.as_path())),
+            path,
+        ) else {
+            continue;
+        };
+        if mutating.contains(&repository_id) || !notified.insert(repository_id) {
+            continue;
+        }
+        if let Some((_, sender)) = routes.get(&repository_id) {
+            let _ = sender.send(());
+        }
+    }
+}
+
+fn match_watch_path<'a>(
+    paths: impl IntoIterator<Item = (RepositoryId, &'a Path)>,
+    event_path: &Path,
+) -> Option<RepositoryId> {
+    paths
+        .into_iter()
+        .filter(|(_, root)| event_path.starts_with(root))
+        .max_by_key(|(_, root)| root.as_os_str().len())
+        .map(|(id, _)| id)
 }
 
 fn wait_for_quiet(events: &mpsc::Receiver<()>) -> bool {
@@ -393,6 +478,10 @@ fn wait_for_quiet(events: &mpsc::Receiver<()>) -> bool {
 mod tests {
     use super::*;
     use crate::store::ConfigStore;
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+    };
 
     #[test]
     fn watcher_waits_until_the_event_burst_is_quiet() {
@@ -409,6 +498,47 @@ mod tests {
         assert!(wait_for_quiet(&receiver));
         assert!(started.elapsed() >= Duration::from_millis(450));
         drop(sender);
+    }
+
+    #[test]
+    fn watching_a_second_repository_keeps_the_first_route() {
+        let paths = HashMap::from([(1, PathBuf::from("/alpha")), (2, PathBuf::from("/beta"))]);
+        assert_eq!(
+            match_watch_path(
+                paths.iter().map(|(id, path)| (*id, path.as_path())),
+                Path::new("/alpha/src/a.ts"),
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            match_watch_path(
+                paths.iter().map(|(id, path)| (*id, path.as_path())),
+                Path::new("/beta/src/b.ts"),
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn nested_repository_prefers_the_longest_path_prefix() {
+        let paths = HashMap::from([
+            (1, PathBuf::from("/work/app")),
+            (2, PathBuf::from("/work/app/vendor/nested")),
+        ]);
+        assert_eq!(
+            match_watch_path(
+                paths.iter().map(|(id, path)| (*id, path.as_path())),
+                Path::new("/work/app/src/main.rs"),
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            match_watch_path(
+                paths.iter().map(|(id, path)| (*id, path.as_path())),
+                Path::new("/work/app/vendor/nested/lib.rs"),
+            ),
+            Some(2)
+        );
     }
 
     #[test]
