@@ -6,7 +6,7 @@ import { translate } from "../i18n";
 import { errorMessage, type DialogSpec, type OperationFinished, type OperationOutcome, type OperationToast, type Pending } from "../types";
 
 export function useOperations({
-  pushLog, reportError, t, showDialog, setSelectedId, setOutputOpen, refreshRepositories, refreshHistory, selectedId, selectedIdRef, historyRepositoryRef,
+  pushLog, reportError, t, showDialog, setSelectedId, setOutputOpen, refreshRepositories, refreshRepository, refreshHistory, selectedId, selectedIdRef, historyRepositoryRef,
 }: {
   pushLog: (kind: "stdout" | "stderr" | "started" | "finished" | "error", message: string) => void;
   reportError: (message: string) => void;
@@ -15,6 +15,7 @@ export function useOperations({
   setSelectedId: React.Dispatch<React.SetStateAction<number | undefined>>;
   setOutputOpen: React.Dispatch<React.SetStateAction<boolean>>;
   refreshRepositories: () => Promise<void>;
+  refreshRepository: (repositoryId: number) => Promise<void>;
   refreshHistory: (repositoryId: number) => Promise<void>;
   selectedId?: number;
   selectedIdRef: React.MutableRefObject<number | undefined>;
@@ -33,7 +34,8 @@ export function useOperations({
 
   const startOperation = useCallback(async (repositoryId: number, request: OperationRequest, confirmed: boolean, onFinished?: OperationFinished) => {
     const result = await api.startOperation(repositoryId, request, confirmed);
-    const finished = onFinished || request.type === "commit" ? (outcome: OperationOutcome) => {
+    const finished = onFinished || request.type === "commit" || request.type === "fetch" ? (outcome: OperationOutcome) => {
+      if (outcome === "succeeded" && (request.type === "commit" || request.type === "fetch")) void refreshRepository(repositoryId);
       if (outcome === "succeeded" && request.type === "commit" && historyRepositoryRef.current === repositoryId) {
         if (selectedIdRef.current === repositoryId) void refreshHistory(repositoryId); else historyRepositoryRef.current = undefined;
       }
@@ -44,7 +46,7 @@ export function useOperations({
       if (outcome) { earlyCompletions.current.delete(result.operationId); finished(outcome); }
       else operationCallbacks.current.set(result.operationId, finished);
     }
-  }, [refreshHistory]);
+  }, [refreshHistory, refreshRepository]);
 
   const run = useCallback(async (request: OperationRequest, onFinished?: OperationFinished) => {
     if (!selectedId) { onFinished?.("failed"); return; }

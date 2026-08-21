@@ -62,6 +62,85 @@ test("does not select a repository until the user clicks one", async () => {
   expect(beta).not.toHaveAttribute("aria-current");
 });
 
+test("moves repository and sync counts to their action positions", async () => {
+  const capabilities = { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true };
+  const repositories = [
+    { id: 1, path: "/changed", name: "Changed repository", favorite: false, order: 0, kind: "workTree", capabilities, branch: "main", headOid: "aaaaaaaa", changedCount: 4, conflictCount: 0, ahead: 2, behind: 3 },
+    { id: 2, path: "/conflict", name: "Conflict repository", favorite: false, order: 1, kind: "workTree", capabilities, branch: "main", headOid: "bbbbbbbb", changedCount: 5, conflictCount: 1, ahead: 0, behind: 0 },
+    { id: 3, path: "/quiet", name: "Quiet repository", favorite: false, order: 2, kind: "workTree", capabilities, branch: "main", headOid: "cccccccc", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+    { id: 4, path: "/missing", name: "Missing repository", favorite: false, order: 3, kind: "missing", capabilities, branch: null, headOid: null, changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },
+  ];
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  const changed = await screen.findByRole("button", { name: /Changed repository/ });
+  const conflict = screen.getByRole("button", { name: /Conflict repository/ });
+  const quiet = screen.getByRole("button", { name: /Quiet repository/ });
+  const missing = screen.getByRole("button", { name: /Missing repository/ });
+  expect(changed.querySelector(".repo-name i")).toHaveTextContent("±4");
+  expect(changed.querySelector(".repo-meta")).not.toHaveTextContent("↑2");
+  expect(changed.querySelector(".repo-meta")).not.toHaveTextContent("↓3");
+  expect(conflict.querySelector(".repo-name i")).toHaveTextContent("±5");
+  expect(conflict.querySelector(".status-rail")).toHaveClass("conflict");
+  expect(quiet.querySelector(".repo-name i")).toBeNull();
+  expect(missing.querySelector(".repo-name i")).toHaveTextContent("missing");
+
+  fireEvent.click(changed);
+  expect(screen.getByRole("button", { name: "Pull ↓3" })).toHaveClass("sync-button", "sync-pending");
+  expect(screen.getByRole("button", { name: "Push ↑2" })).toHaveClass("sync-button", "sync-pending");
+
+  fireEvent.click(quiet);
+  expect(screen.getByRole("button", { name: "Pull" })).toHaveClass("sync-button");
+  expect(screen.getByRole("button", { name: "Pull" })).not.toHaveClass("sync-pending");
+  expect(screen.getByRole("button", { name: "Push" })).not.toHaveClass("sync-pending");
+});
+
+test("refreshes pull and push counts after fetch and commit", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" } }) => void) | undefined;
+  let operationId = 0;
+  let refreshCalls = 0;
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 };
+  const stagedSnapshot = { id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [{ path: "file.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false }] };
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve(stagedSnapshot);
+    if (command === "preview_operation") return Promise.resolve({ title: "Git", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
+    if (command === "start_operation") return Promise.resolve({ operationId: ++operationId, accepted: true });
+    if (command === "refresh_repository") {
+      refreshCalls += 1;
+      return Promise.resolve({
+        summary: { ...repository, changedCount: refreshCalls === 2 ? 0 : 1, ahead: refreshCalls === 2 ? 1 : 0, behind: 2 },
+        snapshot: refreshCalls === 2 ? { ...stagedSnapshot, id: 2, files: [] } : stagedSnapshot,
+      });
+    }
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  await selectFirstRepository();
+  fireEvent.click(await screen.findByRole("button", { name: "Fetch" }));
+  await waitFor(() => expect(operationId).toBe(1));
+  await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "started", message: "Fetch" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
+  expect(await screen.findByRole("button", { name: "Pull ↓2" })).toHaveClass("sync-pending");
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Commit message" }), { target: { value: "Commit" } });
+  fireEvent.click(screen.getByRole("button", { name: "Commit staged changes" }));
+  await waitFor(() => expect(operationId).toBe(2));
+  await act(async () => operationListener?.({ payload: { operationId: 2, repositoryId: 1, kind: "started", message: "Create commit" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 2, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
+  expect(await screen.findByRole("button", { name: "Push ↑1" })).toHaveClass("sync-pending");
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "refresh_repository")).toHaveLength(2);
+});
+
 test("creates a branch from a branch menu", async () => {
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({
@@ -773,6 +852,7 @@ test("clears the commit message only after a successful early completion event",
     });
     if (command === "get_status" && args && "repositoryId" in args && args.repositoryId === 2) return Promise.resolve({ id: 2, repositoryId: 2, headOid: "87654321", files: [] });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "file.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
+    if (command === "refresh_repository") return Promise.resolve({ summary: { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 1, behind: 0 }, snapshot: { id: 3, repositoryId: 1, headOid: "12345678", files: [{ path: "file.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false }] } });
     if (command === "preview_operation") return Promise.resolve({ title: "Commit", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
     if (command === "start_operation") return new Promise((resolve) => { resolveStart = resolve; });
     return Promise.resolve(undefined);
@@ -876,6 +956,7 @@ test("refreshes both history views after a successful commit only", async () => 
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 }],
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "src/file.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
+    if (command === "refresh_repository") return Promise.resolve({ summary: { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 1, behind: 0 }, snapshot: { id: 3, repositoryId: 1, headOid: "12345678", files: [{ path: "src/file.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false }] } });
     if (command === "get_history") {
       historyCalls += 1;
       if (args && "cursor" in args && args.cursor) return new Promise((resolve) => { resolveStalePage = resolve; });
