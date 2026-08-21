@@ -2,7 +2,6 @@ use crate::{
     git::{ensure_success, path_name, strings, Git},
     models::*,
     process::{spawn_git_operation, CommandSpec, OperationContext},
-    store::ConfigStore,
     summary::{
         clear_summary_cache, invalidate_summary_refresh, remove_cached_summary,
         replace_cached_summary, repository_summary,
@@ -31,8 +30,10 @@ pub(crate) fn set_git_path(
     }
     {
         let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
-        store.config.settings.git_path = path;
-        store.save()?;
+        store.update(|config| {
+            config.settings.git_path = path;
+            Ok(())
+        })?;
     }
     *state.git.lock().map_err(|_| "Git state is busy")? = discovered.clone();
     clear_summary_cache(&state);
@@ -48,18 +49,22 @@ pub(crate) fn save_layout(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
-    store.config.settings.left_width = left_width.clamp(190, 420);
-    store.config.settings.right_width = right_width.clamp(300, 560);
-    store.config.settings.output_height = output_height.clamp(120, 420);
-    store.save()
+    store.update(|config| {
+        config.settings.left_width = left_width.clamp(190, 420);
+        config.settings.right_width = right_width.clamp(300, 560);
+        config.settings.output_height = output_height.clamp(120, 420);
+        Ok(())
+    })
 }
 
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn save_language(language: Language, state: State<'_, AppState>) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
-    store.config.settings.language = language;
-    store.save()
+    store.update(|config| {
+        config.settings.language = language;
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -82,28 +87,24 @@ pub(crate) fn register_repository(
     let canonical = inspection.root.to_string_lossy().to_string();
     let record = {
         let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
-        if store
-            .config
-            .repositories
-            .iter()
-            .any(|r| r.path == canonical)
-        {
-            return Err("This repository is already registered".into());
-        }
-        let id = store.config.next_repository_id;
-        store.config.next_repository_id += 1;
-        let record = RepositoryRecord {
-            id,
-            path: canonical,
-            name: path_name(&inspection.root),
-            group: None,
-            favorite: false,
-            order: store.config.repositories.len() as u32,
-        };
-        store.config.repositories.push(record.clone());
-        store.config.settings.selected_repository_id = Some(id);
-        store.save()?;
-        record
+        store.update(|config| {
+            if config.repositories.iter().any(|r| r.path == canonical) {
+                return Err("This repository is already registered".into());
+            }
+            let id = config.next_repository_id;
+            config.next_repository_id += 1;
+            let record = RepositoryRecord {
+                id,
+                path: canonical,
+                name: path_name(&inspection.root),
+                group: None,
+                favorite: false,
+                order: config.repositories.len() as u32,
+            };
+            config.repositories.push(record.clone());
+            config.settings.selected_repository_id = Some(id);
+            Ok(record)
+        })?
     };
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
     replace_cached_summary(state, repository_summary(&git, &record))
@@ -184,25 +185,23 @@ pub(crate) fn relocate_repository(
     let canonical = inspection.root.to_string_lossy().to_string();
     let record = {
         let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
-        if store
-            .config
-            .repositories
-            .iter()
-            .any(|r| r.id != repository_id && r.path == canonical)
-        {
-            return Err("This repository is already registered".into());
-        }
-        let record = store
-            .config
-            .repositories
-            .iter_mut()
-            .find(|r| r.id == repository_id)
-            .ok_or("Repository is not registered")?;
-        record.path = canonical;
-        record.name = path_name(&inspection.root);
-        let result = record.clone();
-        store.save()?;
-        result
+        store.update(|config| {
+            if config
+                .repositories
+                .iter()
+                .any(|r| r.id != repository_id && r.path == canonical)
+            {
+                return Err("This repository is already registered".into());
+            }
+            let record = config
+                .repositories
+                .iter_mut()
+                .find(|r| r.id == repository_id)
+                .ok_or("Repository is not registered")?;
+            record.path = canonical;
+            record.name = path_name(&inspection.root);
+            Ok(record.clone())
+        })?
     };
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
     replace_cached_summary(&state, repository_summary(&git, &record))
@@ -216,17 +215,18 @@ pub(crate) fn update_repository(
     app: AppHandle,
 ) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
-    let existing = store
-        .config
-        .repositories
-        .iter_mut()
-        .find(|r| r.id == repository.id)
-        .ok_or("Repository is not registered")?;
-    existing.name = repository.name;
-    existing.group = repository.group;
-    existing.favorite = repository.favorite;
-    existing.order = repository.order;
-    store.save()?;
+    store.update(|config| {
+        let existing = config
+            .repositories
+            .iter_mut()
+            .find(|r| r.id == repository.id)
+            .ok_or("Repository is not registered")?;
+        existing.name = repository.name;
+        existing.group = repository.group;
+        existing.favorite = repository.favorite;
+        existing.order = repository.order;
+        Ok(())
+    })?;
     invalidate_summary_refresh(&state);
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
     Ok(())
@@ -240,22 +240,9 @@ pub(crate) fn reorder_repositories(
     app: AppHandle,
 ) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
-    persist_repository_placements(&mut store, &placements)?;
+    store.update(|config| apply_repository_placements(&mut config.repositories, &placements))?;
     invalidate_summary_refresh(&state);
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
-    Ok(())
-}
-
-pub(crate) fn persist_repository_placements(
-    store: &mut ConfigStore,
-    placements: &[RepositoryPlacement],
-) -> Result<(), String> {
-    let previous = store.config.repositories.clone();
-    apply_repository_placements(&mut store.config.repositories, placements)?;
-    if let Err(error) = store.save() {
-        store.config.repositories = previous;
-        return Err(error);
-    }
     Ok(())
 }
 
@@ -330,9 +317,12 @@ pub(crate) fn save_group_order(
     groups: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let groups = sanitize_group_order(groups)?;
     let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
-    store.config.settings.group_order = sanitize_group_order(groups)?;
-    store.save()
+    store.update(|config| {
+        config.settings.group_order = groups;
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -343,11 +333,13 @@ pub(crate) fn remove_repository(
     app: AppHandle,
 ) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|_| "Settings are busy")?;
-    store.config.repositories.retain(|r| r.id != repository_id);
-    if store.config.settings.selected_repository_id == Some(repository_id) {
-        store.config.settings.selected_repository_id = None;
-    }
-    store.save()?;
+    store.update(|config| {
+        config.repositories.retain(|r| r.id != repository_id);
+        if config.settings.selected_repository_id == Some(repository_id) {
+            config.settings.selected_repository_id = None;
+        }
+        Ok(())
+    })?;
     remove_cached_summary(&state, repository_id);
     let _ = app.emit("repository-list-changed", RepositoryListChanged);
     Ok(())
@@ -401,7 +393,6 @@ fn wait_for_quiet(events: &mpsc::Receiver<()>) -> bool {
 mod tests {
     use super::*;
     use crate::store::ConfigStore;
-    use std::fs;
 
     #[test]
     fn watcher_waits_until_the_event_burst_is_quiet() {
@@ -502,38 +493,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut store = ConfigStore::load(path.clone()).unwrap();
-        store.config.settings.group_order = sanitize_group_order(vec!["Work".into()]).unwrap();
-        store.save().unwrap();
+        store
+            .update(|config| {
+                config.settings.group_order = sanitize_group_order(vec!["Work".into()]).unwrap();
+                Ok(())
+            })
+            .unwrap();
         let reloaded = ConfigStore::load(path).unwrap();
-        assert_eq!(reloaded.config.settings.group_order, vec!["Work"]);
-    }
-
-    #[test]
-    fn repository_placements_roll_back_when_saving_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut store = ConfigStore::load(path.clone()).unwrap();
-        store.config.repositories = vec![RepositoryRecord {
-            id: 1,
-            path: "a".into(),
-            name: "a".into(),
-            group: None,
-            favorite: false,
-            order: 0,
-        }];
-        store.save().unwrap();
-        fs::write(path, "damaged").unwrap();
-        let previous = store.config.repositories.clone();
-        assert!(persist_repository_placements(
-            &mut store,
-            &[RepositoryPlacement {
-                id: 1,
-                group: Some("Team".into()),
-                favorite: true,
-                order: 0,
-            }],
-        )
-        .is_err());
-        assert_eq!(store.config.repositories, previous);
+        assert_eq!(reloaded.config().settings.group_order, vec!["Work"]);
     }
 }

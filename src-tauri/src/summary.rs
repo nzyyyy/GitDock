@@ -136,7 +136,7 @@ pub(crate) fn refresh_repositories(
         .store
         .lock()
         .map_err(|_| "Settings are busy")?
-        .config
+        .config()
         .repositories
         .clone();
     let generation = start_summary_refresh(&state)?;

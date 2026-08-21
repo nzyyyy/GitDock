@@ -2,7 +2,7 @@ use crate::models::{RepositoryRecord, Settings};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub version: u32,
@@ -24,7 +24,7 @@ impl Default for AppConfig {
 
 pub struct ConfigStore {
     path: PathBuf,
-    pub config: AppConfig,
+    config: AppConfig,
 }
 
 impl ConfigStore {
@@ -49,7 +49,22 @@ impl ConfigStore {
         Ok(Self { path, config })
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    pub fn config(&self) -> &AppConfig {
+        &self.config
+    }
+
+    pub fn update<T>(
+        &mut self,
+        change: impl FnOnce(&mut AppConfig) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut next = self.config.clone();
+        let result = change(&mut next)?;
+        self.save(&next)?;
+        self.config = next;
+        Ok(result)
+    }
+
+    fn save(&self, config: &AppConfig) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -59,7 +74,7 @@ impl ConfigStore {
             decode_config(&existing)?;
             write_atomic(&self.path.with_extension("json.bak"), &existing)?;
         }
-        let data = serde_json::to_vec_pretty(&self.config).map_err(|e| e.to_string())?;
+        let data = serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?;
         write_atomic(&self.path, &data)
     }
 }
@@ -109,7 +124,7 @@ mod tests {
         fs::write(&path, br#"{"version":1,"nextRepositoryId":1,"settings":{"gitPath":null,"selectedRepositoryId":null,"leftWidth":240,"rightWidth":360,"outputHeight":190},"repositories":[]}"#).unwrap();
         let store = ConfigStore::load(path).unwrap();
         assert_eq!(
-            store.config.settings.language,
+            store.config().settings.language,
             crate::models::Language::English
         );
     }
@@ -127,20 +142,49 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut store = ConfigStore::load(path.clone()).unwrap();
-        store.save().unwrap();
+        store.update(|_| Ok(())).unwrap();
         let previous = fs::read(&path).unwrap();
-        store.config.next_repository_id = 2;
-        store.save().unwrap();
+        store
+            .update(|config| {
+                config.next_repository_id = 2;
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(fs::read(path.with_extension("json.bak")).unwrap(), previous);
+        assert_eq!(
+            ConfigStore::load(path).unwrap().config().next_repository_id,
+            2
+        );
+    }
+
+    #[test]
+    fn rejected_change_leaves_config_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ConfigStore::load(dir.path().join("config.json")).unwrap();
+        let previous = store.config().clone();
+        assert!(store
+            .update(|config| {
+                config.next_repository_id = 2;
+                Err::<(), _>("rejected".into())
+            })
+            .is_err());
+        assert_eq!(store.config(), &previous);
     }
 
     #[test]
     fn refuses_to_overwrite_a_config_damaged_after_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let store = ConfigStore::load(path.clone()).unwrap();
+        let mut store = ConfigStore::load(path.clone()).unwrap();
+        let previous = store.config().clone();
         fs::write(&path, b"damaged").unwrap();
-        assert!(store.save().is_err());
+        assert!(store
+            .update(|config| {
+                config.next_repository_id = 2;
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(store.config(), &previous);
         assert_eq!(fs::read(path).unwrap(), b"damaged");
     }
 }

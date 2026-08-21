@@ -59,7 +59,7 @@ impl AppState {
         self.store
             .lock()
             .map_err(|_| "Settings are busy".to_string())?
-            .config
+            .config()
             .repositories
             .iter()
             .find(|r| r.id == id)
@@ -74,8 +74,8 @@ fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
     let (settings, records) = {
         let store = state.store.lock().map_err(|_| "Settings are busy")?;
         (
-            store.config.settings.clone(),
-            store.config.repositories.clone(),
+            store.config().settings.clone(),
+            store.config().repositories.clone(),
         )
     };
     let git = state.git.lock().map_err(|_| "Git state is busy")?.clone();
@@ -171,7 +171,7 @@ pub fn run() {
         .setup(|app| {
             let config_path = app.path().app_config_dir()?.join("config.json");
             let store = ConfigStore::load(config_path).map_err(std::io::Error::other)?;
-            let git = Git::discover(store.config.settings.git_path.as_deref());
+            let git = Git::discover(store.config().settings.git_path.as_deref());
             app.manage(AppState {
                 store: Mutex::new(store),
                 git: Mutex::new(git),

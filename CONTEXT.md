@@ -1,5 +1,9 @@
 # GitDock Domain Glossary
 
+## Repository Lifecycle
+
+A repository's registered state from addition through relocation, metadata changes, ordering, and removal. A lifecycle change takes effect only when it is durably recorded; failure leaves the previous registered state intact.
+
 ## Working Tree
 
 The checked-out repository state that GitDock reads and safely mutates. Its module owns Snapshot, Diff, and Conflict coordination, including stale-view validation.
