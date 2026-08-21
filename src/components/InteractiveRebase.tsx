@@ -65,7 +65,7 @@ export function InteractiveRebase({ repositoryId, initialOnto, onClose, onRun }:
   return <dialog ref={dialogRef} className="form-dialog rebase-dialog" aria-labelledby="rebase-title" onCancel={(event) => { event.preventDefault(); onClose(); }} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <header><h2 id="rebase-title">{t("interactiveRebase")}</h2></header>
     <label className="dialog-field"><span>{t("onto")}</span><select autoFocus name="onto" autoComplete="off" value={onto} onChange={(event) => setOnto(event.target.value)}>{!branches.some((branch) => branch.name === onto) && onto && <option value={onto}>{onto}</option>}{branches.map((branch) => <option key={branch.name} value={branch.name}>{branch.name}{branch.current ? " *" : ""}</option>)}</select></label>
-    {loading && <p role="status">{t("running")}…</p>}
+    {loading && <p role="status">{t("loading")}</p>}
     {error && <p className="dialog-error" role="alert">{error}</p>}
     {!loading && steps.length > 0 && <div className="rebase-list">{steps.map((step, index) => <div className="rebase-row" key={step.oid}>
       <span className="rebase-order"><button type="button" aria-label={`${t("moveCommitUp")} ${shortOid(step.oid)}`} onClick={() => move(index, -1)} disabled={index === 0}>↑</button><button type="button" aria-label={`${t("moveCommitDown")} ${shortOid(step.oid)}`} onClick={() => move(index, 1)} disabled={index === steps.length - 1}>↓</button></span>

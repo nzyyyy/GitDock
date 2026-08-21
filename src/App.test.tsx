@@ -56,6 +56,7 @@ test("does not select a repository until the user clicks one", async () => {
   expect(alpha).not.toHaveAttribute("aria-current");
   expect(beta).not.toHaveAttribute("aria-current");
   expect(screen.getByRole("heading", { name: "Select a repository" })).toBeInTheDocument();
+  expect(document.querySelector(".skeleton-row")).toBeNull();
   fireEvent.click(alpha);
   expect(alpha).toHaveAttribute("aria-current", "true");
   expect(beta).not.toHaveAttribute("aria-current");
@@ -172,7 +173,8 @@ test("renders history topology and ref labels", async () => {
   expect(document.querySelectorAll(".graph-edge")).toHaveLength(4);
   expect(document.querySelector<HTMLElement>(".graph-list")?.style.getPropertyValue("--graph-width")).toBe("52px");
   expect(screen.getByRole("button", { name: /Git output/ })).toHaveClass("output-handle");
-  fireEvent.click(screen.getByRole("button", { name: "中文" }));
+  fireEvent.click(screen.getByRole("button", { name: "More" }));
+  fireEvent.click(screen.getByText("中文"));
   expect(await screen.findByText("5小时前")).toBeInTheDocument();
   expect(screen.getByText("昨天")).toBeInTheDocument();
   expect(screen.getByText("前天")).toBeInTheDocument();
@@ -518,7 +520,7 @@ test("stages and unstages multiple selected files", async () => {
   });
 
   const batchMenuItem = (text: string) => {
-    const menu = screen.getByRole("button", { name: "▾" }).nextElementSibling as HTMLDivElement;
+    const menu = screen.getByRole("button", { name: "Batch actions" }).nextElementSibling as HTMLDivElement;
     return [...menu.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === text);
   };
 
@@ -1356,7 +1358,7 @@ test("opens the command palette and routes repository actions through existing p
   await selectFirstRepository();
   await screen.findByRole("button", { name: "Command palette" });
   fireEvent.keyDown(window, { key: "k", metaKey: true });
-  const input = await screen.findByRole("combobox", { name: "Search commands" });
+  const input = await screen.findByRole("combobox", { name: "Search commands…" });
   expect(input).toHaveAttribute("name", "commandSearch");
   expect(input).toHaveAttribute("autocomplete", "off");
   fireEvent.change(input, { target: { value: "not-a-command" } });
