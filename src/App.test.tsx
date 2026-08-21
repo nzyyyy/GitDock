@@ -89,7 +89,7 @@ test("creates a branch from a branch menu", async () => {
   fireEvent.click(await screen.findByRole("tab", { name: "Branches" }));
   expect(await screen.findByText("Local branches")).toBeInTheDocument();
   expect(screen.getByText("Remote branches")).toBeInTheDocument();
-  expect(document.querySelector(".pane-title")!.querySelectorAll("button")).toHaveLength(0);
+  expect(document.querySelector(".tool-pane .pane-title")!.querySelectorAll("button")).toHaveLength(0);
 
   const rowMenuItem = (row: Element, text: string) => [...row.querySelectorAll<HTMLButtonElement>(".row-menu-popover button")].find((button) => button.textContent === text);
   const openRowMenu = (row: Element) => { fireEvent.contextMenu(row, { button: 2 }); fireEvent.pointerUp(row); };
@@ -1396,7 +1396,8 @@ test("adds an empty group from the sidebar and persists it", async () => {
 
   render(<App />);
   await selectFirstRepository();
-  fireEvent.click(await screen.findByRole("button", { name: "Add group" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Add" }));
+  fireEvent.click(screen.getByText("Add group"));
   const input = screen.getByRole("textbox", { name: "Group" });
   expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
   fireEvent.change(input, { target: { value: " Work " } });
