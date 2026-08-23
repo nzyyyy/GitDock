@@ -55,11 +55,15 @@ test("does not select a repository until the user clicks one", async () => {
   const beta = screen.getByRole("button", { name: /Beta/ });
   expect(alpha).not.toHaveAttribute("aria-current");
   expect(beta).not.toHaveAttribute("aria-current");
+  expect(screen.getByRole("button", { name: "Pull: More actions" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Push: More actions" })).toBeDisabled();
   expect(screen.getByRole("heading", { name: "Select a repository" })).toBeInTheDocument();
   expect(document.querySelector(".skeleton-row")).toBeNull();
   fireEvent.click(alpha);
   expect(alpha).toHaveAttribute("aria-current", "true");
   expect(beta).not.toHaveAttribute("aria-current");
+  expect(screen.getByRole("button", { name: "Pull: More actions" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Push: More actions" })).toBeEnabled();
 });
 
 test("moves repository and sync counts to their action positions", async () => {
@@ -1502,22 +1506,45 @@ test("opens the command palette and routes repository actions through existing p
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "fetch", remote: null, prune: false } }));
 });
 
-test("keeps the More menu free of cherry-pick, favorite, and set group entries", async () => {
+test("groups sync operations under the Pull and Push menus", async () => {
   const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    if (command === "preview_operation") return Promise.resolve({ title: "Git", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
+    if (command === "start_operation") return Promise.resolve({ operationId: 1, accepted: true });
     return Promise.resolve(undefined);
   });
 
   render(<App />);
   await selectFirstRepository();
-  fireEvent.click(await screen.findByRole("button", { name: "More" }));
-  expect(screen.queryByText("Cherry-pick commits")).not.toBeInTheDocument();
-  expect(screen.queryByText("Add favorite")).not.toBeInTheDocument();
-  expect(screen.queryByText("Set group")).not.toBeInTheDocument();
-  expect(screen.getByText("Undo last commit")).toBeInTheDocument();
-  expect(screen.getByText("Rename entry")).toBeInTheDocument();
+  const menu = (name: string) => {
+    const trigger = screen.getByRole("button", { name });
+    const popover = trigger.nextElementSibling as HTMLDivElement;
+    return { trigger, popover, items: [...popover.querySelectorAll("button")].map((button) => button.textContent) };
+  };
+  const pull = menu("Pull: More actions");
+  const push = menu("Push: More actions");
+  const more = menu("More");
+  expect(pull.items).toEqual(["Pull with merge", "Pull with rebase", "Pull fast-forward only"]);
+  expect(push.items).toEqual(["Force push with lease", "Set upstream"]);
+  for (const item of [...pull.items, ...push.items]) expect(more.items).not.toContain(item);
+  expect(more.items).toEqual(expect.arrayContaining(["Refresh all", "Undo last commit", "Rename entry"]));
+
+  fireEvent.click(pull.trigger);
+  expect(pull.trigger).toHaveAttribute("aria-expanded", "true");
+  fireEvent.click(pull.popover.querySelectorAll("button")[1]);
+  expect(pull.trigger).toHaveAttribute("aria-expanded", "false");
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "pull", strategy: "rebase" } }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Pull" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "pull", strategy: null } }));
+  fireEvent.click(screen.getByRole("button", { name: "Push" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "push", remote: null, branch: null } }));
+
+  fireEvent.click(push.trigger);
+  fireEvent.click(push.popover.querySelectorAll("button")[1]);
+  expect(screen.getByRole("dialog", { name: "Set upstream" })).toBeInTheDocument();
 });
 
 test("adds an empty group from the sidebar and persists it", async () => {

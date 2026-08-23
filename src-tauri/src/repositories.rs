@@ -10,7 +10,7 @@ use crate::{
 };
 use notify::{RecursiveMode, Watcher};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{atomic::Ordering, mpsc},
     thread,

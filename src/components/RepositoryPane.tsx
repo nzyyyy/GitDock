@@ -18,7 +18,7 @@ function RepositoryRow({ repository, selected, draggable, dragging, shift, canMo
   return <div role="listitem" className={`repo-row-shell${dragging ? " dragging" : ""}`} data-repository-id={repository.id} draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd} style={shift ? { transform: `translateY(${shift}px)` } : undefined}><button className={`repo-row ${selected ? "selected" : ""}`} aria-current={selected ? "true" : undefined} onClick={() => onSelect(repository.id)}><span className={`status-rail ${state}`} aria-hidden="true" /><span className="repo-copy"><span className="repo-name"><span>{repository.favorite && <span aria-label={t("favorite")}>★ </span>}{repository.name}</span>{statusLabel && <i>{statusLabel}</i>}</span><span className="repo-meta"><code>{repository.branch || shortOid(repository.headOid)}</code></span></span></button><RowMenu><button disabled={!canMoveUp} onClick={() => onMove(-1)}>{t("moveUp")}</button><button disabled={!canMoveDown} onClick={() => onMove(1)}>{t("moveDown")}</button></RowMenu></div>;
 }
 
-export function RowMenu({ children, label, context, glyph }: { children: React.ReactNode; label?: string; context?: boolean; glyph?: string }) {
+export function RowMenu({ children, label, context, glyph, disabled }: { children: React.ReactNode; label?: string; context?: boolean; glyph?: React.ReactNode; disabled?: boolean }) {
   const { t } = useI18n();
   const actualLabel = label ?? t("moreActions");
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -57,7 +57,7 @@ export function RowMenu({ children, label, context, glyph }: { children: React.R
     row.addEventListener("contextmenu", openMenu);
     return () => row.removeEventListener("contextmenu", openMenu);
   }, [context, open]);
-  return <>{(!context || label) && <button ref={buttonRef} className="row-menu-trigger" type="button" aria-label={actualLabel} aria-expanded={open} onClick={toggle}>{glyph ?? (label ? actualLabel : "•••")}</button>}<div ref={menuRef} className="row-menu-popover" tabIndex={-1} popover="auto" onToggle={(event) => { setOpen(event.newState === "open"); if (context) (menuRef.current?.closest(".file-row, .object-action-row, .repo-row-shell") ?? menuRef.current?.parentElement)?.classList.toggle("menu-open", event.newState === "open"); if (event.newState === "closed" && menuRef.current?.contains(document.activeElement)) buttonRef.current?.focus(); }} onClick={(event) => { if ((event.target as HTMLElement).closest("button")) menuRef.current?.hidePopover(); }}>{children}</div></>;
+  return <>{(!context || label) && <button ref={buttonRef} className="row-menu-trigger" type="button" aria-label={actualLabel} aria-expanded={open} disabled={disabled} onClick={toggle}>{glyph ?? (label ? actualLabel : "•••")}</button>}<div ref={menuRef} className="row-menu-popover" tabIndex={-1} popover="auto" onToggle={(event) => { setOpen(event.newState === "open"); if (context) (menuRef.current?.closest(".file-row, .object-action-row, .repo-row-shell") ?? menuRef.current?.parentElement)?.classList.toggle("menu-open", event.newState === "open"); if (event.newState === "closed" && menuRef.current?.contains(document.activeElement)) buttonRef.current?.focus(); }} onClick={(event) => { if ((event.target as HTMLElement).closest("button")) menuRef.current?.hidePopover(); }}>{children}</div></>;
 }
 
 export const MemoRepositoryRow = memo(RepositoryRow);
