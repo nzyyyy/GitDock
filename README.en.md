@@ -92,3 +92,8 @@ Both `dist/` and `src-tauri/target/` are generated directories and must not be c
 ## Safety
 
 Repository paths and frontend input are validated at the Tauri boundary. The internal conflict editor accepts only backend-owned block IDs and choices, then revalidates the snapshot, index stages, and working-tree contents before writing; unsupported conflicts continue through external merge tools. High-risk actions such as deleting files, discarding changes, and force-pushing retain confirmation flows; review the affected scope before proceeding. Configuration is loaded by schema version, and the previous valid file is backed up as `config.json.bak` before saving.
+
+## License
+
+This project is licensed under the [MIT](LICENSE) License.
+
