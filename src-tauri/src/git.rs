@@ -597,23 +597,45 @@ fn assign_lanes(commits: &mut [CommitInfo], mut active: Vec<String>) -> Vec<Stri
             .iter()
             .position(|oid| oid == &commit.oid)
             .unwrap_or_else(|| {
-                active.insert(0, commit.oid.clone());
-                0
+                active.push(commit.oid.clone());
+                active.len() - 1
             });
-        active.remove(column);
+        active[column].clear();
+        let mut parent_columns = Vec::with_capacity(commit.parents.len());
         for (offset, parent) in commit.parents.iter().enumerate() {
-            if active.contains(parent) {
-                continue;
-            }
-            active.insert((column + offset).min(active.len()), parent.clone());
+            let parent_column = match active.iter().position(|oid| oid == parent) {
+                Some(existing) if offset == 0 && existing > column => {
+                    active[existing].clear();
+                    active[column] = parent.clone();
+                    column
+                }
+                Some(existing) => existing,
+                None if offset == 0 => {
+                    active[column] = parent.clone();
+                    column
+                }
+                None => {
+                    let target = active
+                        .iter()
+                        .enumerate()
+                        .skip(column + 1)
+                        .find_map(|(index, oid)| oid.is_empty().then_some(index))
+                        .unwrap_or_else(|| {
+                            active.push(String::new());
+                            active.len() - 1
+                        });
+                    active[target] = parent.clone();
+                    target
+                }
+            };
+            parent_columns.push(parent_column);
+        }
+        while active.last().is_some_and(String::is_empty) {
+            active.pop();
         }
         commit.lane = GraphLane {
             column,
-            parent_columns: commit
-                .parents
-                .iter()
-                .filter_map(|p| active.iter().position(|oid| oid == p))
-                .collect(),
+            parent_columns,
         };
     }
     active
@@ -781,6 +803,21 @@ mod tests {
         git.text(path, &["rev-parse", "HEAD"]).unwrap()
     }
 
+    fn graph_commit(oid: &str, parents: &[&str]) -> CommitInfo {
+        CommitInfo {
+            oid: oid.into(),
+            parents: parents.iter().map(|parent| (*parent).into()).collect(),
+            author: String::new(),
+            authored_at: String::new(),
+            subject: String::new(),
+            refs: Vec::new(),
+            lane: GraphLane {
+                column: 0,
+                parent_columns: Vec::new(),
+            },
+        }
+    }
+
     #[test]
     fn parses_commit_detail_numstat() {
         let detail = parse_commit_detail(
@@ -928,25 +965,43 @@ mod tests {
     }
 
     #[test]
-    fn lanes_continue_across_pages_and_compact_wide_merges() {
-        let commit = |oid: &str, parents: &[&str]| CommitInfo {
-            oid: oid.into(),
-            parents: parents.iter().map(|parent| (*parent).into()).collect(),
-            author: String::new(),
-            authored_at: String::new(),
-            subject: String::new(),
-            refs: Vec::new(),
-            lane: GraphLane {
-                column: 0,
-                parent_columns: Vec::new(),
-            },
-        };
-        let mut first = vec![commit("merge", &["a", "b", "c"]), commit("a", &["d"])];
+    fn lanes_continue_across_pages_without_reusing_live_branch_columns() {
+        let mut first = vec![
+            graph_commit("merge", &["a", "b", "c"]),
+            graph_commit("a", &["d"]),
+        ];
         let active = assign_lanes(&mut first, Vec::new());
         assert_eq!(first[0].lane.parent_columns, [0, 1, 2]);
         assert_eq!(active, ["d", "b", "c"]);
 
-        let mut second = vec![commit("b", &["d"]), commit("c", &["d"]), commit("d", &[])];
+        let mut second = vec![
+            graph_commit("b", &["d"]),
+            graph_commit("c", &["d"]),
+            graph_commit("d", &[]),
+        ];
+        let active = assign_lanes(&mut second, active);
+        assert_eq!(
+            second
+                .iter()
+                .map(|item| item.lane.column)
+                .collect::<Vec<_>>(),
+            [1, 2, 0]
+        );
+        assert!(active.is_empty());
+    }
+
+    #[test]
+    fn new_ref_tip_uses_separate_lane_until_shared_parent() {
+        let mut first = vec![graph_commit("main", &["base"])];
+        let active = assign_lanes(&mut first, Vec::new());
+        assert_eq!(first[0].lane.column, 0);
+        assert_eq!(first[0].lane.parent_columns, [0]);
+
+        let mut second = vec![
+            graph_commit("feature", &["feature-work"]),
+            graph_commit("feature-work", &["base"]),
+            graph_commit("base", &[]),
+        ];
         let active = assign_lanes(&mut second, active);
         assert_eq!(
             second
@@ -955,6 +1010,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 1, 0]
         );
+        assert_eq!(second[0].lane.parent_columns, [1]);
+        assert_eq!(second[1].lane.parent_columns, [0]);
+        assert!(active.is_empty());
+    }
+
+    #[test]
+    fn nested_merges_keep_main_and_branch_lanes_stable() {
+        let mut first = vec![
+            graph_commit("22c26cc", &["439f0b7", "1da80e7"]),
+            graph_commit("1da80e7", &["0a17b1e"]),
+            graph_commit("0a17b1e", &["e9fe219"]),
+            graph_commit("e9fe219", &["439f0b7", "70c0b0e"]),
+        ];
+        let active = assign_lanes(&mut first, Vec::new());
+        assert_eq!(
+            first
+                .iter()
+                .map(|item| item.lane.column)
+                .collect::<Vec<_>>(),
+            [0, 1, 1, 1]
+        );
+        assert_eq!(first[3].lane.parent_columns, [0, 2]);
+        assert_eq!(active, ["439f0b7", "", "70c0b0e"]);
+
+        let mut second = vec![
+            graph_commit("70c0b0e", &["20a3267"]),
+            graph_commit("20a3267", &["d025256", "e78603f"]),
+            graph_commit("d025256", &["bdca1c6"]),
+            graph_commit("bdca1c6", &["bcd6871"]),
+            graph_commit("bcd6871", &["a3b47e7"]),
+            graph_commit("439f0b7", &["e78603f"]),
+            graph_commit("e78603f", &["a3b47e7"]),
+            graph_commit("a3b47e7", &[]),
+        ];
+        let active = assign_lanes(&mut second, active);
+        assert_eq!(
+            second
+                .iter()
+                .map(|item| item.lane.column)
+                .collect::<Vec<_>>(),
+            [2, 2, 2, 2, 2, 0, 0, 0]
+        );
+        assert_eq!(second[1].lane.parent_columns, [2, 3]);
+        assert_eq!(second[5].lane.parent_columns, [0]);
+        assert_eq!(second[6].lane.parent_columns, [0]);
         assert!(active.is_empty());
     }
 

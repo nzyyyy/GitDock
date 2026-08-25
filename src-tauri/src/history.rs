@@ -33,7 +33,9 @@ fn validate_history_cursor(cursor: &Option<HistoryCursor>) -> Result<(), String>
         cursor.offset > 10_000_000
             || cursor.active_lanes.len() > 512
             || cursor.active_lanes.iter().any(|oid| {
-                !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+                !oid.is_empty()
+                    && (!matches!(oid.len(), 40 | 64)
+                        || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()))
             })
     }) {
         Err("History cursor is invalid".into())
@@ -328,6 +330,11 @@ mod tests {
         assert!(validate_history_cursor(&Some(HistoryCursor {
             offset: 100,
             active_lanes: vec!["a".repeat(40)],
+        }))
+        .is_ok());
+        assert!(validate_history_cursor(&Some(HistoryCursor {
+            offset: 100,
+            active_lanes: vec!["a".repeat(40), String::new(), "b".repeat(40)],
         }))
         .is_ok());
     }

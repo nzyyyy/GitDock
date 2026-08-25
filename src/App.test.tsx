@@ -254,6 +254,10 @@ test("renders history topology and ref labels", async () => {
   expect(commitRow.querySelector("time")).toHaveAttribute("dateTime", "2026-08-18T07:00:00Z");
   expect(document.querySelectorAll(".graph-node")).toHaveLength(4);
   expect(document.querySelectorAll(".graph-edge")).toHaveLength(4);
+  expect(document.querySelectorAll(".graph-edge.lane-2")).toHaveLength(2);
+  const graphEdges = [...document.querySelectorAll(".graph-edge")];
+  expect(graphEdges.every((edge) => edge.getAttribute("d")?.includes(" L "))).toBe(true);
+  expect(graphEdges[3].getAttribute("d")).toContain("L 40 ");
   expect(document.querySelector<HTMLElement>(".graph-list")?.style.getPropertyValue("--graph-width")).toBe("52px");
   expect(screen.getByRole("button", { name: /Git output/ })).toHaveClass("output-handle");
   fireEvent.click(screen.getByRole("button", { name: "More" }));

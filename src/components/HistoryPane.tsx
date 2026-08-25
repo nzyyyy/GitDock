@@ -43,11 +43,12 @@ export function HistoryCanvas({ commits, selectedOid, onSelect }: { commits: Com
   const graphWidth = useMemo(() => Math.max(44, 24 + commits.reduce((maximum, commit) => Math.max(maximum, commit.lane.column, ...commit.lane.parentColumns), 0) * laneGap), [commits]);
   const laneX = (column: number) => 12 + column * laneGap;
   const edgeBuckets = useMemo(() => {
-    const buckets = new Map<number, Array<{ key: string; row: number; targetRow: number; column: number; targetColumn: number }>>();
+    const buckets = new Map<number, Array<{ key: string; row: number; targetRow: number; column: number; routeColumn: number; targetColumn: number }>>();
     commits.forEach((commit, row) => commit.parents.forEach((parent, parentIndex) => {
       const targetRow = commitRows.get(parent) ?? commits.length;
       const targetColumn = targetRow === commits.length ? commit.lane.parentColumns[parentIndex] ?? commit.lane.column : commits[targetRow].lane.column;
-      const edge = { key: `${commit.oid}-${parent}`, row, targetRow, column: commit.lane.column, targetColumn };
+      const routeColumn = Math.max(commit.lane.column, commit.lane.parentColumns[parentIndex] ?? targetColumn);
+      const edge = { key: `${commit.oid}-${parent}`, row, targetRow, column: commit.lane.column, routeColumn, targetColumn };
       for (let bucket = Math.floor(row / GRAPH_EDGE_BUCKET_ROWS); bucket <= Math.floor(targetRow / GRAPH_EDGE_BUCKET_ROWS); bucket += 1) {
         const entries = buckets.get(bucket);
         if (entries) entries.push(edge); else buckets.set(bucket, [edge]);
@@ -65,7 +66,7 @@ export function HistoryCanvas({ commits, selectedOid, onSelect }: { commits: Com
     return [...edges.values()];
   }, [edgeBuckets, start, end]);
   return <div className="history-canvas"><header className="canvas-header"><strong>{t("repositoryGraph")}</strong><span>{commits.length} {t("commitsLoaded")}</span></header><div ref={containerRef} className="graph-list" style={{ "--graph-width": `${graphWidth}px` } as React.CSSProperties}><div className="virtual-history" style={{ height: totalHeight }}><svg className="commit-graph" width={graphWidth} height={totalHeight} aria-label={t("repositoryGraph")}>
-    {visibleEdges.map((edge) => { const startX = laneX(edge.column); const startY = edge.row * rowHeight + rowHeight / 2; const endX = laneX(edge.targetColumn); const endY = edge.targetRow * rowHeight + rowHeight / 2; return <path className={`graph-edge lane-${edge.targetColumn % 5}`} key={edge.key} d={`M ${startX} ${startY} C ${startX} ${startY + 12}, ${endX} ${Math.max(startY + 12, endY - 12)}, ${endX} ${endY}`} />; })}
+    {visibleEdges.map((edge) => { const startX = laneX(edge.column); const routeX = laneX(edge.routeColumn); const startY = edge.row * rowHeight + rowHeight / 2; const endX = laneX(edge.targetColumn); const endY = edge.targetRow * rowHeight + rowHeight / 2; const bend = Math.min(12, (endY - startY) / 4); return <path className={`graph-edge lane-${Math.max(edge.column, edge.routeColumn) % 5}`} key={edge.key} d={`M ${startX} ${startY} C ${startX} ${startY + bend}, ${routeX} ${startY + bend}, ${routeX} ${startY + bend * 2} L ${routeX} ${endY - bend * 2} C ${routeX} ${endY - bend}, ${endX} ${endY - bend}, ${endX} ${endY}`} />; })}
     {commits.slice(start, end).map((commit, index) => { const row = start + index; return <circle className={`graph-node lane-${commit.lane.column % 5}`} key={commit.oid} cx={laneX(commit.lane.column)} cy={row * rowHeight + rowHeight / 2} r="4" />; })}
   </svg>{commits.slice(start, end).map((commit, index) => <button style={{ position: "absolute", top: (start + index) * rowHeight }} className={`graph-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid} onClick={() => onSelect(commit.oid)}><span /><code>{shortOid(commit.oid)}</code><div className="graph-subject"><strong>{commit.subject}</strong>{commit.refs.map((reference) => <span className={`ref-label ${reference.startsWith("tag: ") ? "tag" : ""}`} key={reference}>{reference}</span>)}</div><span>{commit.author}</span><time dateTime={commit.authoredAt}>{dateFormatter.format(new Date(commit.authoredAt))}</time></button>)}</div></div></div>;
 }
