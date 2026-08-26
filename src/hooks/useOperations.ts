@@ -23,6 +23,7 @@ export function useOperations({
 }) {
   const [pending, setPending] = useState<Pending>();
   const [busyOperations, setBusyOperations] = useState<number[]>([]);
+  const [busySync, setBusySync] = useState<{ fetch?: boolean; pull?: boolean; push?: boolean }>({});
   const [toasts, setToasts] = useState<OperationToast[]>([]);
   const allowClose = useRef(false);
   const cloneOperations = useRef(new Set<number>());
@@ -33,18 +34,26 @@ export function useOperations({
   const dismissToast = useCallback((id: number) => setToasts((current) => current.filter((toast) => toast.id !== id)), []);
 
   const startOperation = useCallback(async (repositoryId: number, request: OperationRequest, confirmed: boolean, onFinished?: OperationFinished) => {
-    const result = await api.startOperation(repositoryId, request, confirmed);
-    const finished = onFinished || request.type === "commit" || request.type === "fetch" ? (outcome: OperationOutcome) => {
-      if (outcome === "succeeded" && (request.type === "commit" || request.type === "fetch")) void refreshRepository(repositoryId);
-      if (outcome === "succeeded" && request.type === "commit" && historyRepositoryRef.current === repositoryId) {
-        if (selectedIdRef.current === repositoryId) void refreshHistory(repositoryId); else historyRepositoryRef.current = undefined;
+    const sync = request.type === "fetch" || request.type === "pull" || request.type === "push" ? request.type : undefined;
+    if (sync) setBusySync((current) => ({ ...current, [sync]: true }));
+    try {
+      const result = await api.startOperation(repositoryId, request, confirmed);
+      const finished = onFinished || request.type === "commit" || sync ? (outcome: OperationOutcome) => {
+        if (sync) setBusySync((current) => ({ ...current, [sync]: false }));
+        if (outcome === "succeeded" && (request.type === "commit" || request.type === "fetch")) void refreshRepository(repositoryId);
+        if (outcome === "succeeded" && request.type === "commit" && historyRepositoryRef.current === repositoryId) {
+          if (selectedIdRef.current === repositoryId) void refreshHistory(repositoryId); else historyRepositoryRef.current = undefined;
+        }
+        onFinished?.(outcome);
+      } : undefined;
+      if (finished) {
+        const outcome = earlyCompletions.current.get(result.operationId);
+        if (outcome) { earlyCompletions.current.delete(result.operationId); finished(outcome); }
+        else operationCallbacks.current.set(result.operationId, finished);
       }
-      onFinished?.(outcome);
-    } : undefined;
-    if (finished) {
-      const outcome = earlyCompletions.current.get(result.operationId);
-      if (outcome) { earlyCompletions.current.delete(result.operationId); finished(outcome); }
-      else operationCallbacks.current.set(result.operationId, finished);
+    } catch (error) {
+      if (sync) setBusySync((current) => ({ ...current, [sync]: false }));
+      throw error;
     }
   }, [refreshHistory, refreshRepository]);
 
@@ -64,36 +73,41 @@ export function useOperations({
   };
 
   useEffect(() => {
-    const unlisteners = Promise.all([
-      listen<OperationEvent>("operation-event", ({ payload }) => {
-        pushLog(payload.kind, payload.message);
-        if (payload.kind === "started") {
-          operationTitles.current.set(payload.operationId, payload.message);
-          if (payload.repositoryId == null) cloneOperations.current.add(payload.operationId);
-          setBusyOperations((ids) => ids.includes(payload.operationId) ? ids : [...ids, payload.operationId]);
+    let cancelled = false;
+    const unlisteners = listen<OperationEvent>("operation-event", ({ payload }) => {
+      if (cancelled) return;
+      pushLog(payload.kind, payload.message);
+      if (payload.kind === "started") {
+        operationTitles.current.set(payload.operationId, payload.message);
+        if (payload.repositoryId == null) cloneOperations.current.add(payload.operationId);
+        setBusyOperations((ids) => ids.includes(payload.operationId) ? ids : [...ids, payload.operationId]);
+      }
+      if (payload.kind === "finished") {
+        const outcome = payload.outcome ?? "failed";
+        const title = operationTitles.current.get(payload.operationId) ?? "Git";
+        operationTitles.current.delete(payload.operationId);
+        setToasts((current) => current.some((toast) => toast.id === payload.operationId) ? current : [...current, { id: payload.operationId, title, message: payload.message, outcome }].slice(-3));
+        const callback = operationCallbacks.current.get(payload.operationId);
+        operationCallbacks.current.delete(payload.operationId);
+        if (callback) callback(outcome);
+        else {
+          earlyCompletions.current.set(payload.operationId, outcome);
+          if (earlyCompletions.current.size > 20) earlyCompletions.current.delete(earlyCompletions.current.keys().next().value!);
         }
-        if (payload.kind === "finished") {
-          const outcome = payload.outcome ?? "failed";
-          const title = operationTitles.current.get(payload.operationId) ?? "Git";
-          operationTitles.current.delete(payload.operationId);
-          setToasts((current) => [...current, { id: payload.operationId, title, message: payload.message, outcome }].slice(-3));
-          const callback = operationCallbacks.current.get(payload.operationId);
-          operationCallbacks.current.delete(payload.operationId);
-          if (callback) callback(outcome);
-          else {
-            earlyCompletions.current.set(payload.operationId, outcome);
-            if (earlyCompletions.current.size > 20) earlyCompletions.current.delete(earlyCompletions.current.keys().next().value!);
-          }
-          setBusyOperations((ids) => ids.filter((id) => id !== payload.operationId));
-          if (payload.outcome !== "succeeded") setOutputOpen(true);
-          if (cloneOperations.current.delete(payload.operationId)) {
-            refreshRepositories();
-            if (payload.outcome === "succeeded" && payload.repositoryId) setSelectedId(payload.repositoryId);
-          }
+        setBusyOperations((ids) => ids.filter((id) => id !== payload.operationId));
+        if (payload.outcome !== "succeeded") setOutputOpen(true);
+        if (cloneOperations.current.delete(payload.operationId)) {
+          refreshRepositories();
+          if (payload.outcome === "succeeded" && payload.repositoryId) setSelectedId(payload.repositoryId);
         }
-      }),
-    ]);
-    return () => { unlisteners.then((values) => values.forEach((unlisten) => unlisten())); };
+      }
+    }).then((unlisten) => {
+      if (cancelled) unlisten();
+      return unlisten;
+    });
+    const stop = () => { cancelled = true; void unlisteners.then((unlisten) => unlisten()); };
+    (import.meta as { hot?: { dispose: (fn: () => void) => void } }).hot?.dispose(stop);
+    return stop;
   }, [pushLog, refreshRepositories, setSelectedId, setOutputOpen]);
 
   useEffect(() => {
@@ -112,5 +126,5 @@ export function useOperations({
     return () => { listener.then((unlisten) => unlisten()); };
   }, [busyOperations, t, showDialog]);
 
-  return { pending, setPending, confirmPending, busyOperations, toasts, dismissToast, run, startOperation };
+  return { pending, setPending, confirmPending, busyOperations, busySync, toasts, dismissToast, run, startOperation };
 }

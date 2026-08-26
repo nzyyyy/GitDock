@@ -145,6 +145,36 @@ test("refreshes pull and push counts after fetch and commit", async () => {
   expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "refresh_repository")).toHaveLength(2);
 });
 
+test("shows a spinner on Fetch while the operation runs and restores the label after it finishes", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" } }) => void) | undefined;
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    if (command === "preview_operation") return Promise.resolve({ title: "Fetch", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
+    if (command === "start_operation") return Promise.resolve({ operationId: 1, accepted: true });
+    if (command === "refresh_repository") return Promise.resolve({ summary: repository, snapshot: { id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] } });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  await selectFirstRepository();
+  const fetch = await screen.findByRole("button", { name: "Fetch" });
+  fireEvent.click(fetch);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Fetch" })).toHaveAttribute("aria-busy", "true"));
+  expect(screen.getByRole("button", { name: "Fetch" }).querySelector(".sync-spinner")).toBeTruthy();
+  await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "started", message: "Fetch" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
+  const restored = screen.getByRole("button", { name: "Fetch" });
+  expect(restored).toHaveAttribute("aria-busy", "false");
+  expect(restored.querySelector(".sync-spinner")).toBeNull();
+  expect(restored).toHaveTextContent("Fetch");
+});
+
 test("creates a branch from a branch menu", async () => {
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({
@@ -933,6 +963,35 @@ test("shows at most three dismissible operation results for three seconds", asyn
   expect(document.querySelectorAll(".operation-toast")).toHaveLength(0);
 });
 
+test("shows one toast when the same operation finishes more than once", async () => {
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" } }) => void) | undefined;
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
+    if (event === "operation-event") operationListener = handler;
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await selectFirstRepository();
+  await act(async () => operationListener?.({ payload: { operationId: 7, repositoryId: 1, kind: "started", message: "Switch branch" } }));
+  await act(async () => {
+    for (let index = 0; index < 3; index += 1) {
+      operationListener?.({ payload: { operationId: 7, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } });
+    }
+  });
+  const toasts = document.querySelectorAll(".operation-toast");
+  expect(toasts).toHaveLength(1);
+  expect(toasts[0]).toHaveTextContent("Switch branch");
+  expect(toasts[0]).not.toHaveTextContent("Git");
+});
+
 test("clears the commit message only after a successful early completion event", async () => {
   let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" } }) => void) | undefined;
   let resolveStart: ((result: { operationId: number; accepted: boolean }) => void) | undefined;
@@ -1573,16 +1632,16 @@ test("groups sync operations under the Pull and Push menus", async () => {
   for (const item of [...pull.items, ...push.items]) expect(more.items).not.toContain(item);
   expect(more.items).toEqual(expect.arrayContaining(["Refresh all", "Undo last commit", "Rename entry"]));
 
+  fireEvent.click(screen.getByRole("button", { name: "Pull" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "pull", strategy: null } }));
+  fireEvent.click(screen.getByRole("button", { name: "Push" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "push", remote: null, branch: null } }));
+
   fireEvent.click(pull.trigger);
   expect(pull.trigger).toHaveAttribute("aria-expanded", "true");
   fireEvent.click(pull.popover.querySelectorAll("button")[1]);
   expect(pull.trigger).toHaveAttribute("aria-expanded", "false");
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "pull", strategy: "rebase" } }));
-
-  fireEvent.click(screen.getByRole("button", { name: "Pull" }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "pull", strategy: null } }));
-  fireEvent.click(screen.getByRole("button", { name: "Push" }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "push", remote: null, branch: null } }));
 
   fireEvent.click(push.trigger);
   fireEvent.click(push.popover.querySelectorAll("button")[1]);
