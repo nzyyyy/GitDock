@@ -91,7 +91,6 @@ export function useOperations({
             if (payload.outcome === "succeeded" && payload.repositoryId) setSelectedId(payload.repositoryId);
           }
         }
-        if (payload.kind === "stderr") setOutputOpen(true);
       }),
     ]);
     return () => { unlisteners.then((values) => values.forEach((unlisten) => unlisten())); };

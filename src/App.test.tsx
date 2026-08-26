@@ -455,6 +455,7 @@ test("starts clone from a validated in-app form", async () => {
   expect(screen.getByRole("button", { name: /Git output/ })).toBeInTheDocument();
   await act(async () => operationListener?.({ payload: { operationId: 7, repositoryId: null, kind: "started", message: "Clone repository" } }));
   await act(async () => operationListener?.({ payload: { operationId: 7, kind: "stderr", message: "Receiving objects" } }));
+  fireEvent.click(screen.getByRole("button", { name: /Git output/ }));
   expect(screen.getByRole("button", { name: "Cancel #7" })).toBeInTheDocument();
   await act(async () => operationListener?.({ payload: { operationId: 7, kind: "finished", message: "Clone failed", outcome: "failed" } }));
   await act(async () => resolveClone?.({ operationId: 7, accepted: true }));
@@ -862,7 +863,7 @@ test("resolves every internal conflict block through a destructive preview", asy
 });
 
 test("opens output on failure and confirms cancellation before close", async () => {
-  let operationListener: ((event: { payload: { operationId: number; repositoryId?: number; kind: "started" | "finished"; message: string; exitCode?: number; outcome?: string } }) => void) | undefined;
+  let operationListener: ((event: { payload: { operationId: number; repositoryId?: number; kind: "started" | "stderr" | "finished"; message: string; exitCode?: number; outcome?: string } }) => void) | undefined;
   let closeListener: ((event: { preventDefault: () => void }) => void) | undefined;
   const close = vi.fn(() => Promise.resolve());
   vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
@@ -889,6 +890,11 @@ test("opens output on failure and confirms cancellation before close", async () 
   fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("cancel_operation", { operationId: 9 }));
   expect(close).toHaveBeenCalled();
+
+  await act(async () => operationListener?.({ payload: { operationId: 11, repositoryId: 1, kind: "started", message: "Fetch" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 11, repositoryId: 1, kind: "stderr", message: "Receiving objects" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 11, repositoryId: 1, kind: "finished", message: "Fetch succeeded", outcome: "succeeded" } }));
+  expect(document.querySelector(".output-panel")).not.toHaveClass("open");
 
   await act(async () => operationListener?.({ payload: { operationId: 10, repositoryId: 1, kind: "finished", message: "Failed", exitCode: 1, outcome: "failed" } }));
   expect(document.querySelector(".output-panel")).toHaveClass("open");
@@ -1514,6 +1520,7 @@ test("exports the retained session log only after an explicit save choice", asyn
   render(<App />);
   await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "stderr", message: "https://user:token@example.com/repo" } }));
   await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "stderr", message: "x".repeat(5 * 1024 * 1024) } }));
+  fireEvent.click(await screen.findByRole("button", { name: /Git output/ }));
   fireEvent.click(await screen.findByRole("button", { name: "Export log" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_session_log", { fileName: expect.stringMatching(/^gitdock-session-.+\.log$/), lines: [expect.objectContaining({ kind: "stderr", message: "https://user:token@example.com/repo", timestamp: expect.any(String) })] }));
 });

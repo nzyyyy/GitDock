@@ -5,7 +5,7 @@
   "identifier": "app.gitdock.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:10420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
