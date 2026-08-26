@@ -169,7 +169,7 @@ impl Git {
         let args = vec![
             "log".into(),
             "--all".into(),
-            "--topo-order".into(),
+            "--date-order".into(),
             format!("--skip={offset}"),
             format!("--max-count={}", limit + 1),
             format!("--format={format}"),
@@ -789,14 +789,32 @@ mod tests {
     }
 
     fn commit_file(git: &Git, path: &Path, contents: &str, message: &str) -> String {
+        commit_file_dated(git, path, contents, message, None)
+    }
+
+    fn commit_file_dated(
+        git: &Git,
+        path: &Path,
+        contents: &str,
+        message: &str,
+        date: Option<&str>,
+    ) -> String {
         std::fs::write(path.join("file.txt"), contents).unwrap();
         ensure_success(
             git.run(path, &strings(&["add", "--", "file.txt"]), None)
                 .unwrap(),
         )
         .unwrap();
+        let env = date
+            .map(|date| {
+                vec![
+                    ("GIT_AUTHOR_DATE".into(), date.into()),
+                    ("GIT_COMMITTER_DATE".into(), date.into()),
+                ]
+            })
+            .unwrap_or_default();
         ensure_success(
-            git.run(path, &strings(&["commit", "-m", message]), None)
+            git.run_env(path, &strings(&["commit", "-m", message]), None, &env)
                 .unwrap(),
         )
         .unwrap();
@@ -1192,6 +1210,63 @@ mod tests {
         );
         let history = git.history(dir.path(), None, 20).unwrap();
         assert_eq!(history.commits[0].subject, "initial");
+    }
+
+    #[test]
+    fn history_orders_parallel_branches_by_commit_date() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file_dated(
+            &git,
+            dir.path(),
+            "base\n",
+            "base",
+            Some("2026-08-17T00:00:00 +0000"),
+        );
+        ensure_success(
+            git.run(dir.path(), &strings(&["checkout", "-b", "feature"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        commit_file_dated(
+            &git,
+            dir.path(),
+            "feature\n",
+            "feature-old",
+            Some("2026-08-24T00:00:00 +0000"),
+        );
+        ensure_success(
+            git.run(dir.path(), &strings(&["checkout", "main"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        commit_file_dated(
+            &git,
+            dir.path(),
+            "main\n",
+            "main-new",
+            Some("2026-08-25T00:00:00 +0000"),
+        );
+
+        let history = git.history(dir.path(), None, 20).unwrap();
+        let subjects: Vec<_> = history
+            .commits
+            .iter()
+            .map(|commit| commit.subject.as_str())
+            .collect();
+        let main = subjects
+            .iter()
+            .position(|subject| *subject == "main-new")
+            .unwrap();
+        let feature = subjects
+            .iter()
+            .position(|subject| *subject == "feature-old")
+            .unwrap();
+        assert!(
+            main < feature,
+            "newer main commit should appear above older parallel feature commit, got {subjects:?}"
+        );
     }
 
     #[test]
