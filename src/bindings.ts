@@ -237,8 +237,8 @@ export type RebaseStep = {
 
 export type RemoteInfo = {
 	name: string,
-	fetchUrl: string,
-	pushUrl: string,
+	fetchUrls: string[],
+	pushUrls: string[],
 };
 
 export type RepositoryCapabilities = {

@@ -344,21 +344,36 @@ impl Git {
 
     pub fn remotes(&self, cwd: &Path) -> Result<Vec<RemoteInfo>, String> {
         let names = self.text(cwd, &["remote"])?;
-        Ok(names
+        names
             .lines()
-            .map(|name| RemoteInfo {
-                name: name.into(),
-                fetch_url: redact_url(
-                    &self
-                        .text(cwd, &["remote", "get-url", name])
-                        .unwrap_or_default(),
-                ),
-                push_url: redact_url(
-                    &self
-                        .text(cwd, &["remote", "get-url", "--push", name])
-                        .unwrap_or_default(),
-                ),
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| {
+                let fetch = self.remote_urls(cwd, name, "url")?;
+                let configured_push = self.remote_urls(cwd, name, "pushurl")?;
+                let push = if configured_push.is_empty() {
+                    fetch.clone()
+                } else {
+                    configured_push
+                };
+                Ok(RemoteInfo {
+                    name: name.into(),
+                    fetch_urls: fetch.iter().map(|url| redact_url(url)).collect(),
+                    push_urls: push.iter().map(|url| redact_url(url)).collect(),
+                })
             })
+            .collect()
+    }
+
+    fn remote_urls(&self, cwd: &Path, name: &str, key: &str) -> Result<Vec<String>, String> {
+        let args = strings(&["config", "--get-all", &format!("remote.{name}.{key}")]);
+        let output = self.run(cwd, &args, None)?;
+        if !output.status.success() && !output.stderr.is_empty() {
+            return Err(error_text(&output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
             .collect())
     }
 
@@ -834,6 +849,61 @@ mod tests {
                 parent_columns: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn remotes_list_every_configured_url() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        for args in [
+            vec!["remote", "add", "origin", "../remote.git"],
+            vec![
+                "remote",
+                "set-url",
+                "--add",
+                "origin",
+                "https://extra.example.com/repo.git",
+            ],
+        ] {
+            ensure_success(git.run(dir.path(), &strings(&args), None).unwrap()).unwrap();
+        }
+
+        let remotes = git.remotes(dir.path()).unwrap();
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].name, "origin");
+        let fetch_urls = vec![
+            "../remote.git".to_string(),
+            "https://extra.example.com/repo.git".to_string(),
+        ];
+        assert_eq!(remotes[0].fetch_urls, fetch_urls);
+        // Without a configured pushurl, push falls back to the fetch URLs.
+        assert_eq!(remotes[0].push_urls, fetch_urls);
+
+        for url in [
+            "https://push1.example.com/repo.git",
+            "https://push2.example.com/repo.git",
+        ] {
+            ensure_success(
+                git.run(
+                    dir.path(),
+                    &strings(&["remote", "set-url", "--add", "--push", "origin", url]),
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        let remotes = git.remotes(dir.path()).unwrap();
+        assert_eq!(remotes[0].fetch_urls, fetch_urls);
+        assert_eq!(
+            remotes[0].push_urls,
+            vec![
+                "https://push1.example.com/repo.git".to_string(),
+                "https://push2.example.com/repo.git".to_string(),
+            ]
+        );
     }
 
     #[test]

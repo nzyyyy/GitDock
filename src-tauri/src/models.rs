@@ -303,8 +303,8 @@ pub struct TagInfo {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteInfo {
     pub name: String,
-    pub fetch_url: String,
-    pub push_url: String,
+    pub fetch_urls: Vec<String>,
+    pub push_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
