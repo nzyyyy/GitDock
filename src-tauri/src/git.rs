@@ -168,6 +168,7 @@ impl Git {
         let format = "%H%x1f%P%x1f%an%x1f%aI%x1f%D%x1f%s%x1e";
         let args = vec![
             "log".into(),
+            "--exclude=refs/stash".into(),
             "--all".into(),
             "--date-order".into(),
             format!("--skip={offset}"),
@@ -1337,6 +1338,47 @@ mod tests {
             main < feature,
             "newer main commit should appear above older parallel feature commit, got {subjects:?}"
         );
+    }
+
+    #[test]
+    fn history_excludes_stash_commits() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        let initial = commit_file(&git, dir.path(), "initial\n", "initial");
+        std::fs::write(dir.path().join("file.txt"), "changed\n").unwrap();
+        std::fs::write(dir.path().join("untracked.txt"), "untracked\n").unwrap();
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["stash", "push", "--include-untracked", "-m", "hidden"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let excluded = [
+            git.text(dir.path(), &["rev-parse", "refs/stash"]).unwrap(),
+            git.text(dir.path(), &["rev-parse", "refs/stash^2"])
+                .unwrap(),
+            git.text(dir.path(), &["rev-parse", "refs/stash^3"])
+                .unwrap(),
+        ];
+        let history = git.history(dir.path(), None, 20).unwrap();
+
+        assert_eq!(
+            history
+                .commits
+                .iter()
+                .map(|commit| commit.oid.as_str())
+                .collect::<Vec<_>>(),
+            vec![initial.as_str()]
+        );
+        assert!(history
+            .commits
+            .iter()
+            .all(|commit| !excluded.contains(&commit.oid)));
     }
 
     #[test]
