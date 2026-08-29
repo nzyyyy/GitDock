@@ -161,6 +161,20 @@ pub(crate) fn get_commit_detail(
 
 #[tauri::command]
 #[specta::specta]
+pub(crate) fn get_stash_detail(
+    repository_id: RepositoryId,
+    oid: String,
+    state: State<'_, AppState>,
+) -> Result<CommitDetail, String> {
+    let git = state.git()?;
+    let record = state.record(repository_id)?;
+    let cwd = Path::new(&record.path);
+    verify_commit(&git, cwd, &oid)?;
+    git.stash_detail(cwd, &oid)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub(crate) fn get_rebase_commits(
     repository_id: RepositoryId,
     onto: String,
@@ -200,6 +214,22 @@ pub(crate) fn get_commit_file_diff(
     let cwd = Path::new(&record.path);
     verify_commit(&git, cwd, &oid)?;
     git.commit_file_diff(cwd, &oid, &path)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn get_stash_file_diff(
+    repository_id: RepositoryId,
+    oid: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    validate_relative_path(&path)?;
+    let git = state.git()?;
+    let record = state.record(repository_id)?;
+    let cwd = Path::new(&record.path);
+    verify_commit(&git, cwd, &oid)?;
+    git.stash_file_diff(cwd, &oid, &path)
 }
 
 #[tauri::command]

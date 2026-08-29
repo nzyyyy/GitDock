@@ -249,7 +249,7 @@ impl Git {
     }
 
     pub fn commit_file_diff(&self, cwd: &Path, oid: &str, path: &str) -> Result<String, String> {
-        let output = ensure_success(self.run(
+        limited_patch(self.run(
             cwd,
             &[
                 "show".into(),
@@ -261,12 +261,81 @@ impl Git {
                 path.into(),
             ],
             None,
-        )?)?;
-        let patch = String::from_utf8_lossy(&output.stdout).to_string();
-        if patch.len() > MAX_DIFF_BYTES || patch.lines().count() > MAX_DIFF_LINES {
-            return Err("This file diff is too large".into());
+        )?)
+    }
+
+    pub fn stash_detail(&self, cwd: &Path, oid: &str) -> Result<CommitDetail, String> {
+        let (_, untracked_parent) = self.stash_parents(cwd, oid)?;
+        let mut detail = self.commit_detail(cwd, oid)?;
+        if let Some(parent) = untracked_parent {
+            let output = ensure_success(self.run(
+                cwd,
+                &[
+                    "show".into(),
+                    "--root".into(),
+                    "--format=".into(),
+                    "--numstat".into(),
+                    parent,
+                    "--".into(),
+                ],
+                None,
+            )?)?;
+            detail.files.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(parse_numstat_line),
+            );
         }
-        Ok(patch)
+        Ok(detail)
+    }
+
+    pub fn stash_file_diff(&self, cwd: &Path, oid: &str, path: &str) -> Result<String, String> {
+        let (base, untracked_parent) = self.stash_parents(cwd, oid)?;
+        let tracked = limited_patch(self.run(
+            cwd,
+            &[
+                "diff".into(),
+                "--no-ext-diff".into(),
+                "--no-color".into(),
+                base,
+                oid.into(),
+                "--".into(),
+                path.into(),
+            ],
+            None,
+        )?)?;
+        if !tracked.is_empty() {
+            return Ok(tracked);
+        }
+        let Some(parent) = untracked_parent else {
+            return Ok(tracked);
+        };
+        limited_patch(self.run(
+            cwd,
+            &[
+                "show".into(),
+                "--root".into(),
+                "--format=".into(),
+                "--no-ext-diff".into(),
+                "--no-color".into(),
+                parent,
+                "--".into(),
+                path.into(),
+            ],
+            None,
+        )?)
+    }
+
+    fn stash_parents(&self, cwd: &Path, oid: &str) -> Result<(String, Option<String>), String> {
+        let value = self.text(cwd, &["rev-list", "--parents", "-n", "1", oid])?;
+        let parents: Vec<_> = value.split_whitespace().skip(1).collect();
+        if parents.len() < 2 {
+            return Err("Selected object is not a stash".into());
+        }
+        Ok((
+            parents[0].into(),
+            parents.get(2).map(|parent| (*parent).into()),
+        ))
     }
 
     pub fn blame(&self, cwd: &Path, path: &str) -> Result<BlameFile, String> {
@@ -774,6 +843,15 @@ pub fn ensure_success(output: Output) -> Result<Output, String> {
     }
 }
 
+fn limited_patch(output: Output) -> Result<String, String> {
+    let output = ensure_success(output)?;
+    let patch = String::from_utf8_lossy(&output.stdout).to_string();
+    if patch.len() > MAX_DIFF_BYTES || patch.lines().count() > MAX_DIFF_LINES {
+        return Err("This file diff is too large".into());
+    }
+    Ok(patch)
+}
+
 pub fn path_name(path: &Path) -> String {
     path.file_name()
         .and_then(OsStr::to_str)
@@ -1038,6 +1116,65 @@ mod tests {
         let empty = git.commit_detail(dir.path(), &empty_oid).unwrap();
         assert_eq!(empty.message, "empty");
         assert!(empty.files.is_empty());
+    }
+
+    #[test]
+    fn stash_detail_and_file_diff_include_untracked_files() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        commit_file(&git, dir.path(), "base\n", "base");
+
+        std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
+        ensure_success(
+            git.run(dir.path(), &strings(&["add", "--", "file.txt"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("file.txt"), "unstaged\n").unwrap();
+        std::fs::write(dir.path().join("new.txt"), "untracked\n").unwrap();
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["stash", "push", "--include-untracked", "-m", "complete"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let oid = git.text(dir.path(), &["rev-parse", "refs/stash"]).unwrap();
+        let detail = git.stash_detail(dir.path(), &oid).unwrap();
+        assert_eq!(detail.message, "On main: complete");
+        assert_eq!(detail.files.len(), 2);
+        assert!(detail.files.iter().any(|file| file.path == "file.txt"));
+        assert!(detail.files.iter().any(|file| file.path == "new.txt"));
+
+        let tracked = git.stash_file_diff(dir.path(), &oid, "file.txt").unwrap();
+        assert!(tracked.contains("-base"));
+        assert!(tracked.contains("+unstaged"));
+        let untracked = git.stash_file_diff(dir.path(), &oid, "new.txt").unwrap();
+        assert!(untracked.contains("new file mode"));
+        assert!(untracked.contains("+untracked"));
+
+        std::fs::write(dir.path().join("file.txt"), "tracked only\n").unwrap();
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["stash", "push", "-m", "tracked-only"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let oid = git.text(dir.path(), &["rev-parse", "refs/stash"]).unwrap();
+        let detail = git.stash_detail(dir.path(), &oid).unwrap();
+        assert_eq!(detail.files.len(), 1);
+        assert_eq!(detail.files[0].path, "file.txt");
+        assert!(git
+            .stash_file_diff(dir.path(), &oid, "file.txt")
+            .unwrap()
+            .contains("+tracked only"));
     }
 
     #[test]

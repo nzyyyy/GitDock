@@ -403,6 +403,53 @@ test("opens commit details then a file diff", async () => {
   expect(document.querySelector(".history-canvas")).toBeInTheDocument();
 });
 
+test("opens a stash and its tracked or untracked file diff", async () => {
+  const oid = "cccccccccccccccccccccccccccccccccccccccc";
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    if (command === "get_stashes") return Promise.resolve([{ index: 0, oid, subject: "On main: saved" }]);
+    if (command === "get_stash_detail") return Promise.resolve({
+      oid,
+      author: "Ada",
+      email: "ada@example.com",
+      authoredAt: "2026-08-29T00:00:00Z",
+      message: "On main: saved",
+      files: [{ path: "new.txt", originalPath: null, additions: 1, deletions: 0 }],
+    });
+    if (command === "get_stash_file_diff") return Promise.resolve("diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+untracked");
+    if (command === "preview_operation") return Promise.resolve({ title: "Apply stash", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
+    if (command === "start_operation") return Promise.resolve({ operationId: 1, accepted: true });
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  await selectFirstRepository();
+  fireEvent.click(await screen.findByRole("tab", { name: "Stashes" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Apply" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", expect.anything()));
+  expect(invoke).not.toHaveBeenCalledWith("get_stash_detail", expect.anything());
+
+  fireEvent.click(screen.getByRole("button", { name: /stash@\{0\}/ }));
+  expect(await screen.findByText("Stash ID")).toBeInTheDocument();
+  expect(screen.getByText(oid)).toBeInTheDocument();
+  expect(document.querySelector(".stash-row")).toHaveClass("selected");
+  expect(invoke).toHaveBeenCalledWith("get_stash_detail", { repositoryId: 1, oid });
+  const commitDiffCalls = vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_commit_file_diff").length;
+  fireEvent.click(screen.getByRole("button", { name: /new\.txt/ }));
+  await waitFor(() => expect(document.querySelector(".gitdock-diff")).toHaveTextContent("untracked"));
+  expect(invoke).toHaveBeenCalledWith("get_stash_file_diff", { repositoryId: 1, oid, path: "new.txt" });
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_commit_file_diff")).toHaveLength(commitDiffCalls);
+  fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+  expect(await screen.findByText("Stash ID")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+  expect(document.querySelector(".commit-detail")).not.toBeInTheDocument();
+});
+
 test("hides pagination when switching to a repository without another page", async () => {
   const repositories = [
     { id: 1, path: "/large", name: "Large", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 },

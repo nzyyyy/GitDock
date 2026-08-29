@@ -14,7 +14,7 @@ GitDock is a macOS Git desktop client built with Tauri, React, TypeScript, and R
 - Smoothly scroll through a windowed commit topology graph whose lanes continue across pages (stashes and their internal helper commits stay in the Stashes pane); commits refresh the graph and list automatically, with commit details (metadata and the changed-file list), per-file diffs, cherry-pick, and revert actions
 - Organize repositories with collapsible groups, a pinned Favorites group, new empty groups, and drag sorting; status rails and top-right counts identify working-tree changes on every registered repository as files change, not only the selected one, with keyboard ordering within a group
 - Search local and remote branches in separate groups, check out remote branches as local branches, then create, switch, merge, rebase, rename, and delete branches
-- Manage tags, remotes, stashes, and submodules
+- Manage tags, remotes, stashes, and submodules, including complete tracked and untracked stash file lists and per-file diffs
 - Fetch, pull, push, and force-push with lease; split Pull and Push buttons show pending commit counts while their dropdowns group pull strategies and push settings, and every Git operation shows a brief completion result
 - Review affected paths and refs before sensitive Git operations run
 - Enter Git operation details in validated in-app forms instead of browser prompts
@@ -96,4 +96,3 @@ Repository paths and frontend input are validated at the Tauri boundary. The int
 ## License
 
 This project is licensed under the [MIT](LICENSE) License.
-

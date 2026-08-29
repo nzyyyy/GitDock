@@ -11,11 +11,10 @@ async function loadFileDiffs(repositoryId: number, snapshotId: number, file: Fil
 }
 
 export function useWorkingTree({
-  reportError, selectedIdRef, historyRepositoryRef, selectedId, language, setRepositoriesRef,
+  reportError, selectedIdRef, selectedId, language, setRepositoriesRef,
 }: {
   reportError: (message: string) => void;
   selectedIdRef: React.MutableRefObject<number | undefined>;
-  historyRepositoryRef: React.MutableRefObject<number | undefined>;
   selectedId?: number;
   language: "en" | "zh-CN";
   setRepositoriesRef: React.MutableRefObject<React.Dispatch<React.SetStateAction<RepositorySummary[]>>>;
@@ -27,7 +26,9 @@ export function useWorkingTree({
   const [conflict, setConflict] = useState<ConflictDocument & { snapshotId: number }>();
   const [selectedCommit, setSelectedCommit] = useState<string>();
   const [commitDetail, setCommitDetail] = useState<CommitDetail>();
+  const [detailKind, setDetailKind] = useState<"commit" | "stash">();
   const [diffIsFile, setDiffIsFile] = useState(false);
+  const detailRequest = useRef(0);
   const statusRequest = useRef(0);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
@@ -88,8 +89,8 @@ export function useWorkingTree({
     catch (error) { reportError(errorMessage(error)); }
   }, [selectedId, snapshot, reportError, selectedIdRef]);
 
-  const closeDiff = useCallback(() => { clearFileDiff(); setConflict(undefined); setSelectedCommit(undefined); setCommitDetail(undefined); }, []);
-  const closeCommitFile = useCallback(() => { clearFileDiff(); }, []);
+  const closeDiff = useCallback(() => { detailRequest.current += 1; clearFileDiff(); setConflict(undefined); setSelectedCommit(undefined); setCommitDetail(undefined); setDetailKind(undefined); }, []);
+  const closeCommitFile = useCallback(() => { detailRequest.current += 1; clearFileDiff(); }, []);
 
   const reloadOpenDiff = useCallback(async () => {
     const current = diffRef.current;
@@ -108,35 +109,40 @@ export function useWorkingTree({
     } catch (error) { reportError(errorMessage(error)); }
   }, [refreshStatus, reportError, selectedIdRef]);
 
-  const openCommit = useCallback(async (oid: string) => {
+  const openRevision = useCallback(async (oid: string, kind: "commit" | "stash") => {
     if (!selectedId) return;
     const repositoryId = selectedId;
+    const request = ++detailRequest.current;
     setSelectedCommit(oid);
+    setDetailKind(kind);
     setConflict(undefined);
     clearFileDiff();
     setCommitDetail(undefined);
     try {
-      const detail = await api.getCommitDetail(repositoryId, oid);
-      if (historyRepositoryRef.current === repositoryId) setCommitDetail(detail);
+      const detail = await (kind === "stash" ? api.getStashDetail(repositoryId, oid) : api.getCommitDetail(repositoryId, oid));
+      if (request === detailRequest.current && selectedIdRef.current === repositoryId) setCommitDetail(detail);
     }
-    catch (error) { reportError(errorMessage(error)); }
-  }, [selectedId, reportError, historyRepositoryRef]);
+    catch (error) { if (request === detailRequest.current && selectedIdRef.current === repositoryId) reportError(errorMessage(error)); }
+  }, [selectedId, reportError, selectedIdRef]);
+  const openCommit = useCallback((oid: string) => openRevision(oid, "commit"), [openRevision]);
+  const openStash = useCallback((oid: string) => openRevision(oid, "stash"), [openRevision]);
 
   const openCommitFile = useCallback(async (path: string) => {
-    if (!selectedId || !selectedCommit) return;
+    if (!selectedId || !selectedCommit || !detailKind) return;
     const repositoryId = selectedId;
     const oid = selectedCommit;
+    const request = detailRequest.current;
     try {
-      const patch = await api.getCommitFileDiff(repositoryId, oid, path);
-      if (historyRepositoryRef.current === repositoryId) {
+      const patch = await (detailKind === "stash" ? api.getStashFileDiff(repositoryId, oid, path) : api.getCommitFileDiff(repositoryId, oid, path));
+      if (request === detailRequest.current && selectedIdRef.current === repositoryId) {
         setCompanionDiff(undefined);
         setDiffSnapshotId(undefined);
         setDiff({ path, staged: false, binary: false, tooLarge: false, patch, hunks: [] });
         setDiffIsFile(false);
       }
     }
-    catch (error) { reportError(errorMessage(error)); }
-  }, [selectedId, selectedCommit, reportError, historyRepositoryRef]);
+    catch (error) { if (request === detailRequest.current && selectedIdRef.current === repositoryId) reportError(errorMessage(error)); }
+  }, [selectedId, selectedCommit, detailKind, reportError, selectedIdRef]);
 
   const showBranchDiff = useCallback((value: string) => {
     setConflict(undefined);
@@ -147,7 +153,7 @@ export function useWorkingTree({
   }, [language]);
 
   return {
-    snapshot, setSnapshot, diff, companionDiff, diffSnapshotId, conflict, setConflict, selectedCommit, setSelectedCommit, commitDetail, diffIsFile,
-    statusRequest, refreshStatus, reloadOpenDiff, openDiff, closeDiff, closeCommitFile, openCommit, openCommitFile, showBranchDiff,
+    snapshot, setSnapshot, diff, companionDiff, diffSnapshotId, conflict, setConflict, selectedCommit, commitDetail, detailKind, diffIsFile,
+    statusRequest, refreshStatus, reloadOpenDiff, openDiff, closeDiff, closeCommitFile, openCommit, openStash, openCommitFile, showBranchDiff,
   };
 }
