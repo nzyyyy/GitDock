@@ -184,8 +184,8 @@ test("creates a branch from a branch menu", async () => {
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
     if (command === "get_branches") return Promise.resolve([
-      { name: "main", oid: "12345678", current: true, remote: false },
       { name: "feature", oid: "87654321", current: false, remote: false },
+      { name: "main", oid: "12345678", current: true, remote: false },
       { name: "origin/main", oid: "12345678", current: false, remote: true },
       { name: "origin/feature", oid: "87654321", current: false, remote: true },
       { name: "origin/team/topic", oid: "abcdef12", current: false, remote: true },
@@ -203,22 +203,24 @@ test("creates a branch from a branch menu", async () => {
   expect(await screen.findByText("Local branches")).toBeInTheDocument();
   expect(screen.getByText("Remote branches")).toBeInTheDocument();
   expect(document.querySelector(".tool-pane .pane-title")!.querySelectorAll("button")).toHaveLength(0);
+  const branchRow = (name: string) => [...document.querySelectorAll(".branch-group .object-action-row")].find((row) => row.querySelector("strong")?.textContent === name)!;
 
   const branchSearch = screen.getByRole("textbox", { name: "Search branches" });
   fireEvent.change(branchSearch, { target: { value: "FEATURE" } });
-  expect(screen.getByText("feature")).toBeInTheDocument();
-  expect(screen.getByText("origin/feature")).toBeInTheDocument();
+  expect(branchRow("feature")).toBeTruthy();
+  expect(branchRow("origin/feature")).toBeTruthy();
   expect(document.querySelector(".branch-group .local-branch.current")).toBeNull();
   expect([...document.querySelectorAll(".branch-group > header")].map((header) => header.textContent)).toEqual(["Local branches1", "Remote branches1"]);
   fireEvent.change(branchSearch, { target: { value: "missing" } });
   expect(screen.getByText("No matching branches")).toBeInTheDocument();
   fireEvent.change(branchSearch, { target: { value: "" } });
   expect(document.querySelector(".branch-group .local-branch.current")).toHaveTextContent("main");
+  expect([...document.querySelectorAll(".branch-group .local-branch strong")].map((branch) => branch.textContent)).toEqual(["main", "feature"]);
 
   const rowMenuItem = (row: Element, text: string) => [...row.querySelectorAll<HTMLButtonElement>(".row-menu-popover button")].find((button) => button.textContent === text);
   const openRowMenu = (row: Element) => { fireEvent.contextMenu(row, { button: 2 }); fireEvent.pointerUp(row); };
 
-  const featureRow = screen.getByText("feature").closest(".object-action-row")!;
+  const featureRow = branchRow("feature");
   expect(featureRow.querySelector(".object-copy")).toHaveClass("local-branch");
   expect(featureRow.querySelector(".row-menu-trigger")).toBeNull();
   fireEvent.click(featureRow.querySelector(".object-copy")!);
@@ -228,23 +230,25 @@ test("creates a branch from a branch menu", async () => {
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "switchBranch", name: "feature" } }));
 
   vi.mocked(invoke).mockClear();
-  const trackedRow = screen.getByText("origin/feature").closest(".object-action-row")!;
+  const trackedRow = branchRow("origin/feature");
   expect(trackedRow.querySelector(".object-copy")).toHaveClass("remote-branch");
   openRowMenu(trackedRow);
   fireEvent.click(rowMenuItem(trackedRow, "Switch")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "switchBranch", name: "feature" } }));
 
   vi.mocked(invoke).mockClear();
-  const untrackedRow = screen.getByText("origin/team/topic").closest(".object-action-row")!;
+  const untrackedRow = branchRow("origin/team/topic");
+  expect(untrackedRow.querySelector(".remote-prefix")).toHaveTextContent("origin/");
+  expect(untrackedRow.querySelector("strong")).toHaveTextContent(/^origin\/team\/topic$/);
   openRowMenu(untrackedRow);
   fireEvent.click(rowMenuItem(untrackedRow, "Switch")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "createBranch", name: "team/topic", startPoint: "origin/team/topic", checkout: true } }));
 
-  const headRow = screen.getByText("origin/HEAD").closest(".object-action-row")!;
+  const headRow = branchRow("origin/HEAD");
   openRowMenu(headRow);
   expect(rowMenuItem(headRow, "Switch")).toBeUndefined();
 
-  const row = screen.getByText("origin/main").closest(".object-action-row")!;
+  const row = branchRow("origin/main");
   openRowMenu(row);
   fireEvent.click(rowMenuItem(row, "New branch")!);
 
@@ -1286,8 +1290,8 @@ test("refreshes branches when the selected repository changes externally", async
   await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
   await waitFor(() => expect(document.querySelector(".branch-group .local-branch.current")).toHaveTextContent("test"));
   expect([...document.querySelectorAll(".object-list .object-copy")].map((row) => ({ name: row.querySelector("strong")?.textContent, current: row.classList.contains("current") }))).toEqual([
-    { name: "main", current: false },
     { name: "test", current: true },
+    { name: "main", current: false },
   ]);
   expect(branchCalls).toBe(2);
 });
