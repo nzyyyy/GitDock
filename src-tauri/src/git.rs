@@ -373,14 +373,16 @@ impl Git {
                 let current = p.next() == Some("*");
                 let upstream = p.next().filter(|s| !s.is_empty()).map(Into::into);
                 let remote = full.starts_with("refs/remotes/");
+                let name = full.trim_start_matches(if remote {
+                    "refs/remotes/"
+                } else {
+                    "refs/heads/"
+                });
+                if remote && name.ends_with("/HEAD") {
+                    return None;
+                }
                 Some(BranchInfo {
-                    name: full
-                        .trim_start_matches(if remote {
-                            "refs/remotes/"
-                        } else {
-                            "refs/heads/"
-                        })
-                        .into(),
+                    name: name.into(),
                     oid,
                     current,
                     remote,
@@ -1615,6 +1617,56 @@ mod tests {
             .unwrap();
         assert!(!test.current);
         assert!(main.current);
+    }
+
+    #[test]
+    fn listing_branches_omits_remote_head() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&remote).unwrap();
+        std::fs::create_dir(&repo).unwrap();
+        ensure_success(
+            git.run(&remote, &strings(&["init", "--bare"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        init_repository(&git, &repo);
+        commit_file(&git, &repo, "base\n", "base");
+        ensure_success(
+            git.run(
+                &repo,
+                &[
+                    "remote".into(),
+                    "add".into(),
+                    "origin".into(),
+                    remote.to_string_lossy().into(),
+                ],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(&repo, &strings(&["push", "-u", "origin", "main"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(
+                &repo,
+                &strings(&["remote", "set-head", "origin", "main"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let branches = git.branches(&repo).unwrap();
+        assert!(branches
+            .iter()
+            .any(|branch| branch.remote && branch.name == "origin/main"));
+        assert!(branches.iter().all(|branch| branch.name != "origin/HEAD"));
     }
 
     #[test]

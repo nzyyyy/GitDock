@@ -659,13 +659,9 @@ pub(crate) fn command_spec(
             a
         }
         OperationRequest::Push { remote, branch } => {
-            let mut a = strings(&["push"]);
-            if let Some(remote) = remote {
-                a.push(remote.clone());
-            }
-            if let Some(branch) = branch {
-                a.push(branch.clone());
-            }
+            let remote = push_remote(&state.git()?, cwd, remote.as_deref())?;
+            let mut a = strings(&["push", "-u", &remote]);
+            a.push(branch.clone().unwrap_or_else(|| "HEAD".into()));
             a
         }
         OperationRequest::ForcePushWithLease {
@@ -940,6 +936,23 @@ fn validate_undo(git: &Git, cwd: &Path) -> Result<(), String> {
         return Err("HEAD is already reachable from its upstream. Use Revert instead.".into());
     }
     Ok(())
+}
+
+fn push_remote(git: &Git, cwd: &Path, remote: Option<&str>) -> Result<String, String> {
+    if let Some(remote) = remote {
+        return Ok(remote.into());
+    }
+    let names = git.text(cwd, &["remote"])?;
+    let remotes: Vec<_> = names.lines().filter(|name| !name.is_empty()).collect();
+    if remotes.contains(&"origin") {
+        Ok("origin".into())
+    } else {
+        remotes
+            .into_iter()
+            .next()
+            .map(str::to_string)
+            .ok_or_else(|| "No remote configured".into())
+    }
 }
 
 fn with_paths(prefix: &[&str], paths: &[String]) -> Vec<String> {
@@ -2206,6 +2219,57 @@ mod tests {
             },
         );
         assert!(git.text(&repo, &["remote"]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn push_without_remote_or_branch_creates_upstream_for_a_new_local_branch() {
+        let git = Git::discover(None).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let remote = root.path().join("remote.git");
+        fs::create_dir(&repo).unwrap();
+        fs::create_dir(&remote).unwrap();
+        init_repo(&git, &repo);
+        git_ok(&git, &remote, &["init", "--bare"]);
+        commit_file(&git, &repo, "a", "a\n", "base");
+        let state = test_state(git.clone(), root.path().join("config.json"));
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::AddRemote {
+                name: "origin".into(),
+                url: remote.to_string_lossy().into(),
+            },
+        );
+        git_ok(&git, &repo, &["switch", "-c", "hotfix/new"]);
+        commit_file(&git, &repo, "a", "hotfix\n", "hotfix");
+        let spec = command_spec(
+            &state,
+            1,
+            &repo,
+            &OperationRequest::Push {
+                remote: None,
+                branch: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(spec.args, strings(&["push", "-u", "origin", "HEAD"]));
+        run_request(
+            &state,
+            &repo,
+            OperationRequest::Push {
+                remote: None,
+                branch: None,
+            },
+        );
+        assert!(git
+            .text(&remote, &["show-ref", "--verify", "refs/heads/hotfix/new"])
+            .is_ok());
+        assert_eq!(
+            git.text(&repo, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+                .unwrap(),
+            "origin/hotfix/new"
+        );
     }
 
     #[test]
