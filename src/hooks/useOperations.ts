@@ -30,16 +30,34 @@ export function useOperations({
   const operationCallbacks = useRef(new Map<number, OperationFinished>());
   const earlyCompletions = useRef(new Map<number, OperationOutcome>());
   const operationTitles = useRef(new Map<number, string>());
+  const syncIds = useRef<{ fetch?: number; pull?: number; push?: number }>({});
+  const pendingCancel = useRef(new Set<"fetch" | "pull" | "push">());
 
   const dismissToast = useCallback((id: number) => setToasts((current) => current.filter((toast) => toast.id !== id)), []);
+
+  const clearSync = (kind: "fetch" | "pull" | "push") => {
+    delete syncIds.current[kind];
+    pendingCancel.current.delete(kind);
+    setBusySync((current) => ({ ...current, [kind]: false }));
+  };
+
+  const cancelSync = useCallback((kind: "fetch" | "pull" | "push") => {
+    const id = syncIds.current[kind];
+    if (id == null) { pendingCancel.current.add(kind); return; }
+    void api.cancelOperation(id).catch(() => {});
+  }, []);
 
   const startOperation = useCallback(async (repositoryId: number, request: OperationRequest, confirmed: boolean, onFinished?: OperationFinished) => {
     const sync = request.type === "fetch" || request.type === "pull" || request.type === "push" ? request.type : undefined;
     if (sync) setBusySync((current) => ({ ...current, [sync]: true }));
     try {
       const result = await api.startOperation(repositoryId, request, confirmed);
+      if (sync) {
+        syncIds.current[sync] = result.operationId;
+        if (pendingCancel.current.delete(sync)) void api.cancelOperation(result.operationId).catch(() => {});
+      }
       const finished = onFinished || request.type === "commit" || sync ? (outcome: OperationOutcome) => {
-        if (sync) setBusySync((current) => ({ ...current, [sync]: false }));
+        if (sync) clearSync(sync);
         if (outcome === "succeeded" && (request.type === "commit" || request.type === "fetch")) void refreshRepository(repositoryId);
         if (outcome === "succeeded" && request.type === "commit" && historyRepositoryRef.current === repositoryId) {
           if (selectedIdRef.current === repositoryId) void refreshHistory(repositoryId); else historyRepositoryRef.current = undefined;
@@ -52,7 +70,7 @@ export function useOperations({
         else operationCallbacks.current.set(result.operationId, finished);
       }
     } catch (error) {
-      if (sync) setBusySync((current) => ({ ...current, [sync]: false }));
+      if (sync) clearSync(sync);
       throw error;
     }
   }, [refreshHistory, refreshRepository]);
@@ -126,5 +144,5 @@ export function useOperations({
     return () => { listener.then((unlisten) => unlisten()); };
   }, [busyOperations, t, showDialog]);
 
-  return { pending, setPending, confirmPending, busyOperations, busySync, toasts, dismissToast, run, startOperation };
+  return { pending, setPending, confirmPending, busyOperations, busySync, toasts, dismissToast, run, startOperation, cancelSync };
 }

@@ -146,7 +146,7 @@ test("refreshes pull and push counts after fetch and commit", async () => {
 });
 
 test("shows a spinner on Fetch while the operation runs and restores the label after it finishes", async () => {
-  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" } }) => void) | undefined;
+  let operationListener: ((event: { payload: { operationId: number; repositoryId: number; kind: "started" | "finished"; message: string; outcome?: "succeeded" | "cancelled" } }) => void) | undefined;
   const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
   vi.mocked(listen).mockImplementation(((event: string, handler: typeof operationListener) => {
     if (event === "operation-event") operationListener = handler;
@@ -157,6 +157,7 @@ test("shows a spinner on Fetch while the operation runs and restores the label a
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
     if (command === "preview_operation") return Promise.resolve({ title: "Fetch", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
     if (command === "start_operation") return Promise.resolve({ operationId: 1, accepted: true });
+    if (command === "cancel_operation") return Promise.resolve(null);
     if (command === "refresh_repository") return Promise.resolve({ summary: repository, snapshot: { id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] } });
     return Promise.resolve([]);
   });
@@ -165,10 +166,16 @@ test("shows a spinner on Fetch while the operation runs and restores the label a
   await selectFirstRepository();
   const fetch = await screen.findByRole("button", { name: "Fetch" });
   fireEvent.click(fetch);
-  await waitFor(() => expect(screen.getByRole("button", { name: "Fetch" })).toHaveAttribute("aria-busy", "true"));
-  expect(screen.getByRole("button", { name: "Fetch" }).querySelector(".sync-spinner")).toBeTruthy();
+  const busy = await screen.findByRole("button", { name: "Cancel Fetch" });
+  expect(busy).toHaveAttribute("aria-busy", "true");
+  expect(busy).not.toBeDisabled();
+  expect(busy.querySelector(".sync-spinner")).toBeTruthy();
+  expect(busy.querySelector(".sync-stop")).toBeTruthy();
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_operation", expect.objectContaining({ request: { type: "fetch", remote: null, prune: false } })));
+  fireEvent.click(busy);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("cancel_operation", { operationId: 1 }));
   await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "started", message: "Fetch" } }));
-  await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "finished", message: "Done", outcome: "succeeded" } }));
+  await act(async () => operationListener?.({ payload: { operationId: 1, repositoryId: 1, kind: "finished", message: "Operation cancelled.", outcome: "cancelled" } }));
   const restored = screen.getByRole("button", { name: "Fetch" });
   expect(restored).toHaveAttribute("aria-busy", "false");
   expect(restored.querySelector(".sync-spinner")).toBeNull();
