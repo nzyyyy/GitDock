@@ -5,6 +5,8 @@ import { translate } from "../i18n";
 import { errorMessage, FAVORITES_GROUP, UNGROUPED_GROUP, type RepositoryGroup } from "../types";
 
 type Translate = (key: Parameters<typeof translate>[1]) => string;
+type RepositoryDropHint = { groupKey: string; index: number; offset: number };
+type RepositoryDragSlots = { rows: { top: number; middle: number; bottom: number }[]; emptyTop: number };
 
 export function useRepositoryList({
   reportError, selectedIdRef, setSnapshot, refreshStatus, t, language,
@@ -22,10 +24,11 @@ export function useRepositoryList({
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const draggingRepositoryId = useRef<number | undefined>(undefined);
   const draggingHeight = useRef(0);
-  const dropHintRef = useRef<{ groupKey: string; index: number } | null>(null);
-  const dragSlots = useRef(new Map<string, number[]>());
+  const draggingOrigin = useRef<{ groupKey: string; index: number; top: number } | undefined>(undefined);
+  const dropHintRef = useRef<RepositoryDropHint | null>(null);
+  const dragSlots = useRef(new Map<string, RepositoryDragSlots>());
   const [draggingId, setDraggingId] = useState<number>();
-  const [dropHint, setDropHint] = useState<{ groupKey: string; index: number } | null>(null);
+  const [dropHint, setDropHint] = useState<RepositoryDropHint | null>(null);
   const repositoryListRequest = useRef(0);
   const repositoryRequests = useRef(new Map<number, number>());
   const streamedSummaries = useRef(new Map<number, RepositorySummary>());
@@ -182,9 +185,9 @@ export function useRepositoryList({
     event.preventDefault(); event.dataTransfer.dropEffect = "move";
   }, [filter]);
 
-  const setHint = (hint: { groupKey: string; index: number } | null) => {
+  const setHint = (hint: RepositoryDropHint | null) => {
     dropHintRef.current = hint;
-    setDropHint((current) => current?.groupKey === hint?.groupKey && current?.index === hint?.index ? current : hint);
+    setDropHint((current) => current?.groupKey === hint?.groupKey && current?.index === hint?.index && current?.offset === hint?.offset ? current : hint);
   };
 
   const clearRepositoryDropHint = useCallback(() => setHint(null), []);
@@ -192,32 +195,35 @@ export function useRepositoryList({
   const captureGroupSlots = (groupEl: HTMLElement, groupKey: string) => {
     if (dragSlots.current.has(groupKey)) return;
     const dragging = draggingRepositoryId.current;
-    dragSlots.current.set(
-      groupKey,
-      [...groupEl.querySelectorAll<HTMLElement>(".repo-row-shell")]
-        .filter((row) => Number(row.dataset.repositoryId) !== dragging)
-        .map((row) => {
-          const rect = row.getBoundingClientRect();
-          return rect.top + rect.height / 2;
-        }),
-    );
+    const rows = [...groupEl.querySelectorAll<HTMLElement>(".repo-row-shell")]
+      .filter((row) => Number(row.dataset.repositoryId) !== dragging)
+      .map((row) => {
+        const rect = row.getBoundingClientRect();
+        return { top: rect.top, middle: rect.top + rect.height / 2, bottom: rect.top + rect.height };
+      });
+    dragSlots.current.set(groupKey, {
+      rows,
+      emptyTop: groupEl.querySelector<HTMLElement>("header")?.getBoundingClientRect().bottom ?? groupEl.getBoundingClientRect().top,
+    });
   };
 
-  const beginRepositoryDrag = useCallback((repositoryId: number, height: number, groupKey: string, groupEl?: HTMLElement | null) => {
+  const beginRepositoryDrag = useCallback((repositoryId: number, height: number, top: number, groupKey: string, groupEl?: HTMLElement | null) => {
     if (filter.trim()) return;
     const group = repositoryGroups.find((item) => item.key === groupKey);
     const index = group?.repositories.findIndex((repository) => repository.id === repositoryId) ?? 0;
     draggingRepositoryId.current = repositoryId;
     draggingHeight.current = height;
+    draggingOrigin.current = { groupKey, index, top };
     dragSlots.current.clear();
     if (groupEl) captureGroupSlots(groupEl, groupKey);
     setDraggingId(repositoryId);
-    setHint({ groupKey, index });
+    setHint({ groupKey, index, offset: 0 });
   }, [filter, repositoryGroups]);
 
   const endRepositoryDrag = useCallback(() => {
     draggingRepositoryId.current = undefined;
     draggingHeight.current = 0;
+    draggingOrigin.current = undefined;
     dragSlots.current.clear();
     setDraggingId(undefined);
     setHint(null);
@@ -227,9 +233,15 @@ export function useRepositoryList({
     if (filter.trim() || draggingRepositoryId.current === undefined) return;
     event.preventDefault(); event.dataTransfer.dropEffect = "move";
     captureGroupSlots(event.currentTarget, groupKey);
-    const slots = dragSlots.current.get(groupKey) ?? [];
-    const found = slots.findIndex((mid) => event.clientY < mid);
-    setHint({ groupKey, index: found < 0 ? slots.length : found });
+    const slots = dragSlots.current.get(groupKey);
+    if (!slots) return;
+    const found = slots.rows.findIndex((slot) => event.clientY < slot.middle);
+    const index = found < 0 ? slots.rows.length : found;
+    const origin = draggingOrigin.current;
+    const targetTop = origin?.groupKey === groupKey
+      ? origin.top + (index - origin.index) * draggingHeight.current
+      : slots.rows[index]?.top ?? slots.rows.at(-1)?.bottom ?? slots.emptyTop;
+    setHint({ groupKey, index, offset: origin ? targetTop - origin.top : 0 });
   }, [filter]);
 
   const dropRepository = useCallback((groupKey: string) => {
@@ -243,7 +255,8 @@ export function useRepositoryList({
   }, [filter, moveRepository, repositoryGroups]);
 
   const repositoryRowShift = useCallback((groupKey: string, repositoryId: number) => {
-    if (!dropHint || !draggingId || repositoryId === draggingId) return 0;
+    if (!dropHint || !draggingId) return 0;
+    if (repositoryId === draggingId) return dropHint.offset;
     const group = repositoryGroups.find((item) => item.key === groupKey);
     if (!group) return 0;
     const height = draggingHeight.current;

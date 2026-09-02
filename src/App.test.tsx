@@ -1547,12 +1547,15 @@ test("groups repositories, moves one into favorites, and disables drag while sea
   fireEvent.dragEnd(alpha);
   expect(work).not.toHaveClass("drop-target");
 
+  vi.spyOn(alpha, "getBoundingClientRect").mockReturnValue({ top: 100, left: 0, width: 200, height: 40 } as DOMRect);
+  vi.spyOn(favorites.querySelector<HTMLElement>("header")!, "getBoundingClientRect").mockReturnValue({ bottom: 20 } as DOMRect);
   fireEvent.dragStart(alpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn(), setDragImage } });
   expect(setDragImage.mock.calls.at(-1)?.[0]).toHaveClass("repo-row-shell");
   const dataTransfer = { dropEffect: "none", getData: () => "" };
   expect(fireEvent.dragOver(favorites, { dataTransfer })).toBe(false);
   expect(dataTransfer.dropEffect).toBe("move");
   expect(favorites).toHaveClass("drop-target");
+  expect(alpha).toHaveStyle({ transform: "translateY(-80px)" });
   fireEvent.drop(favorites, { dataTransfer });
   expect(favorites).not.toHaveClass("drop-target");
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("reorder_repositories", { placements: [
@@ -1590,15 +1593,19 @@ test("sorts favorite repositories before or after the dropped row", async () => 
   vi.spyOn(gamma, "getBoundingClientRect").mockReturnValue({ top: 10, height: 40 } as DOMRect);
   fireEvent.dragStart(alpha, { dataTransfer: { effectAllowed: "move", setData: vi.fn(), setDragImage: vi.fn() } });
   expect(alpha).toHaveClass("dragging");
+  expect(alpha.closest(".repo-list")).toHaveClass("drag-active");
   dragAt("dragover", alpha, 1, 20);
   expect(alpha.closest("section")).toHaveClass("drop-target");
   dragAt("dragover", gamma, 1, 40);
+  expect(alpha).toHaveStyle({ transform: "translateY(80px)" });
   expect(beta).toHaveStyle({ transform: "translateY(-40px)" });
   expect(gamma).toHaveStyle({ transform: "translateY(-40px)" });
   dragAt("dragover", beta, 1, 20);
+  expect(alpha).not.toHaveStyle({ transform: "translateY(80px)" });
   expect(beta).not.toHaveStyle({ transform: "translateY(-40px)" });
   fireEvent.dragEnd(alpha);
   expect(alpha).not.toHaveClass("dragging");
+  expect(alpha.closest(".repo-list")).not.toHaveClass("drag-active");
   expect(beta).not.toHaveStyle({ transform: "translateY(-40px)" });
   expect(alpha.closest("section")).not.toHaveClass("drop-target");
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "reorder_repositories")).toBe(false);

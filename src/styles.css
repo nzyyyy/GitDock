@@ -53,7 +53,7 @@ code { font-family: "SFMono-Regular", Menlo, monospace; font-size: 11px; }
 .group-chevron { display: block; line-height: 1; letter-spacing: 0; translate: 0 -0.12em; }
 .repo-group > header .row-menu-trigger { align-self: center; min-height: 28px; border: 0; background: transparent; }
 .repo-row-shell { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
-.repo-row-shell.dragging { opacity: 0; }
+.repo-row-shell.dragging { z-index: 2; opacity: .2; }
 .repo-drop-slot { pointer-events: none; }
 .repo-row-shell > .row-menu-trigger { position: absolute; right: 4px; top: 4px; opacity: 0; border-color: transparent; background: transparent; }
 .repo-row-shell:hover > .row-menu-trigger, .repo-row-shell:focus-within > .row-menu-trigger, .repo-row-shell > .row-menu-trigger[aria-expanded="true"] { opacity: 1; border-color: var(--line); background: var(--raised); }
@@ -133,8 +133,8 @@ code { font-family: "SFMono-Regular", Menlo, monospace; font-size: 11px; }
 @media (max-width: 1180px) { .app-shell { grid-template-columns: 205px 1fr; }.work-area { grid-template-columns: minmax(420px, 1fr) 320px; }.topbar nav button { padding-inline: 9px; }.repo-context code { display: none; } }
 @media (prefers-reduced-motion: no-preference) {
   .repo-row, button { transition: background-color 100ms ease, border-color 100ms ease, transform 100ms ease, opacity 100ms ease; }
-  .repo-row-shell { transition: transform 120ms ease; }
-  .repo-row-shell.dragging { transition: none; }
+  .repo-row-shell { transition: opacity 100ms ease; }
+  .repo-list.drag-active .repo-row-shell { transition: transform 120ms ease, opacity 100ms ease; }
   .skeleton-row { animation: skeleton 1.2s ease-in-out infinite; }
 }
 @keyframes skeleton { 50% { opacity: .55; } }
