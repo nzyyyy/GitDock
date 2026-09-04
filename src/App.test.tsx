@@ -229,12 +229,16 @@ test("creates a branch from a branch menu", async () => {
 
   const featureRow = branchRow("feature");
   expect(featureRow.querySelector(".object-copy")).toHaveClass("local-branch");
-  expect(featureRow.querySelector(".row-menu-trigger")).toBeNull();
+  const featureMenu = featureRow.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
+  expect(featureMenu).toHaveAccessibleName("More actions");
+  expect(featureMenu).toHaveTextContent("•••");
   fireEvent.click(featureRow.querySelector(".object-copy")!);
   expect(invoke).not.toHaveBeenCalledWith("preview_operation", expect.objectContaining({ request: { type: "switchBranch", name: "feature" } }));
-  openRowMenu(featureRow);
+  fireEvent.click(featureMenu);
+  expect(featureRow).toHaveClass("menu-open");
   fireEvent.click(rowMenuItem(featureRow, "Switch")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "switchBranch", name: "feature" } }));
+  expect(featureRow).not.toHaveClass("menu-open");
 
   vi.mocked(invoke).mockClear();
   const trackedRow = branchRow("origin/feature");
@@ -315,12 +319,15 @@ test("renders history topology and ref labels", async () => {
   expect(screen.getByText("yesterday")).toBeInTheDocument();
   expect(screen.getByText("2 days ago")).toBeInTheDocument();
   const commitRow = document.querySelector<HTMLElement>(".history-pane .object-action-row")!;
-  expect(commitRow.querySelector(".row-menu-trigger")).toBeNull();
-  fireEvent.contextMenu(commitRow, { button: 2 });
-  fireEvent.pointerUp(commitRow);
+  const commitMenu = commitRow.querySelector<HTMLButtonElement>(".row-menu-trigger")!;
+  expect(commitMenu).toHaveAccessibleName("More actions");
+  expect(commitMenu).toHaveTextContent("•••");
+  fireEvent.click(commitMenu);
+  expect(commitRow).toHaveClass("menu-open");
   expect([...commitRow.querySelectorAll<HTMLButtonElement>(".row-menu-popover button")].map((button) => button.textContent)).toEqual(["Cherry-pick"]);
   fireEvent.click(commitRow.querySelector<HTMLButtonElement>(".row-menu-popover button")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "cherryPick", commits: ["aaaaaaaa"] } }));
+  expect(commitRow).not.toHaveClass("menu-open");
   expect(commitRow.querySelector("strong")).toHaveTextContent("Merge feature with a long message that stays on one line");
   expect(commitRow.querySelector("span")).toHaveTextContent("Ada · aaaaaaaa · 5 hours ago");
   expect(commitRow.querySelector("time")).toHaveAttribute("dateTime", "2026-08-18T07:00:00Z");
@@ -1743,6 +1750,7 @@ test("shows every remote URL with a direction icon", async () => {
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    if (command === "get_tags") return Promise.resolve([{ name: "v1.0", oid: "12345678", subject: "Release" }]);
     if (command === "get_remotes") return Promise.resolve([
       { name: "origin", fetchUrls: [sshUrl], pushUrls: [httpUrl, sshUrl] },
       { name: "mirror", fetchUrls: [mirrorUrl], pushUrls: [mirrorUrl] },
@@ -1753,10 +1761,14 @@ test("shows every remote URL with a direction icon", async () => {
   render(<App />);
   await selectFirstRepository();
   fireEvent.click(screen.getByRole("tab", { name: "Branches" }));
+  fireEvent.click(screen.getByRole("button", { name: "Tags" }));
+  const tagRow = (await screen.findByText("v1.0")).closest(".object-action-row")!;
+  expect(tagRow.querySelector(".row-menu-trigger")).toHaveAccessibleName("More actions");
   fireEvent.click(screen.getByRole("button", { name: "Remotes" }));
   // The ssh URL serves fetch and push, the http URL only push.
   expect((await screen.findByText(sshUrl)).closest(".remote-url")).toHaveTextContent("⇅");
   expect(screen.getByText(httpUrl).closest(".remote-url")).toHaveTextContent("↑");
+  expect([...document.querySelectorAll(".object-action-row")].every((row) => row.querySelector(".row-menu-trigger")?.getAttribute("aria-label") === "More actions")).toBe(true);
   // A URL used for both directions renders once, not duplicated.
   const mirrorLines = screen.getAllByText(mirrorUrl);
   expect(mirrorLines).toHaveLength(1);
