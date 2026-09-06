@@ -71,7 +71,7 @@ export function InteractiveRebase({ repositoryId, initialOnto, onClose, onRun }:
       <span className="rebase-order"><button type="button" aria-label={`${t("moveCommitUp")} ${shortOid(step.oid)}`} onClick={() => move(index, -1)} disabled={index === 0}>↑</button><button type="button" aria-label={`${t("moveCommitDown")} ${shortOid(step.oid)}`} onClick={() => move(index, 1)} disabled={index === steps.length - 1}>↓</button></span>
       <select name={`action-${step.oid}`} autoComplete="off" aria-label={`${t("rebaseAction")} ${shortOid(step.oid)}`} value={step.action} onChange={(event) => setAction(index, event.target.value as RebaseAction)}>{ACTIONS.map((action) => <option key={action} value={action}>{t(action)}</option>)}</select>
       <span className="rebase-commit"><code>{shortOid(step.oid)}</code><span>{subjectByOid.get(step.oid)}</span></span>
-      {step.action === "reword" && <input name={`message-${step.oid}`} autoComplete="off" aria-label={`${t("rewordMessage")} ${shortOid(step.oid)}`} value={step.message ?? ""} placeholder={subjectByOid.get(step.oid)} onChange={(event) => setMessage(index, event.target.value)} />}
+      {step.action === "reword" && <input name={`message-${step.oid}`} autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-label={`${t("rewordMessage")} ${shortOid(step.oid)}`} value={step.message ?? ""} placeholder={subjectByOid.get(step.oid)} onChange={(event) => setMessage(index, event.target.value)} />}
     </div>)}</div>}
     {!loading && !error && steps.length === 0 && onto && <p>{t("noCommitsToRebase")}</p>}
     <footer><button type="button" onClick={onClose}>{t("cancel")}</button><button className="danger" onClick={start} disabled={!startable}>{t("startRebase")}</button></footer>

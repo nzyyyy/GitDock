@@ -30,6 +30,12 @@ const selectFirstRepository = async () => {
   fireEvent.click(document.querySelector<HTMLElement>("[data-repository-id='1'] .repo-row")!);
 };
 
+const expectTextAssistanceDisabled = (element: HTMLElement) => {
+  expect(element).toHaveAttribute("autocapitalize", "none");
+  expect(element).toHaveAttribute("autocorrect", "off");
+  expect(element).toHaveAttribute("spellcheck", "false");
+};
+
 test("shows actionable first-run state", async () => {
   render(<App />);
   expect(await screen.findByText(/Put every working tree/)).toBeInTheDocument();
@@ -199,6 +205,7 @@ test("creates a branch from a branch menu", async () => {
       { name: "origin/HEAD", oid: "12345678", current: false, remote: true },
     ]);
     if (["get_tags", "get_remotes", "get_submodules"].includes(command)) return Promise.resolve([]);
+    if (command === "get_rebase_commits") return Promise.resolve([{ oid: "11111111", subject: "Rewrite me", author: "Ada" }]);
     if (command === "preview_operation") return Promise.resolve({ title: "Create branch", summary: "", risk: "normal", affectedPaths: [], affectedRefs: [], recoverable: true, requiresConfirmation: false });
     if (command === "start_operation") return Promise.resolve({ operationId: 1, accepted: true });
     return Promise.resolve(undefined);
@@ -213,6 +220,7 @@ test("creates a branch from a branch menu", async () => {
   const branchRow = (name: string) => [...document.querySelectorAll(".branch-group .object-action-row")].find((row) => row.querySelector("strong")?.textContent === name)!;
 
   const branchSearch = screen.getByRole("textbox", { name: "Search branches" });
+  expectTextAssistanceDisabled(branchSearch);
   fireEvent.change(branchSearch, { target: { value: "FEATURE" } });
   expect(branchRow("feature")).toBeTruthy();
   expect(branchRow("origin/feature")).toBeTruthy();
@@ -258,6 +266,13 @@ test("creates a branch from a branch menu", async () => {
   const headRow = branchRow("origin/HEAD");
   openRowMenu(headRow);
   expect(rowMenuItem(headRow, "Switch")).toBeUndefined();
+
+  openRowMenu(featureRow);
+  fireEvent.click(rowMenuItem(featureRow, "Interactive rebase")!);
+  const action = await screen.findByRole("combobox", { name: "Rebase action 11111111" });
+  fireEvent.change(action, { target: { value: "reword" } });
+  expectTextAssistanceDisabled(screen.getByRole("textbox", { name: "New message 11111111" }));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
   const row = branchRow("origin/main");
   openRowMenu(row);
@@ -542,6 +557,7 @@ test("starts clone from a validated in-app form", async () => {
   expect(input).toHaveAttribute("name", "url");
   expect(input).toHaveAttribute("type", "url");
   expect(input).toHaveAttribute("autocomplete", "off");
+  expectTextAssistanceDisabled(input);
   const submit = screen.getByRole("dialog").querySelector<HTMLButtonElement>("button[type='submit']")!;
   expect(submit).toBeDisabled();
   fireEvent.change(input, { target: { value: " https://example.com/repo.git " } });
@@ -1083,9 +1099,7 @@ test("clears the commit message only after a successful early completion event",
   render(<App />);
   await selectFirstRepository();
   const message = await screen.findByRole("textbox", { name: "Commit message" });
-  expect(message).toHaveAttribute("autocapitalize", "none");
-  expect(message).toHaveAttribute("autocorrect", "off");
-  expect(message).toHaveAttribute("spellcheck", "false");
+  expectTextAssistanceDisabled(message);
   const commitButton = screen.getByRole("button", { name: "Commit staged changes" });
   expect(commitButton).toBeDisabled();
   for (const value of ["S", "Sh", "Ship"]) fireEvent.change(message, { target: { value } });
@@ -1533,6 +1547,7 @@ test("groups repositories, moves one into favorites, and disables drag while sea
   render(<App />);
   await selectFirstRepository();
   const search = await screen.findByRole("textbox", { name: "Search repositories" });
+  expectTextAssistanceDisabled(search);
   fireEvent.change(search, { target: { value: "a" } });
   const filteredAlpha = (await screen.findByRole("button", { name: /Alpha/ })).closest<HTMLElement>("[role='listitem']")!;
   expect(filteredAlpha).toHaveAttribute("draggable", "false");
@@ -1672,6 +1687,7 @@ test("opens the command palette and routes repository actions through existing p
   const input = await screen.findByRole("combobox", { name: "Search commands…" });
   expect(input).toHaveAttribute("name", "commandSearch");
   expect(input).toHaveAttribute("autocomplete", "off");
+  expectTextAssistanceDisabled(input);
   fireEvent.change(input, { target: { value: "not-a-command" } });
   expect(screen.getByRole("status")).toHaveTextContent("No matching commands");
   fireEvent.change(input, { target: { value: "fetch" } });
