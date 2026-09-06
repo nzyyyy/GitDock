@@ -3,7 +3,7 @@ import { flushSync } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, type ConflictResolution, type GitInfo, type Language, type RepositorySummary } from "./api";
 import { ConflictEditor } from "./ConflictEditor";
-import { DiffView } from "./DiffView";
+import { BranchComparisonView, DiffView } from "./DiffView";
 import { I18nProvider, translate } from "./i18n";
 import { readLogs } from "./lib/logBuffer";
 import { BranchCanvas, MemoBranchesPane } from "./components/BranchesPane";
@@ -67,7 +67,7 @@ export default function App() {
   const reportError = useCallback((message: string) => { pushLog("error", message); setOutputOpen(true); }, [pushLog]);
 
   const history = useHistory({ reportError, selectedIdRef, selectedId, tab });
-  const workingTree = useWorkingTree({ reportError, selectedIdRef, selectedId, language, setRepositoriesRef });
+  const workingTree = useWorkingTree({ reportError, selectedIdRef, selectedId, setRepositoriesRef });
   const list = useRepositoryList({ reportError, selectedIdRef, setSnapshot: workingTree.setSnapshot, refreshStatus: workingTree.refreshStatus, t, language });
   setRepositoriesRef.current = list.setRepositories;
   const operations = useOperations({ pushLog, reportError, t, showDialog, setSelectedId, setOutputOpen, refreshRepositories: list.refreshRepositories, refreshRepository: list.refreshRepository, refreshHistory: history.refreshHistory, selectedId, selectedIdRef, historyRepositoryRef: history.historyRepositoryRef });
@@ -75,8 +75,12 @@ export default function App() {
 
   const { repositories, setRepositories, setCustomGroups, filter, setFilter, collapsedGroups, setCollapsedGroups, draggingId, draggingHeight, dropHint, refreshRepositories, repositoryGroups, moveRepositoryBy, addGroup, updateGroup, acceptRepositoryDrop, hintRepositoryDrop, clearRepositoryDropHint, beginRepositoryDrag, endRepositoryDrag, dropRepository, repositoryRowShift } = list;
   const finishRepositoryDrag = () => { dragGhost.current?.remove(); dragGhost.current = undefined; endRepositoryDrag(); };
-  const { snapshot, setSnapshot, diff, companionDiff, diffSnapshotId, conflict, setConflict, selectedCommit, commitDetail, detailKind, diffIsFile, statusRequest, refreshStatus, reloadOpenDiff, openDiff, closeDiff, closeCommitFile, openCommit, openStash, openCommitFile, showBranchDiff } = workingTree;
-  const { view: fileView, path: filePath, entries: fileHistoryEntries, selectedOid: fileHistoryOid, diff: fileDiff, blameFile, openFileHistory, openBlame, selectHistoryOid, close: closeFileView } = fileInspection;
+  const { branchComparison, snapshot, setSnapshot, diff, companionDiff, diffSnapshotId, conflict, setConflict, selectedCommit, commitDetail, detailKind, diffIsFile, statusRequest, refreshStatus, reloadOpenDiff, openDiff: openDiffContent, closeDiff, closeCommitFile, openCommit: openCommitContent, openStash: openStashContent, openCommitFile, showBranchDiff: showBranchDiffContent } = workingTree;
+  const { loading: fileLoading, error: fileError, view: fileView, path: filePath, entries: fileHistoryEntries, selectedOid: fileHistoryOid, diff: fileDiff, blameFile, openFileHistory, openBlame, selectHistoryOid, close: closeFileView } = fileInspection;
+  const openDiff = useCallback((...args: Parameters<typeof openDiffContent>) => { closeFileView(); return openDiffContent(...args); }, [closeFileView, openDiffContent]);
+  const openCommit = useCallback((...args: Parameters<typeof openCommitContent>) => { closeFileView(); return openCommitContent(...args); }, [closeFileView, openCommitContent]);
+  const openStash = useCallback((...args: Parameters<typeof openStashContent>) => { closeFileView(); return openStashContent(...args); }, [closeFileView, openStashContent]);
+  const showBranchDiff = useCallback((...args: Parameters<typeof showBranchDiffContent>) => { closeFileView(); return showBranchDiffContent(...args); }, [closeFileView, showBranchDiffContent]);
   const { commits, historyLoading, hasMore, loadMoreHistory } = history;
   const { pending, setPending, confirmPending, busyOperations, busySync, toasts, dismissToast, run, cancelSync } = operations;
 
@@ -105,7 +109,7 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedId) return;
-    closeDiff();
+    closeFileView(); closeDiff();
     api.watchRepository(selectedId).catch((error) => pushLog("error", errorMessage(error)));
     if (selected?.kind === "workTree") refreshStatus(selectedId); else { statusRequest.current += 1; setSnapshot(undefined); }
   }, [selectedId, selected?.kind, refreshStatus, pushLog]);
@@ -224,7 +228,7 @@ export default function App() {
     };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop, { once: true });
   };
-  const selectWorkflowTab = (next: Tab) => { setTab(next); closeDiff(); };
+  const selectWorkflowTab = (next: Tab) => { closeFileView(); setTab(next); closeDiff(); };
   const moveWorkflowTab = (event: React.KeyboardEvent<HTMLButtonElement>, current: Tab) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
@@ -236,10 +240,10 @@ export default function App() {
 
   const command = (id: string, key: Parameters<typeof translate>[1], action: () => void, enabled = true): CommandItem | undefined => enabled ? { id, label: t(key), search: `${t(key)} ${translate("en", key)}`.toLowerCase(), action } : undefined;
   const commands = [
-    command("changes", "changes", () => { setTab("changes"); closeDiff(); }, Boolean(selected)),
-    command("history", "history", () => { setTab("history"); closeDiff(); }, Boolean(selected)),
-    command("branches", "branches", () => { setTab("branches"); closeDiff(); }, Boolean(selected)),
-    command("stashes", "stashes", () => { setTab("stashes"); closeDiff(); }, Boolean(selected)),
+    command("changes", "changes", () => selectWorkflowTab("changes"), Boolean(selected)),
+    command("history", "history", () => selectWorkflowTab("history"), Boolean(selected)),
+    command("branches", "branches", () => selectWorkflowTab("branches"), Boolean(selected)),
+    command("stashes", "stashes", () => selectWorkflowTab("stashes"), Boolean(selected)),
     command("add", "addRepository", register, git.supported), command("clone", "clone", clone, git.supported), command("init", "initialize", initialize, git.supported),
     command("refresh", "refreshAll", refreshRepositories), command("language", "language", toggleLanguage), command("git", "selectGit", selectGit),
     command("fetch", "fetch", () => { void run({ type: "fetch", remote: null, prune: false }); }, Boolean(selected?.capabilities.canManageRemotes)),
@@ -292,7 +296,7 @@ export default function App() {
 
         <div id="workflow-panel" className="work-area" role="tabpanel" aria-labelledby={`workflow-tab-${tab}`} style={{ gridTemplateColumns: `minmax(480px, 1fr) ${rightWidth}px` }}>
           <section className="canvas">
-            {conflict ? <ConflictEditor key={conflict.id} document={conflict} onBack={closeDiff} onResolve={resolveConflict} /> : fileView === "history" && filePath ? <FileHistoryView path={filePath} entries={fileHistoryEntries} selectedOid={fileHistoryOid} diff={fileDiff} onBack={closeFileView} onSelect={selectHistoryOid} /> : fileView === "blame" && blameFile ? <BlameView blame={blameFile} onBack={closeFileView} /> : diff ? <MemoDiffView diff={diff} companionDiff={companionDiff} snapshotId={diffSnapshotId} onBack={commitDetail ? closeCommitFile : closeDiff} onRun={run} onHunkSettled={reloadOpenDiff} fileActions={diffIsFile} onFileHistory={openFileHistory} onBlame={openBlame} caption={commitDetail ? shortOid(commitDetail.oid) : undefined} /> : commitDetail ? <CommitDetailView detail={commitDetail} kind={detailKind} onBack={closeDiff} onOpenFile={openCommitFile} /> : !selected ? <div className="canvas-empty"><h2>{t("selectRepository")}</h2><p>{t("selectRepositoryHint")}</p></div> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
+            {fileView === "history" && filePath ? <FileHistoryView path={filePath} entries={fileHistoryEntries} selectedOid={fileHistoryOid} diff={fileDiff} loading={fileLoading} error={fileError} onBack={closeFileView} onSelect={selectHistoryOid} /> : fileView === "blame" ? <BlameView blame={blameFile} path={filePath} loading={fileLoading} error={fileError} onBack={closeFileView} /> : conflict ? <ConflictEditor key={conflict.id} document={conflict} onBack={closeDiff} onResolve={resolveConflict} /> : branchComparison ? <BranchComparisonView comparison={branchComparison} onBack={closeDiff} /> : diff ? <MemoDiffView diff={diff} companionDiff={companionDiff} snapshotId={diffSnapshotId} onBack={commitDetail ? closeCommitFile : closeDiff} onRun={run} onHunkSettled={reloadOpenDiff} fileActions={diffIsFile} onFileHistory={openFileHistory} onBlame={openBlame} caption={commitDetail ? shortOid(commitDetail.oid) : undefined} /> : commitDetail ? <CommitDetailView detail={commitDetail} kind={detailKind} onBack={closeDiff} onOpenFile={openCommitFile} /> : !selected ? <div className="canvas-empty"><h2>{t("selectRepository")}</h2><p>{t("selectRepositoryHint")}</p></div> : tab === "changes" ? <MemoChangesOverview repository={selected} snapshot={snapshot} /> : tab === "history" ? <MemoHistoryCanvas commits={commits} selectedOid={selectedCommit} onSelect={openCommit} /> : tab === "branches" ? <BranchCanvas repository={selected} /> : <StashCanvas repository={selected} />}
           </section>
           <aside className="tool-pane"><div className="resize-handle resize-right" role="separator" tabIndex={0} aria-label={t("resizeDetails")} aria-orientation="vertical" aria-valuemin={LAYOUT_LIMITS.right[0]} aria-valuemax={LAYOUT_LIMITS.right[1]} aria-valuenow={rightWidth} onKeyDown={(event) => resizeWithKeyboard("right", event)} onPointerDown={(event) => beginResize("right", event)} />
             {tab === "changes" && <MemoChangesPane repository={selected} snapshot={snapshot} onOpen={openDiff} onOpenExternal={openRepositoryFile} onRun={run} onFileHistory={openFileHistory} onBlame={openBlame} />}

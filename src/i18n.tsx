@@ -3,6 +3,7 @@ import { createContext, useContext, useMemo, type ReactNode } from "react";
 export type Language = "en" | "zh-CN";
 
 const en = {
+  noDifferences: "No differences", emptyFile: "Empty file",
   gitUnavailable: "Git unavailable", searchRepositories: "Search repositories", findRepository: "Find repository…", repositories: "Repositories",
   add: "Add", clone: "Clone", initialize: "Initialize", changes: "Changes", history: "History", branches: "Branches", stashes: "Stashes", workflows: "Workflows",
   fetch: "Fetch", pull: "Pull", push: "Push", more: "More", moreActions: "More actions", batchActions: "Batch actions", refreshAll: "Refresh all", pullMerge: "Pull with merge",
@@ -50,6 +51,7 @@ const en = {
 export type MessageKey = keyof typeof en;
 
 const zh: Record<MessageKey, string> = {
+  noDifferences: "没有差异", emptyFile: "空文件",
   gitUnavailable: "Git 不可用", searchRepositories: "搜索仓库", findRepository: "查找仓库…", repositories: "仓库",
   add: "添加", clone: "克隆", initialize: "初始化", changes: "更改", history: "历史", branches: "分支", stashes: "贮藏", workflows: "工作流",
   fetch: "获取", pull: "拉取", push: "推送", more: "更多", moreActions: "更多操作", batchActions: "批量操作", refreshAll: "刷新全部", pullMerge: "合并式拉取",

@@ -12,8 +12,9 @@ import rust from "refractor/lang/rust";
 import tsx from "refractor/lang/tsx";
 import typescript from "refractor/lang/typescript";
 import yaml from "refractor/lang/yaml";
-import type { DiffFile, DiffHunk, OperationRequest } from "./api";
+import type { CommitFileChange, DiffFile, DiffHunk, OperationRequest } from "./api";
 import { useI18n } from "./i18n";
+import { ChangedFileList } from "./components/ChangedFileList";
 import type { OperationFinished } from "./types";
 
 [bash, ini, json, jsx, markdown, python, rust, typescript, tsx, yaml].forEach(refractor.register);
@@ -92,7 +93,7 @@ function firstChangeHunks(fileHunks: { changes: ChangeData[] }[], owned: DiffHun
   return first;
 }
 
-function FileDiff({ diff, snapshotId, busy, onHunk, onRun }: { diff: DiffFile; snapshotId?: number; busy: boolean; onHunk: (type: "stageHunk" | "unstageHunk" | "discardHunk", hunkId: string) => void; onRun: (request: OperationRequest, onFinished?: OperationFinished) => void | Promise<void> }) {
+function FileDiff({ diff, snapshotId, busy, onHunk, onRun, readOnly }: { diff: DiffFile; snapshotId?: number; busy: boolean; onHunk: (type: "stageHunk" | "unstageHunk" | "discardHunk", hunkId: string) => void; onRun: (request: OperationRequest, onFinished?: OperationFinished) => void | Promise<void>; readOnly?: boolean }) {
   const { t } = useI18n();
   const file = useMemo(() => {
     const start = diff.patch.indexOf("diff --git ");
@@ -102,12 +103,12 @@ function FileDiff({ diff, snapshotId, busy, onHunk, onRun }: { diff: DiffFile; s
   const tokens = useMemo(() => file && language ? tokenize(file.hunks, { highlight: true, refractor, language }) : null, [file, language]);
   const preamble = diff.patch.slice(0, diff.patch.indexOf("@@")).trimEnd();
   const islandStarts = useMemo(() => file ? firstChangeHunks(file.hunks, diff.hunks) : new Map<string, DiffHunk>(), [file, diff.hunks]);
-  if (diff.binary || diff.tooLarge) return <div className="canvas-empty"><h2>{diff.binary ? t("binaryDiff") : t("diffTooLarge")}</h2><button onClick={() => onRun({ type: "runDifftool", path: diff.path, staged: diff.staged })}>{t("openDifftool")}</button></div>;
+  if (diff.binary || diff.tooLarge) return <div className="canvas-empty"><h2>{diff.binary ? t("binaryDiff") : t("diffTooLarge")}</h2>{!readOnly && <button onClick={() => onRun({ type: "runDifftool", path: diff.path, staged: diff.staged })}>{t("openDifftool")}</button>}</div>;
   if (!file?.hunks.length) return <div className="raw-diff">{diff.patch.split("\n").map((line, index) => <div className="meta" key={index}><span>{index + 1}</span><code>{line || " "}</code></div>)}</div>;
   return <Diff diffType={file.type} hunks={file.hunks} viewType="unified" tokens={tokens} className="gitdock-diff" renderGutter={({ change, side }) => {
     if (side === "old") {
       const owned = islandStarts.get(getChangeKey(change));
-      if (!owned || snapshotId == null) return null;
+      if (readOnly || !owned || snapshotId == null) return null;
       if (diff.staged) return <button type="button" className="diff-stage unstage" aria-label={t("unstageHunk")} disabled={busy} onClick={() => onHunk("unstageHunk", owned.id)}>−</button>;
       return <span className="diff-hunk-actions"><button type="button" className="diff-stage" aria-label={t("stageHunk")} disabled={busy} onClick={() => onHunk("stageHunk", owned.id)}>+</button><button type="button" className="diff-stage discard" aria-label={t("discardHunk")} disabled={busy} onClick={() => onHunk("discardHunk", owned.id)}>↶</button></span>;
     }
@@ -131,4 +132,34 @@ export function DiffView({ diff, companionDiff, snapshotId, onBack, onRun, onHun
   };
   const label = (section: DiffFile) => section.staged ? "INDEX ↔ HEAD" : "WORKTREE ↔ INDEX";
   return <div className="diff-view"><header className="canvas-header"><button onClick={onBack}>← {t("back")}</button><strong>{diff.path}</strong>{fileActions && <div className="file-actions"><button onClick={() => onFileHistory?.(diff.path)}>{t("fileHistory")}</button><button onClick={() => onBlame?.(diff.path)}>{t("blame")}</button></div>}<span>{caption ?? (companionDiff ? undefined : label(diff))}</span></header><div className="diff-lines">{sections.map((section) => <section className="diff-section" key={section.staged ? "staged" : "unstaged"}>{companionDiff && <div className="diff-section-label">{label(section)}</div>}<FileDiff diff={section} snapshotId={snapshotId} busy={hunkBusy} onHunk={runHunk} onRun={onRun} /></section>)}</div></div>;
+}
+
+export function BranchComparisonView({ comparison, onBack }: { comparison: { patch: string }; onBack: () => void }) {
+  const { t } = useI18n();
+  const files = useMemo(() => comparison.patch.split(/(?=^diff --git )/m).filter((patch) => patch.startsWith("diff --git ")).map((patch) => {
+    const file = parseDiff(patch)[0];
+    const binary = file.isBinary || /^Binary files .+ differ$/m.test(patch);
+    let additions = 0;
+    let deletions = 0;
+    for (const hunk of file.hunks) {
+      for (const change of hunk.changes) {
+        if (change.type === "insert") additions += 1;
+        if (change.type === "delete") deletions += 1;
+      }
+    }
+    return {
+      path: file.type === "delete" ? file.oldPath : file.newPath,
+      originalPath: file.type === "rename" || file.type === "copy" ? file.oldPath : null,
+      additions: binary ? null : additions, deletions: binary ? null : deletions,
+      staged: false, binary, tooLarge: false, patch, hunks: [],
+    } satisfies DiffFile & CommitFileChange;
+  }), [comparison]);
+  const [selection, setSelection] = useState<{ comparison: typeof comparison; path: string }>();
+  const selected = selection?.comparison === comparison ? files.find((file) => file.path === selection.path) : undefined;
+  return <div className="branch-comparison">
+    <header className="canvas-header"><button onClick={selected ? () => setSelection(undefined) : onBack}>← {t("back")}</button><strong>{selected?.path ?? t("branchComparison")}</strong>{selected && <span>{t("branchComparison")}</span>}</header>
+    {files.length === 0 ? <div className="canvas-empty" role="status">{t("noDifferences")}</div> : selected ?
+      <section className="diff-lines" aria-label={selected.path}><section className="diff-section"><FileDiff diff={selected} busy={false} onHunk={() => {}} onRun={() => {}} readOnly /></section></section> :
+      <ChangedFileList files={files} onOpenFile={(path) => setSelection({ comparison, path })} />}
+  </div>;
 }

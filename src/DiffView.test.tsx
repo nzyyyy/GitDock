@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import type { DiffFile, OperationRequest } from "./api";
-import { DiffView } from "./DiffView";
+import { BranchComparisonView, DiffView } from "./DiffView";
 import { I18nProvider } from "./i18n";
 
 const patch = "diff --git a/src/file.ts b/src/file.ts\n--- a/src/file.ts\n+++ b/src/file.ts\n@@ -2,3 +2,2 @@\n-const oldValue = 1;\n-const removed = true;\n+const newValue = 2;\n context\n\\ No newline at end of file";
@@ -103,4 +103,60 @@ test.each([["binary", { binary: true, tooLarge: false }, "Binary diff"], ["too l
   render(<View value={{ ...diff, ...state }} />);
   expect(screen.getByRole("heading", { name: message })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Open configured difftool" })).toBeInTheDocument();
+});
+
+
+test("branch comparison selects every file, including metadata and binary changes, without write actions", () => {
+  const comparison = { patch: "merge base abc\n\n" + patch + "\n" + [
+    "diff --git a/new.ts b/new.ts\nnew file mode 100644\n--- /dev/null\n+++ b/new.ts\n@@ -0,0 +1 @@\n+const created = 42;\n",
+    "diff --git a/deleted.txt b/deleted.txt\ndeleted file mode 100644\n--- a/deleted.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n",
+    "diff --git a/old.txt b/renamed.txt\nsimilarity index 100%\nrename from old.txt\nrename to renamed.txt\n",
+    "diff --git a/image.png b/image.png\nindex 1111111..2222222 100644\nBinary files a/image.png and b/image.png differ\n",
+    "diff --git a/script.sh b/script.sh\nold mode 100644\nnew mode 100755\n",
+  ].join("") };
+  const onBack = vi.fn();
+  const view = (value: { patch: string }) => <I18nProvider language="en"><BranchComparisonView comparison={value} onBack={onBack} /></I18nProvider>;
+  const { rerender } = render(view(comparison));
+  expect(screen.getByText("Changed files")).toBeInTheDocument();
+  expect(document.querySelector(".commit-detail-files .pane-title code")).toHaveTextContent("6");
+  expect(document.querySelector(".diff-lines")).not.toBeInTheDocument();
+  const rows = [...document.querySelectorAll(".commit-file-row")];
+  expect(rows[0]).toHaveTextContent("file.ts");
+  expect(rows[0]).toHaveTextContent("src/file.ts");
+  expect(rows[0].querySelector(".commit-stat-add")).toHaveTextContent("+1");
+  expect(rows[0].querySelector(".commit-stat-del")).toHaveTextContent("−2");
+  expect(rows[1].querySelector(".commit-file-stats")).toHaveTextContent("+1−0");
+  expect(rows[2].querySelector(".commit-file-stats")).toHaveTextContent("+0−1");
+  expect(rows[3]).toHaveTextContent("old.txt → renamed.txt");
+  expect(rows[3].querySelector(".commit-file-stats")).toHaveTextContent("+0−0");
+  expect(rows[4].querySelector(".commit-file-binary")).toBeInTheDocument();
+  expect(rows[5].querySelector(".commit-file-stats")).toHaveTextContent("+0−0");
+  const back = () => fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+  const open = (path: string) => fireEvent.click(screen.getByRole("button", { name: (name) => name.includes(path) }));
+  open("new.ts");
+  expect(document.querySelector(".commit-file-list")).not.toBeInTheDocument();
+  expect(document.querySelector(".diff-code-insert")).toHaveTextContent("const created = 42;");
+  expect(document.querySelector(".token.keyword")).toBeInTheDocument();
+  back();
+  expect(onBack).not.toHaveBeenCalled();
+  open("deleted.txt");
+  expect(document.querySelector(".diff-code-delete")).toHaveTextContent("gone");
+  back();
+  open("renamed.txt");
+  expect(screen.getByText("rename from old.txt")).toBeInTheDocument();
+  back();
+  open("image.png");
+  expect(screen.getByRole("heading", { name: "Binary diff" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /difftool/ })).not.toBeInTheDocument();
+  back();
+  open("script.sh");
+  expect(screen.getByText("new mode 100755")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /hunk/ })).not.toBeInTheDocument();
+  rerender(view({ ...comparison }));
+  expect(document.querySelector(".diff-lines")).not.toBeInTheDocument();
+  expect(document.querySelectorAll(".commit-file-row")).toHaveLength(6);
+  back();
+  expect(onBack).toHaveBeenCalledTimes(1);
+  rerender(view({ patch: "merge base abc\n\n" }));
+  expect(screen.getByRole("status")).toHaveTextContent("No differences");
 });

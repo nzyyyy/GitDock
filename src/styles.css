@@ -146,3 +146,7 @@ code { font-family: "SFMono-Regular", Menlo, monospace; font-size: 11px; }
 
 .file-history-view { height: 100%; min-height: 0; display: grid; grid-template-rows: 38px minmax(0, auto) minmax(0, 1fr); }.file-history-view .object-list { border-bottom: 1px solid var(--line); max-height: 40%; }.file-history-view .raw-diff { min-height: 0; overflow: auto; margin: 0; }.file-actions { display: flex; gap: 4px; }.file-actions button { min-height: 22px; font-size: 9px; }
 .blame-view { height: 100%; min-height: 0; display: grid; grid-template-rows: 38px minmax(0, 1fr); }.blame-list { min-height: 0; overflow: auto; font: 11px/1.5 "SFMono-Regular", Menlo, monospace; }.blame-row { display: grid; grid-template-columns: 210px 44px minmax(0, 1fr); min-width: 640px; border-bottom: 1px solid var(--line); }.blame-row > span { padding: 1px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.blame-author { color: var(--muted); font-size: 9px; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; border-right: 1px solid var(--line); background: var(--canvas); }.blame-line-number { text-align: right; color: var(--muted); border-right: 1px solid var(--line); font-variant-numeric: tabular-nums; }.blame-row code { padding: 1px 8px; white-space: pre; }
+
+.branch-comparison { height: 100%; min-height: 0; display: grid; grid-template-rows: 38px minmax(0, 1fr); }
+
+.branch-comparison > .canvas-empty { grid-row: 2 / -1; }

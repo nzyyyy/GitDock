@@ -1,6 +1,5 @@
 import { useCallback, useRef, useState } from "react";
 import { api, type CommitDetail, type ConflictDocument, type DiffFile, type FileChange, type RepositorySummary, type WorkingTreeSnapshot } from "../api";
-import { translate } from "../i18n";
 import { errorMessage } from "../types";
 
 async function loadFileDiffs(repositoryId: number, snapshotId: number, file: FileChange) {
@@ -11,15 +10,15 @@ async function loadFileDiffs(repositoryId: number, snapshotId: number, file: Fil
 }
 
 export function useWorkingTree({
-  reportError, selectedIdRef, selectedId, language, setRepositoriesRef,
+  reportError, selectedIdRef, selectedId, setRepositoriesRef,
 }: {
   reportError: (message: string) => void;
   selectedIdRef: React.MutableRefObject<number | undefined>;
   selectedId?: number;
-  language: "en" | "zh-CN";
   setRepositoriesRef: React.MutableRefObject<React.Dispatch<React.SetStateAction<RepositorySummary[]>>>;
 }) {
   const [snapshot, setSnapshot] = useState<WorkingTreeSnapshot>();
+  const [branchComparison, setBranchComparison] = useState<{ patch: string }>();
   const [diff, setDiff] = useState<DiffFile>();
   const [companionDiff, setCompanionDiff] = useState<DiffFile>();
   const [diffSnapshotId, setDiffSnapshotId] = useState<number>();
@@ -36,7 +35,7 @@ export function useWorkingTree({
   diffRef.current = diff;
 
   const clearFileDiff = () => {
-    setDiff(undefined); setCompanionDiff(undefined); setDiffSnapshotId(undefined); setDiffIsFile(false);
+    setBranchComparison(undefined); setDiff(undefined); setCompanionDiff(undefined); setDiffSnapshotId(undefined); setDiffIsFile(false);
   };
 
   const showFileDiffs = (sides: DiffFile[], snapshotId: number) => {
@@ -144,16 +143,13 @@ export function useWorkingTree({
     catch (error) { if (request === detailRequest.current && selectedIdRef.current === repositoryId) reportError(errorMessage(error)); }
   }, [selectedId, selectedCommit, detailKind, reportError, selectedIdRef]);
 
-  const showBranchDiff = useCallback((value: string) => {
-    setConflict(undefined);
-    setCompanionDiff(undefined);
-    setDiffSnapshotId(undefined);
-    setDiffIsFile(false);
-    setDiff({ path: translate(language, "branchComparison"), staged: false, binary: false, tooLarge: false, patch: value, hunks: [] });
-  }, [language]);
+  const showBranchDiff = useCallback((patch: string) => {
+    closeDiff();
+    setBranchComparison({ patch });
+  }, [closeDiff]);
 
   return {
-    snapshot, setSnapshot, diff, companionDiff, diffSnapshotId, conflict, setConflict, selectedCommit, commitDetail, detailKind, diffIsFile,
+    branchComparison, snapshot, setSnapshot, diff, companionDiff, diffSnapshotId, conflict, setConflict, selectedCommit, commitDetail, detailKind, diffIsFile,
     statusRequest, refreshStatus, reloadOpenDiff, openDiff, closeDiff, closeCommitFile, openCommit, openStash, openCommitFile, showBranchDiff,
   };
 }

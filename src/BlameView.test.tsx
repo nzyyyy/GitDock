@@ -25,3 +25,16 @@ test("renders content lines with hunk authors and line numbers", () => {
   expect(document.querySelector(".blame-author")).toHaveTextContent(new Intl.DateTimeFormat("en").format(new Date(0)));
   expect(screen.getAllByText("1").length).toBeGreaterThan(0);
 });
+
+
+test("distinguishes loading, failure and empty blame without showing stale content", () => {
+  const view = (loading: boolean, error?: string) => <I18nProvider language="en"><BlameView path="next.ts" blame={blame} loading={loading} error={error} onBack={vi.fn()} /></I18nProvider>;
+  const { rerender } = render(view(true));
+  expect(screen.getByRole("status")).toHaveTextContent("Loading…");
+  expect(screen.queryByText("a")).not.toBeInTheDocument();
+  rerender(view(false, "cannot read file"));
+  expect(screen.getByRole("alert")).toHaveTextContent("cannot read file");
+  expect(screen.queryByText("a")).not.toBeInTheDocument();
+  rerender(<I18nProvider language="en"><BlameView blame={{ ...blame, content: [], hunks: [] }} onBack={vi.fn()} /></I18nProvider>);
+  expect(screen.getByRole("status")).toHaveTextContent("Empty file");
+});

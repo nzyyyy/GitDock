@@ -1790,3 +1790,67 @@ test("shows every remote URL with a direction icon", async () => {
   expect(mirrorLines).toHaveLength(1);
   expect(mirrorLines[0].closest(".remote-url")).toHaveTextContent("⇅");
 });
+
+
+test.each(["tab", "keyboard", "palette", "repository", "file"])("leaves file inspection through %s navigation and ignores its late response", async (navigation) => {
+  const repositories = [1, 2].map((id) => ({ id, path: `/repo${id}`, name: `Repo${id}`, favorite: false, order: id, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "a".repeat(40), changedCount: 1, conflictCount: 0, ahead: 0, behind: 0 }));
+  let resolveHistory!: (value: unknown[]) => void;
+  const pendingHistory = new Promise<unknown[]>((resolve) => { resolveHistory = resolve; });
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true }, settings: { leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, files: [{ path: "file.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
+    if (command === "get_file_history") return pendingHistory;
+    if (command === "get_history") return Promise.resolve({ commits: [], nextCursor: null });
+    if (command === "get_diff") return Promise.resolve({ path: "file.ts", staged: false, binary: false, tooLarge: false, patch: "current diff", hunks: [] });
+    return Promise.resolve([]);
+  });
+  render(<App />);
+  await selectFirstRepository();
+  await screen.findByText("file.ts");
+  fireEvent.click(document.querySelector<HTMLButtonElement>(".file-row .row-menu-popover button")!);
+  expect(screen.getByText("History of file.ts")).toBeInTheDocument();
+  expect(screen.queryByText("No history for this file")).not.toBeInTheDocument();
+  if (navigation === "tab") fireEvent.click(screen.getByRole("tab", { name: "History" }));
+  if (navigation === "keyboard") fireEvent.keyDown(screen.getByRole("tab", { name: "Changes" }), { key: "ArrowRight" });
+  if (navigation === "palette") {
+    fireEvent.keyDown(window, { key: "k", metaKey: true });
+    const input = await screen.findByRole("combobox", { name: "Search commands…" });
+    fireEvent.change(input, { target: { value: "History" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+  }
+  if (navigation === "repository") {
+    fireEvent.click(document.querySelector<HTMLButtonElement>("[data-repository-id='2'] .repo-row")!);
+    fireEvent.click(document.querySelector<HTMLButtonElement>("[data-repository-id='1'] .repo-row")!);
+  }
+  if (navigation === "file") fireEvent.click(document.querySelector<HTMLButtonElement>(".file-row .file-main")!);
+  await act(async () => { resolveHistory([{ oid: "late", subject: "obsolete", author: "Old", authoredAt: "2026-01-01" }]); });
+  expect(screen.queryByText("History of file.ts")).not.toBeInTheDocument();
+  expect(screen.queryByText("obsolete")).not.toBeInTheDocument();
+  if (navigation === "file") expect(await screen.findByText("current diff")).toBeInTheDocument();
+});
+
+
+test("opens complete branch comparisons through the branch menu", async () => {
+  const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0 };
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true }, settings: { leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, files: [] });
+    if (command === "get_branches") return Promise.resolve([{ name: "main", current: true, remote: false, oid: "aaaa" }, { name: "feature", current: false, remote: false, oid: "bbbb" }]);
+    if (command === "compare_branches") return Promise.resolve("merge base aaaa\n\n" + ["first.txt", "second.txt"].map((path) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old\n+${path} content\n`).join(""));
+    return Promise.resolve([]);
+  });
+  render(<App />);
+  await selectFirstRepository();
+  fireEvent.click(screen.getByRole("tab", { name: "Branches" }));
+  await screen.findByText("feature");
+  fireEvent.click([...document.querySelectorAll<HTMLButtonElement>(".row-menu-popover button")].find((button) => button.textContent === "Compare")!);
+  expect(await screen.findByText("Changed files")).toBeInTheDocument();
+  expect(document.querySelectorAll(".commit-file-row")).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: /second\.txt/ }));
+  expect(screen.getByText("second.txt content")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+  expect(document.querySelectorAll(".commit-file-row")).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+  expect(document.querySelector(".branch-comparison")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Stage hunk" })).not.toBeInTheDocument();
+});
