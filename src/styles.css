@@ -150,3 +150,5 @@ code { font-family: "SFMono-Regular", Menlo, monospace; font-size: 11px; }
 .branch-comparison { height: 100%; min-height: 0; display: grid; grid-template-rows: 38px minmax(0, 1fr); }
 
 .branch-comparison > .canvas-empty { grid-row: 2 / -1; }
+
+.working-tree-title { display: flex; align-items: center; gap: 6px; white-space: nowrap; }

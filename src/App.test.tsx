@@ -809,10 +809,25 @@ test("stages and unstages multiple selected files", async () => {
 
   render(<App />);
   await selectFirstRepository();
-  fireEvent.click(await screen.findByRole("checkbox", { name: "Select all Unstaged" }));
-  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage new.ts" }));
-  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to unstage staged.ts" }));
-  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage or unstage mixed.ts" }));
+  const selectAll = await screen.findByRole("checkbox", { name: "Select all Working tree" });
+  expect(selectAll).not.toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: /Unstaged.*2/ }));
+  fireEvent.click(selectAll);
+  expect(selectAll).toBeChecked();
+  expect(selectAll).not.toBePartiallyChecked();
+  expect(screen.getByRole("checkbox", { name: "Select all Unstaged" })).toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: /Unstaged.*2/ }));
+  expect(screen.getByRole("checkbox", { name: "Select file to stage one.ts" })).toBeChecked();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage one.ts" }));
+  expect(selectAll).toBePartiallyChecked();
+  fireEvent.click(selectAll);
+  expect(selectAll).toBeChecked();
+  fireEvent.click(selectAll);
+  expect(selectAll).not.toBeChecked();
+  expect(screen.queryByRole("button", { name: /Stage selected/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select all Unstaged" }));
+  expect(selectAll).toBePartiallyChecked();
+  fireEvent.click(selectAll);
   expect(screen.getByRole("button", { name: "Stage selected (4)" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /Unstage selected/ })).not.toBeInTheDocument();
   expect(batchMenuItem("Unstage selected (2)")).toBeEnabled();
@@ -820,6 +835,11 @@ test("stages and unstages multiple selected files", async () => {
   expect(batchMenuItem("Trash (1)")).toBeEnabled();
   fireEvent.click(batchMenuItem("Unstage selected (2)")!);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "unstageFiles", paths: ["staged.ts", "mixed.ts"] } }));
+  expect(selectAll).not.toBeChecked();
+  expect(selectAll).not.toBePartiallyChecked();
+  fireEvent.click(selectAll);
+  fireEvent.click(screen.getByRole("button", { name: "Stage selected (4)" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "stageFiles", paths: ["mixed.ts", "one.ts", "two.ts", "new.ts"] } }));
 
   fireEvent.click(screen.getByRole("checkbox", { name: "Select all Unstaged" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "Select file to stage new.ts" }));
