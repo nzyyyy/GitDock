@@ -20,12 +20,18 @@ pub(crate) fn get_history(
     repository_id: RepositoryId,
     cursor: Option<HistoryCursor>,
     limit: usize,
+    branch_ref: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<CommitPage, String> {
     validate_history_cursor(&cursor)?;
     let git = state.git()?;
     let record = state.record(repository_id)?;
-    git.history(Path::new(&record.path), cursor, limit.clamp(1, 200))
+    git.history(
+        Path::new(&record.path),
+        cursor,
+        limit.clamp(1, 200),
+        branch_ref.as_deref(),
+    )
 }
 
 fn validate_history_cursor(cursor: &Option<HistoryCursor>) -> Result<(), String> {

@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { CommitInfo } from "../api";
+import type { BranchInfo, CommitInfo } from "../api";
 import { useI18n } from "../i18n";
 import { GRAPH_EDGE_BUCKET_ROWS, shortOid, type RunOperation } from "../types";
 import { RowMenu } from "./RepositoryPane";
@@ -11,9 +11,10 @@ function formatRelativeTime(value: string, formatter: Intl.RelativeTimeFormat) {
   return formatter.format(Math.trunc(delta / milliseconds), unit);
 }
 
-function useVirtualRows(count: number, rowHeight: number, overscan = 12) {
+function useVirtualRows(count: number, rowHeight: number, overscan = 12, resetKey?: string) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: Math.min(count, 40) });
+  useEffect(() => { if (containerRef.current) containerRef.current.scrollTop = 0; }, [resetKey]);
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -30,7 +31,7 @@ function useVirtualRows(count: number, rowHeight: number, overscan = 12) {
     container.addEventListener("scroll", scheduleUpdate, { passive: true });
     window.addEventListener("resize", scheduleUpdate);
     return () => { container.removeEventListener("scroll", scheduleUpdate); window.removeEventListener("resize", scheduleUpdate); if (frame !== undefined) window.cancelAnimationFrame(frame); };
-  }, [count, rowHeight, overscan]);
+  }, [count, rowHeight, overscan, resetKey]);
   return { containerRef, ...range, totalHeight: count * rowHeight };
 }
 
@@ -71,11 +72,13 @@ export function HistoryCanvas({ commits, selectedOid, onSelect }: { commits: Com
   </svg>{commits.slice(start, end).map((commit, index) => <button style={{ position: "absolute", top: (start + index) * rowHeight }} className={`graph-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid} onClick={() => onSelect(commit.oid)}><span /><code>{shortOid(commit.oid)}</code><div className="graph-subject"><strong>{commit.subject}</strong>{commit.refs.map((reference) => <span className={`ref-label ${reference.startsWith("tag: ") ? "tag" : ""}`} key={reference}>{reference}</span>)}</div><span>{commit.author}</span><time dateTime={commit.authoredAt}>{dateFormatter.format(new Date(commit.authoredAt))}</time></button>)}</div></div></div>;
 }
 
-export function HistoryPane({ commits, selectedOid, loading, hasMore, onLoadMore, onSelect, onRun }: { commits: CommitInfo[]; selectedOid?: string; loading: boolean; hasMore: boolean; onLoadMore: () => void; onSelect: (oid: string) => void; onRun: RunOperation }) {
+export function HistoryPane({ branches, branchRef, onBranchChange, commits, selectedOid, loading, hasMore, onLoadMore, onSelect, onRun }: { branches: BranchInfo[]; branchRef: string | null; onBranchChange: (reference: string | null) => void; commits: CommitInfo[]; selectedOid?: string; loading: boolean; hasMore: boolean; onLoadMore: () => void; onSelect: (oid: string) => void; onRun: RunOperation }) {
   const { language, t } = useI18n();
+  const [branchSearch, setBranchSearch] = useState("");
+  const matchingBranches = branches.filter((branch) => branch.name.toLowerCase().includes(branchSearch.trim().toLowerCase()));
   const relativeTimeFormatter = useMemo(() => new Intl.RelativeTimeFormat(language, { numeric: "auto" }), [language]);
   const rowHeight = 45;
-  const { containerRef, start, end, totalHeight } = useVirtualRows(commits.length, rowHeight);
+  const { containerRef, start, end, totalHeight } = useVirtualRows(commits.length, rowHeight, 12, branchRef ?? "");
   const loadMoreRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const target = loadMoreRef.current;
@@ -84,7 +87,7 @@ export function HistoryPane({ commits, selectedOid, loading, hasMore, onLoadMore
     observer.observe(target);
     return () => observer.disconnect();
   }, [hasMore, onLoadMore, containerRef]);
-  return <div className="history-pane"><div className="pane-title"><span>{t("commits")}</span><code>{commits.length}</code></div><div ref={containerRef} className="object-list">{loading && !commits.length ? <div className="skeleton-list" role="status" aria-label={t("loading")}>{[0, 1, 2, 3, 4, 5].map((index) => <div className="skeleton-row object" key={index} />)}</div> : <div className="virtual-history" style={{ height: totalHeight + (hasMore ? 45 : 0) }}>{commits.slice(start, end).map((commit, index) => <div style={{ position: "absolute", top: (start + index) * rowHeight, width: "100%", height: rowHeight }} className={`object-action-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid}><button onClick={() => onSelect(commit.oid)}><strong>{commit.subject}</strong><span>{commit.author} · {shortOid(commit.oid)} · <time dateTime={commit.authoredAt}>{formatRelativeTime(commit.authoredAt, relativeTimeFormatter)}</time></span></button><RowMenu context label={t("moreActions")} glyph="•••"><button onClick={() => onRun({ type: "cherryPick", commits: [commit.oid] })}>{t("cherryPick")}</button>{commit.parents.length === 1 && <button onClick={() => onRun({ type: "revert", oid: commit.oid })}>{t("revert")}</button>}</RowMenu></div>)}{hasMore && <button ref={loadMoreRef} style={{ position: "absolute", top: totalHeight }} className="load-more" disabled={loading} onClick={onLoadMore}>{loading ? t("loading") : t("loadMore")}</button>}</div>}</div></div>;
+  return <div className="history-pane"><div className="pane-title history-title"><span>{t("commits")}</span><div className="history-branch-filter"><RowMenu label={t("historyBranch")} glyph={<><span title={branchRef ?? t("allBranches")}>{branches.find((branch) => `refs/${branch.remote ? "remotes" : "heads"}/${branch.name}` === branchRef)?.name ?? t("allBranches")}</span><span aria-hidden="true">⌄</span></>}><input type="search" className="history-branch-search" aria-label={t("searchBranches")} placeholder={t("findBranch")} value={branchSearch} onChange={(event) => setBranchSearch(event.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} /><button aria-pressed={branchRef === null} onClick={() => onBranchChange(null)}>{t("allBranches")}</button>{[false, true].filter((remote) => matchingBranches.some((branch) => branch.remote === remote)).map((remote) => <div role="group" key={String(remote)} aria-label={t(remote ? "remoteBranches" : "localBranches")}><div className="history-branch-group">{t(remote ? "remoteBranches" : "localBranches")}</div>{matchingBranches.filter((branch) => branch.remote === remote).map((branch) => { const reference = `refs/${remote ? "remotes" : "heads"}/${branch.name}`; return <button key={reference} title={branch.name} aria-pressed={branchRef === reference} onClick={() => onBranchChange(reference)}>{branch.name}{branch.current ? ` (${t("checkedOutBranch")})` : ""}</button>; })}</div>)}{!matchingBranches.length && <div className="history-branch-empty" role="status">{t(branchSearch.trim() ? "noMatchingBranches" : "noBranches")}</div>}</RowMenu></div><code>{commits.length}</code></div><div ref={containerRef} className="object-list">{loading && !commits.length ? <div className="skeleton-list" role="status" aria-label={t("loading")}>{[0, 1, 2, 3, 4, 5].map((index) => <div className="skeleton-row object" key={index} />)}</div> : <div className="virtual-history" style={{ height: totalHeight + (hasMore ? 45 : 0) }}>{commits.slice(start, end).map((commit, index) => <div style={{ position: "absolute", top: (start + index) * rowHeight, width: "100%", height: rowHeight }} className={`object-action-row ${selectedOid === commit.oid ? "selected" : ""}`} key={commit.oid}><button onClick={() => onSelect(commit.oid)}><strong>{commit.subject}</strong><span>{commit.author} · {shortOid(commit.oid)} · <time dateTime={commit.authoredAt}>{formatRelativeTime(commit.authoredAt, relativeTimeFormatter)}</time></span></button><RowMenu context label={t("moreActions")} glyph="•••"><button onClick={() => onRun({ type: "cherryPick", commits: [commit.oid] })}>{t("cherryPick")}</button>{commit.parents.length === 1 && <button onClick={() => onRun({ type: "revert", oid: commit.oid })}>{t("revert")}</button>}</RowMenu></div>)}{hasMore && <button ref={loadMoreRef} style={{ position: "absolute", top: totalHeight }} className="load-more" disabled={loading} onClick={onLoadMore}>{loading ? t("loading") : t("loadMore")}</button>}</div>}</div></div>;
 }
 
 export const MemoHistoryCanvas = memo(HistoryCanvas);

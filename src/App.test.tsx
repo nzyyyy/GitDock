@@ -316,6 +316,7 @@ test("renders history topology and ref labels", async () => {
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    if (command === "get_branches") return Promise.resolve([]);
     if (command === "get_history") return Promise.resolve({ commits: [
       { oid: "aaaaaaaa", parents: ["bbbbbbbb", "cccccccc"], author: "Ada", authoredAt: "2026-08-18T07:00:00Z", subject: "Merge feature with a long message that stays on one line", refs: ["HEAD -> main", "tag: v1.0"], lane: { column: 0, parentColumns: [0, 2] } },
       { oid: "bbbbbbbb", parents: ["dddddddd"], author: "Ada", authoredAt: "2026-08-17T12:00:00Z", subject: "Main work", refs: [], lane: { column: 0, parentColumns: [0] } },
@@ -370,6 +371,7 @@ test("loads more history without losing the selected commit", async () => {
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
     if (command === "get_history" && args && "cursor" in args && args.cursor && (args.cursor as { offset: number }).offset === 100) return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Older", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: undefined });
+    if (command === "get_branches") return Promise.resolve([]);
     if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Selected", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: { offset: 100, activeLanes: [] } });
     if (command === "get_commit_detail") return Promise.resolve({ oid: "aaaaaaaa", author: "Ada", email: "ada@example.com", authoredAt: "2026-08-09T00:00:00Z", message: "Selected", files: [{ path: "a.txt", originalPath: null, additions: 1, deletions: 0 }] });
     return Promise.resolve([]);
@@ -383,7 +385,7 @@ test("loads more history without losing the selected commit", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Load more" }));
   expect((await screen.findAllByText("Older")).length).toBeGreaterThan(0);
   expect(screen.getAllByRole("button", { name: /Selected/ }).some((button) => button.classList.contains("selected") || button.parentElement?.classList.contains("selected"))).toBe(true);
-  expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 100, activeLanes: [] }, limit: 100 });
+  expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 100, activeLanes: [] }, limit: 100, branchRef: null });
 });
 
 test("opens commit details then a file diff", async () => {
@@ -394,6 +396,7 @@ test("opens commit details then a file diff", async () => {
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaaaaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaaaaaaaaaa", files: [] });
+    if (command === "get_branches") return Promise.resolve([]);
     if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaaaaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Selected", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: null });
     if (command === "get_commit_detail") return Promise.resolve({
       oid: "aaaaaaaaaaaaaaaa",
@@ -492,6 +495,7 @@ test("hides pagination when switching to a repository without another page", asy
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
     if (command === "get_history" && args && "repositoryId" in args && args.repositoryId === 2) return Promise.resolve({ commits: [{ oid: "bbbbbbbb", parents: [], author: "Lin", authoredAt: "2026-08-08T00:00:00Z", subject: "Small history", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: null });
+    if (command === "get_branches") return Promise.resolve([]);
     if (command === "get_history") return Promise.resolve({ commits: [{ oid: "aaaaaaaa", parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", subject: "Large history", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: { offset: 100, activeLanes: [] } });
     return Promise.resolve([]);
   });
@@ -505,7 +509,7 @@ test("hides pagination when switching to a repository without another page", asy
   expect((await screen.findAllByText("Small history")).length).toBeGreaterThan(0);
   expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
   const smallHistoryCalls = vi.mocked(invoke).mock.calls.filter(([command, args]) => command === "get_history" && args && "repositoryId" in args && args.repositoryId === 2);
-  expect(smallHistoryCalls).toEqual([["get_history", { repositoryId: 2, cursor: null, limit: 100 }]]);
+  expect(smallHistoryCalls).toEqual([["get_history", { repositoryId: 2, cursor: null, limit: 100, branchRef: null }]]);
 });
 
 test("reloads history after leaving during the initial request", async () => {
@@ -517,6 +521,7 @@ test("reloads history after leaving during the initial request", async () => {
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "aaaaaaaa", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "aaaaaaaa", files: [] });
+    if (command === "get_branches") return Promise.resolve([]);
     if (command === "get_history") {
       historyCalls += 1;
       if (historyCalls === 1) return new Promise(() => {});
@@ -737,6 +742,7 @@ test("supports keyboard workflow tabs and layout separators", async () => {
       repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    if (command === "get_branches") return Promise.resolve([]);
     if (command === "get_history") return Promise.resolve({ commits: [], nextCursor: null });
     return Promise.resolve(undefined);
   });
@@ -1213,6 +1219,7 @@ test("refreshes both history views after a successful commit only", async () => 
     });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [{ path: "src/file.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false }] });
     if (command === "refresh_repository") return Promise.resolve({ summary: { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "12345678", changedCount: 1, conflictCount: 0, ahead: 1, behind: 0 }, snapshot: { id: 3, repositoryId: 1, headOid: "12345678", files: [{ path: "src/file.ts", kind: "modified", staged: true, unstaged: false, conflict: false, ignored: false }] } });
+    if (command === "get_branches") return Promise.resolve([]);
     if (command === "get_history") {
       historyCalls += 1;
       if (args && "cursor" in args && args.cursor) return new Promise((resolve) => { resolveStalePage = resolve; });
@@ -1293,6 +1300,7 @@ test("refreshes history when the selected repository changes externally", async 
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "11111111", files: [] });
+    if (command === "get_branches") return Promise.resolve([]);
     if (command === "get_history") {
       historyCalls += 1;
       return Promise.resolve({ commits: [{ oid: historyCalls === 1 ? "aaaaaaaa" : "bbbbbbbb", parents: [], author: "Ada", authoredAt: "2026-08-10T00:00:00Z", subject: historyCalls === 1 ? "First" : "Refreshed", refs: [], lane: { column: 0, parentColumns: [] } }], nextCursor: null });
@@ -1310,15 +1318,16 @@ test("refreshes history when the selected repository changes externally", async 
 });
 
 test("refreshes branches when the selected repository changes externally", async () => {
-  let repositoryChanged: ((event: { payload: { repositoryId: number } }) => void) | undefined;
+  const listeners = new Set<(event: { payload: { repositoryId: number } }) => void>();
   let branchCalls = 0;
   const repository = { id: 1, path: "/repo", name: "Repo", favorite: false, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: "11111111", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 };
-  vi.mocked(listen).mockImplementation(((event: string, handler: typeof repositoryChanged) => {
-    if (event === "repository-changed") repositoryChanged = handler;
-    return Promise.resolve(() => {});
+  vi.mocked(listen).mockImplementation(((event: string, handler: (event: { payload: { repositoryId: number } }) => void) => {
+    if (event === "repository-changed") listeners.add(handler);
+    return Promise.resolve(() => { listeners.delete(handler); });
   }) as never);
   vi.mocked(invoke).mockImplementation((command: string) => {
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [repository] });
+    if (command === "refresh_repository") return Promise.resolve({ summary: repository, snapshot: { id: 1, repositoryId: 1, files: [] } });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "11111111", files: [] });
     if (command === "get_branches") {
       branchCalls += 1;
@@ -1335,7 +1344,7 @@ test("refreshes branches when the selected repository changes externally", async
   fireEvent.click(await screen.findByRole("tab", { name: "Branches" }));
   await waitFor(() => expect(document.querySelector(".branch-group .local-branch.current")).toHaveTextContent("main"));
   expect(screen.queryByText("test")).not.toBeInTheDocument();
-  await act(async () => repositoryChanged?.({ payload: { repositoryId: 1 } }));
+  await act(async () => listeners.forEach((handler) => handler({ payload: { repositoryId: 1 } })));
   await waitFor(() => expect(document.querySelector(".branch-group .local-branch.current")).toHaveTextContent("test"));
   expect([...document.querySelectorAll(".object-list .object-copy")].map((row) => ({ name: row.querySelector("strong")?.textContent, current: row.classList.contains("current") }))).toEqual([
     { name: "test", current: true },
@@ -1533,13 +1542,14 @@ test("automatically loads history at the sentinel and keeps the DOM windowed", a
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true, version: "2.50.1", path: "/usr/bin/git" }, settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", headOid: commits[0].oid, changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }] });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, files: [] });
     if (command === "get_history" && args && "cursor" in args && args.cursor) return Promise.resolve({ commits: commits.slice(1), nextCursor: null });
+    if (command === "get_branches") return Promise.resolve([]);
     if (command === "get_history") return Promise.resolve({ commits: commits.slice(0, 1), nextCursor: { offset: 1, activeLanes: [] } });
     return Promise.resolve(undefined);
   });
   render(<App />);
   await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 1, activeLanes: [] }, limit: 100 }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 1, activeLanes: [] }, limit: 100, branchRef: null }));
   await screen.findByText("600 commits loaded");
   expect(document.querySelectorAll(".graph-row").length).toBeLessThan(60);
   expect(document.querySelectorAll(".history-pane .object-action-row").length).toBeLessThan(60);
@@ -1820,6 +1830,7 @@ test.each(["tab", "keyboard", "palette", "repository", "file"])("leaves file ins
     if (command === "bootstrap") return Promise.resolve({ git: { supported: true }, settings: { leftWidth: 240, rightWidth: 360, outputHeight: 190 }, repositories });
     if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, files: [{ path: "file.ts", kind: "modified", staged: false, unstaged: true, conflict: false, ignored: false }] });
     if (command === "get_file_history") return pendingHistory;
+    if (command === "get_branches") return Promise.resolve([]);
     if (command === "get_history") return Promise.resolve({ commits: [], nextCursor: null });
     if (command === "get_diff") return Promise.resolve({ path: "file.ts", staged: false, binary: false, tooLarge: false, patch: "current diff", hunks: [] });
     return Promise.resolve([]);
@@ -1873,4 +1884,114 @@ test("opens complete branch comparisons through the branch menu", async () => {
   fireEvent.click(screen.getByRole("button", { name: /Back/ }));
   expect(document.querySelector(".branch-comparison")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Stage hunk" })).not.toBeInTheDocument();
+});
+
+
+test("filters history and graph by branch and discards stale pages and details", async () => {
+  vi.mocked(invoke).mockClear();
+  const branch = (name: string, remote = false) => ({ name, remote, current: name === "main", oid: "aaaaaaaa", upstream: null });
+  let branches = [branch("main"), branch("feature"), branch("origin/feature", true)];
+  const commit = (subject: string) => ({ oid: subject, subject, parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", refs: [], lane: { column: 0, parentColumns: [] } });
+  const page = (subject: string) => ({ commits: [commit(subject)], nextCursor: { offset: 100, activeLanes: [] } });
+  let stalePage: ((value: unknown) => void) | undefined;
+  let staleDetail: ((value: unknown) => void) | undefined;
+  let staleBranch: ((value: unknown) => void) | undefined;
+  let delayMain = false;
+  let failMain = false;
+  const repositories = [1, 2].map((id) => ({ id, name: `Repo ${id}`, path: `/repo${id}`, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }));
+  const changed: Array<(event: { payload: { repositoryId: number } }) => void> = [];
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof changed[number]) => {
+    if (event === "repository-changed") changed.push(handler);
+    return Promise.resolve(() => { const index = changed.indexOf(handler); if (index >= 0) changed.splice(index, 1); });
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    const input = args as { branchRef?: string; cursor?: unknown; repositoryId?: number };
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true }, settings: {}, repositories: repositories });
+    if (command === "get_status") return Promise.resolve({ id: 1, files: [] });
+    if (command === "refresh_repository") return Promise.resolve({ summary: repositories.find((repo) => repo.id === input.repositoryId), snapshot: { id: 1, files: [] } });
+    if (command === "get_branches") return Promise.resolve(input.repositoryId === 2 ? [] : branches);
+    if (command === "get_commit_detail") return new Promise((resolve) => { staleDetail = resolve; });
+    if (command === "get_history") {
+      if (input.cursor) return new Promise((resolve) => { stalePage = resolve; });
+      if (failMain && input.branchRef === "refs/heads/main") return Promise.reject(new Error("Branch history unavailable"));
+      if (delayMain && input.branchRef === "refs/heads/main") return new Promise((resolve) => { staleBranch = resolve; });
+      return Promise.resolve(input.repositoryId === 2 ? { commits: [], nextCursor: null } : page(input.branchRef ?? "all-history"));
+    }
+    return Promise.resolve([]);
+  });
+  render(<App />);
+  await selectFirstRepository();
+  fireEvent.click(screen.getByRole("tab", { name: "History" }));
+  expect(await screen.findAllByText("all-history")).toHaveLength(2);
+  expect(screen.getByRole("button", { name: "main (current)", hidden: true })).toHaveAttribute("aria-pressed", "false");
+  fireEvent.click(screen.getByRole("button", { name: "History branch" }));
+  const search = screen.getByRole("searchbox", { name: "Search branches", hidden: true });
+  expect(search).toHaveFocus();
+  expectTextAssistanceDisabled(search);
+  const historyCallsBeforeSearch = vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_history").length;
+  fireEvent.change(search, { target: { value: " FEATURE " } });
+  expect(screen.queryByRole("button", { name: "main (current)", hidden: true })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "feature", hidden: true })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "origin/feature", hidden: true })).toBeInTheDocument();
+  fireEvent.change(search, { target: { value: "no-such-branch" } });
+  expect(screen.getByText("No matching branches")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "All branches", hidden: true })).toBeInTheDocument();
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_history")).toHaveLength(historyCallsBeforeSearch);
+  fireEvent.change(search, { target: { value: "" } });
+  expect(screen.getByRole("button", { name: "main (current)", hidden: true })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "History branch" }));
+  const select = (value: string) => {
+    fireEvent.click(screen.getByRole("button", { name: "History branch" }));
+    const name = value === "refs/heads/main" ? "main (current)" : value.replace(/^refs\/(heads|remotes)\//, "") || "All branches";
+    fireEvent.click(screen.getByRole("button", { name, hidden: true }));
+  };
+  screen.getByRole("button", { name: "History branch" }).focus();
+  select("refs/heads/feature");
+  expect(await screen.findAllByText("refs/heads/feature")).toHaveLength(2);
+  expect(screen.getByRole("button", { name: "History branch" })).toHaveFocus();
+  const graph = document.querySelector<HTMLElement>(".graph-list")!;
+  graph.scrollTop = 200;
+  fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+  await waitFor(() => expect(stalePage).toBeDefined());
+  fireEvent.click(document.querySelector<HTMLElement>(".graph-row")!);
+  await waitFor(() => expect(staleDetail).toBeDefined());
+  select("refs/remotes/origin/feature");
+  expect(await screen.findAllByText("refs/remotes/origin/feature")).toHaveLength(2);
+  expect(document.querySelector(".graph-list")!.scrollTop).toBe(0);
+  await act(async () => {
+    stalePage?.(page("stale-page"));
+    staleDetail?.({ oid: "stale-detail", subject: "stale-detail", author: "Ada", authoredAt: "2026-08-09T00:00:00Z", parents: [], files: [] });
+  });
+  expect(screen.queryByText("stale-page")).not.toBeInTheDocument();
+  expect(screen.queryByText("stale-detail")).not.toBeInTheDocument();
+  delayMain = true;
+  select("refs/heads/main");
+  await waitFor(() => expect(staleBranch).toBeDefined());
+  select("refs/heads/feature");
+  expect(await screen.findAllByText("refs/heads/feature")).toHaveLength(2);
+  await act(async () => staleBranch?.(page("stale-branch")));
+  expect(screen.queryByText("stale-branch")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+  fireEvent.click(screen.getByRole("tab", { name: "History" }));
+  expect(screen.getByRole("button", { name: "History branch" })).toHaveTextContent("feature");
+  branches = [branch("main")];
+  await act(async () => { changed.forEach((handler) => handler({ payload: { repositoryId: 1 } })); });
+  expect(await screen.findAllByText("all-history")).toHaveLength(2);
+  expect(screen.getByRole("button", { name: "History branch" })).toHaveTextContent("All branches");
+  failMain = true;
+  select("refs/heads/main");
+  expect(await screen.findByText("Branch history unavailable")).toBeInTheDocument();
+  expect(document.querySelectorAll(".graph-row")).toHaveLength(0);
+  select("");
+  expect(await screen.findAllByText("all-history")).toHaveLength(2);
+  failMain = false;
+  staleBranch = undefined;
+  select("refs/heads/main");
+  await waitFor(() => expect(staleBranch).toBeDefined());
+  fireEvent.click(document.querySelector<HTMLElement>("[data-repository-id='2'] .repo-row")!);
+  await waitFor(() => expect(document.querySelectorAll(".graph-row")).toHaveLength(0));
+  expect(screen.getByRole("button", { name: "History branch" })).toHaveTextContent("All branches");
+  await act(async () => staleBranch?.(page("old-repository")));
+  expect(screen.queryByText("old-repository")).not.toBeInTheDocument();
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "start_operation")).toBe(false);
 });

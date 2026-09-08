@@ -157,7 +157,15 @@ impl Git {
         cwd: &Path,
         cursor: Option<HistoryCursor>,
         limit: usize,
+        branch_ref: Option<&str>,
     ) -> Result<CommitPage, String> {
+        if let Some(reference) = branch_ref {
+            if !reference.starts_with("refs/heads/") && !reference.starts_with("refs/remotes/") {
+                return Err("History requires a full branch reference".into());
+            }
+            ensure_success(self.run(cwd, &strings(&["check-ref-format", reference]), None)?)?;
+            crate::operations::verify_commit(self, cwd, reference)?;
+        }
         let HistoryCursor {
             offset,
             active_lanes,
@@ -166,15 +174,19 @@ impl Git {
             active_lanes: Vec::new(),
         });
         let format = "%H%x1f%P%x1f%an%x1f%aI%x1f%D%x1f%s%x1e";
-        let args = vec![
+        let mut args = vec![
             "log".into(),
-            "--exclude=refs/stash".into(),
-            "--all".into(),
             "--date-order".into(),
             format!("--skip={offset}"),
             format!("--max-count={}", limit + 1),
             format!("--format={format}"),
         ];
+        if let Some(reference) = branch_ref {
+            args.push(reference.into());
+        } else {
+            args.extend(strings(&["--exclude=refs/stash", "--all"]));
+        }
+        args.push("--".into());
         let output = self.run(cwd, &args, None)?;
         if !output.status.success() {
             return Err(error_text(&output));
@@ -1333,7 +1345,7 @@ mod tests {
 
         let measure = |cursor| {
             let started = std::time::Instant::now();
-            let page = git.history(dir.path(), cursor, 100).unwrap();
+            let page = git.history(dir.path(), cursor, 100, None).unwrap();
             assert_eq!(page.commits.len(), 100);
             started.elapsed()
         };
@@ -1418,7 +1430,7 @@ mod tests {
                 .patch,
             diff.patch
         );
-        let history = git.history(dir.path(), None, 20).unwrap();
+        let history = git.history(dir.path(), None, 20, None).unwrap();
         assert_eq!(history.commits[0].subject, "initial");
     }
 
@@ -1459,7 +1471,7 @@ mod tests {
             Some("2026-08-25T00:00:00 +0000"),
         );
 
-        let history = git.history(dir.path(), None, 20).unwrap();
+        let history = git.history(dir.path(), None, 20, None).unwrap();
         let subjects: Vec<_> = history
             .commits
             .iter()
@@ -1504,7 +1516,7 @@ mod tests {
             git.text(dir.path(), &["rev-parse", "refs/stash^3"])
                 .unwrap(),
         ];
-        let history = git.history(dir.path(), None, 20).unwrap();
+        let history = git.history(dir.path(), None, 20, None).unwrap();
 
         assert_eq!(
             history
@@ -1934,5 +1946,67 @@ mod tests {
         assert_eq!(blame.hunks[1].oid, second);
         assert_eq!(blame.hunks[1].start_line, 2);
         assert_eq!(blame.hunks[1].line_count, 1);
+    }
+    #[test]
+    fn branch_history_preserves_ancestry_and_paged_graph() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        init_repository(&git, cwd);
+        assert!(git.history(cwd, None, 20, None).unwrap().commits.is_empty());
+        let base = commit_file(&git, cwd, "base", "base");
+        let run = |args: &[&str]| {
+            ensure_success(git.run(cwd, &strings(args), None).unwrap()).unwrap();
+        };
+        run(&["checkout", "-b", "feature"]);
+        let feature = commit_file(&git, cwd, "feature", "feature");
+        run(&["update-ref", "refs/remotes/origin/feature", &feature]);
+        run(&["checkout", "main"]);
+        run(&["commit", "--allow-empty", "-m", "main"]);
+        let main = git.text(cwd, &["rev-parse", "HEAD"]).unwrap();
+        run(&["tag", "feature", &main]);
+        for reference in ["refs/heads/feature", "refs/remotes/origin/feature"] {
+            let page = git.history(cwd, None, 20, Some(reference)).unwrap();
+            assert_eq!(
+                page.commits.iter().map(|c| &c.oid).collect::<Vec<_>>(),
+                vec![&feature, &base]
+            );
+        }
+        run(&["merge", "--no-ff", "refs/heads/feature", "-m", "merge"]);
+        let full = git.history(cwd, None, 20, Some("refs/heads/main")).unwrap();
+        assert_eq!(full.commits.len(), 4);
+        let mut paged = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = git
+                .history(cwd, cursor, 1, Some("refs/heads/main"))
+                .unwrap();
+            paged.extend(page.commits);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(paged).unwrap(),
+            serde_json::to_value(full.commits).unwrap()
+        );
+        for invalid in [
+            "--all",
+            "feature",
+            "refs/tags/feature",
+            "refs/heads/missing",
+            "refs/heads/feature..main",
+            "refs/heads/feature~1",
+        ] {
+            assert!(
+                git.history(cwd, None, 20, Some(invalid)).is_err(),
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            git.text(cwd, &["symbolic-ref", "HEAD"]).unwrap(),
+            "refs/heads/main"
+        );
     }
 }

@@ -6,6 +6,7 @@ GitDock is a macOS Git desktop client built with Tauri, React, TypeScript, and R
 
 ## Features
 
+- Search branch names in the menu next to the Commits heading to filter the commit list and graph by a local or remote branch, including its full ancestry and merged history without checking it out; all branches are shown by default.
 - Branch comparisons use the commit-style file list with names, paths, line statistics, and a total count; open a file for a read-only diff and return to the list to select another, with support for additions, deletions, renames, binary files, and metadata-only changes; empty comparisons show an explicit message
 - Inspect file history and blame with distinct loading, empty, and error states; switching repositories, workflows, or files discards stale inspection results
 - Add, asynchronously clone, initialize, and manage local repositories; clone streams progress and can be cancelled

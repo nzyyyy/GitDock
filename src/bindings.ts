@@ -25,7 +25,7 @@ export const commands = {
 	getHistory: (repositoryId: number, cursor: {
 	offset: number,
 	activeLanes: string[],
-} | null, limit: number) => __TAURI_INVOKE<CommitPage>("get_history", { repositoryId, cursor, limit }),
+} | null, limit: number, branchRef: string | null) => __TAURI_INVOKE<CommitPage>("get_history", { repositoryId, cursor, limit, branchRef }),
 	exportSessionLog: (fileName: string, lines: SessionLogLine[]) => __TAURI_INVOKE<boolean>("export_session_log", { fileName, lines }),
 	getCommitDetail: (repositoryId: number, oid: string) => __TAURI_INVOKE<CommitDetail>("get_commit_detail", { repositoryId, oid }),
 	getStashDetail: (repositoryId: number, oid: string) => __TAURI_INVOKE<CommitDetail>("get_stash_detail", { repositoryId, oid }),

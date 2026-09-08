@@ -34,7 +34,7 @@ export function RowMenu({ children, label, context, glyph, disabled }: { childre
     const top = anchor.bottom + bounds.height + 4 <= window.innerHeight ? anchor.bottom + 4 : Math.max(4, anchor.top - bounds.height - 4);
     menu.style.left = `${Math.max(4, Math.min(alignStart ? anchor.left : anchor.right - bounds.width, window.innerWidth - bounds.width - 4))}px`;
     menu.style.top = `${top}px`;
-    menu.focus();
+    (menu.querySelector<HTMLInputElement>('input[type="search"]') ?? menu).focus();
   };
   const toggle = () => {
     const button = buttonRef.current;
