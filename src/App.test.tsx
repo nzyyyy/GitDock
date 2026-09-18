@@ -225,7 +225,8 @@ test("creates a branch from a branch menu", async () => {
   expect(branchRow("feature")).toBeTruthy();
   expect(branchRow("origin/feature")).toBeTruthy();
   expect(document.querySelector(".branch-group .local-branch.current")).toBeNull();
-  expect([...document.querySelectorAll(".branch-group > header")].map((header) => header.textContent)).toEqual(["Local branches1", "Remote branches1"]);
+  expect([...document.querySelectorAll(".branch-group .object-action-row")].map((row) => row.querySelector("strong")!.textContent)).toEqual(["feature", "origin/feature"]);
+  expect(document.querySelectorAll(".branch-group > header")).toHaveLength(0);
   fireEvent.change(branchSearch, { target: { value: "missing" } });
   expect(screen.getByText("No matching branches")).toBeInTheDocument();
   fireEvent.change(branchSearch, { target: { value: "" } });
@@ -286,6 +287,72 @@ test("creates a branch from a branch menu", async () => {
   fireEvent.change(name, { target: { value: " feature/test " } });
   fireEvent.click(screen.getByRole("button", { name: "Create" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "createBranch", name: "feature/test", startPoint: "origin/main", checkout: true } }));
+});
+
+test("ranks branch search results by match quality instead of list order", async () => {
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [{ id: 1, path: "/repo", name: "Repo", favorite: false, order: 0, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "develop-xxxx-xxxx-xxx", headOid: "12345678", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 }],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, headOid: "12345678", files: [] });
+    if (command === "get_branches") return Promise.resolve([
+      { name: "develop", oid: "11111111", current: false, remote: false },
+      { name: "develop-2", oid: "22222222", current: false, remote: false },
+      { name: "develop-xxxx-xxxx-xxx", oid: "33333333", current: true, remote: false },
+      { name: "feature/develop", oid: "44444444", current: false, remote: false },
+      { name: "main", oid: "55555555", current: false, remote: false },
+      { name: "origin/develop", oid: "11111111", current: false, remote: true },
+      { name: "origin/develop-ui", oid: "66666666", current: false, remote: true },
+    ]);
+    if (["get_tags", "get_remotes", "get_submodules"].includes(command)) return Promise.resolve([]);
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await selectFirstRepository();
+  fireEvent.click(await screen.findByRole("tab", { name: "Branches" }));
+  await screen.findByText("Local branches");
+  const rows = () => [...document.querySelectorAll<HTMLElement>(".branch-group .object-action-row")];
+  const names = () => rows().map((row) => row.querySelector("strong")!.textContent);
+
+  const branchSearch = screen.getByRole("textbox", { name: "Search branches" });
+  fireEvent.change(branchSearch, { target: { value: "develop" } });
+  expect(names()).toEqual(["develop", "origin/develop", "develop-2", "origin/develop-ui", "develop-xxxx-xxxx-xxx", "feature/develop"]);
+  expect(document.querySelectorAll(".branch-group > header")).toHaveLength(0);
+  expect(rows()[0].querySelector(".object-copy")).toHaveClass("local-branch");
+  expect(rows()[0].querySelector(".object-copy")).not.toHaveClass("current");
+  expect(rows()[1].querySelector(".object-copy")).toHaveClass("remote-branch");
+  expect(rows()[1].querySelector(".remote-prefix")).toHaveTextContent("origin/");
+
+  fireEvent.change(branchSearch, { target: { value: " DEVELOP-XXXX " } });
+  expect(names()).toEqual(["develop-xxxx-xxxx-xxx"]);
+
+  fireEvent.change(branchSearch, { target: { value: "" } });
+  expect([...document.querySelectorAll(".branch-group > header")].map((header) => header.textContent)).toEqual(["Local branches5", "Remote branches2"]);
+  expect(document.querySelector(".branch-group .local-branch.current")).toHaveTextContent("develop-xxxx-xxxx-xxx");
+});
+
+test("ranks repository search results by match quality within their groups", async () => {
+  const repository = (id: number, name: string, order: number) => ({ id, path: `/${name}`, name, favorite: false, order, kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0, conflictCount: 0, ahead: 0, behind: 0 });
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "bootstrap") return Promise.resolve({
+      git: { supported: true, version: "2.50.1", path: "/usr/bin/git" },
+      settings: { selectedRepositoryId: 1, leftWidth: 240, rightWidth: 360, outputHeight: 190 },
+      repositories: [repository(1, "develop-old-ui", 0), repository(2, "develop", 1), repository(3, "mydevelop", 2)],
+    });
+    if (command === "get_status") return Promise.resolve({ id: 1, repositoryId: 1, files: [] });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await screen.findAllByRole("listitem");
+  const names = () => [...document.querySelectorAll<HTMLElement>(".repo-row-shell .repo-name")].map((name) => name.textContent);
+  expect(names()).toEqual(["develop-old-ui", "develop", "mydevelop"]);
+
+  fireEvent.change(await screen.findByRole("textbox", { name: "Search repositories" }), { target: { value: "develop" } });
+  expect(names()).toEqual(["develop", "develop-old-ui", "mydevelop"]);
 });
 
 test("shows the unfiltered empty state when a repository has no branches", async () => {
@@ -1720,6 +1787,10 @@ test("opens the command palette and routes repository actions through existing p
   expectTextAssistanceDisabled(input);
   fireEvent.change(input, { target: { value: "not-a-command" } });
   expect(screen.getByRole("status")).toHaveTextContent("No matching commands");
+  fireEvent.change(input, { target: { value: "push" } });
+  const options = () => [...document.querySelectorAll<HTMLElement>("#command-list [role='option']")];
+  expect(options().map((option) => option.textContent)).toEqual(["Push", "Force push with lease"]);
+  expect(options()[0]).toHaveAttribute("aria-selected", "true");
   fireEvent.change(input, { target: { value: "fetch" } });
   fireEvent.keyDown(input, { key: "Enter" });
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "fetch", remote: null, prune: false } }));
@@ -1890,7 +1961,7 @@ test("opens complete branch comparisons through the branch menu", async () => {
 test("filters history and graph by branch and discards stale pages and details", async () => {
   vi.mocked(invoke).mockClear();
   const branch = (name: string, remote = false) => ({ name, remote, current: name === "main", oid: "aaaaaaaa", upstream: null });
-  let branches = [branch("main"), branch("feature"), branch("origin/feature", true)];
+  let branches = [branch("main"), branch("feature"), branch("feature-long-name"), branch("origin/feature", true)];
   const commit = (subject: string) => ({ oid: subject, subject, parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", refs: [], lane: { column: 0, parentColumns: [] } });
   const page = (subject: string) => ({ commits: [commit(subject)], nextCursor: { offset: 100, activeLanes: [] } });
   let stalePage: ((value: unknown) => void) | undefined;
@@ -1933,6 +2004,7 @@ test("filters history and graph by branch and discards stale pages and details",
   expect(screen.queryByRole("button", { name: "main (current)", hidden: true })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "feature", hidden: true })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "origin/feature", hidden: true })).toBeInTheDocument();
+  expect([...document.querySelectorAll(".row-menu-popover [role='group'] button")].map((button) => button.textContent)).toEqual(["feature", "origin/feature", "feature-long-name"]);
   fireEvent.change(search, { target: { value: "no-such-branch" } });
   expect(screen.getByText("No matching branches")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "All branches", hidden: true })).toBeInTheDocument();

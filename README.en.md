@@ -6,7 +6,7 @@ GitDock is a macOS Git desktop client built with Tauri, React, TypeScript, and R
 
 ## Features
 
-- Search branch names in the menu next to the Commits heading to filter the commit list and graph by a local or remote branch, including its full ancestry and merged history without checking it out; all branches are shown by default.
+- Search branch names in the menu next to the Commits heading to filter the commit list and graph by a local or remote branch, ranked by match quality, including its full ancestry and merged history without checking it out; all branches are shown by default.
 - Branch comparisons use the commit-style file list with names, paths, line statistics, and a total count; open a file for a read-only diff and return to the list to select another, with support for additions, deletions, renames, binary files, and metadata-only changes; empty comparisons show an explicit message
 - Inspect file history and blame with distinct loading, empty, and error states; switching repositories, workflows, or files discards stale inspection results
 - Add, asynchronously clone, initialize, and manage local repositories; clone streams progress and can be cancelled
@@ -15,15 +15,15 @@ GitDock is a macOS Git desktop client built with Tauri, React, TypeScript, and R
 - Select multiple files to stage, unstage, discard, or trash them from one dropdown, including partially staged files; the checkbox to the left of Working Tree selects or clears all staged, partially staged, unstaged, and untracked files, including collapsed groups, and both the title and group checkboxes show an indeterminate state for partial selections; conflicted and ignored files are excluded
 - Switch between English and Simplified Chinese with a remembered preference
 - Smoothly scroll through a windowed commit topology graph whose lanes continue across pages (stashes and their internal helper commits stay in the Stashes pane); commits refresh the graph and list automatically, with commit details (metadata and the changed-file list), per-file diffs, cherry-pick, and revert actions
-- Organize repositories with collapsible groups, a pinned Favorites group, new empty groups, and drag sorting; status rails and top-right counts identify working-tree changes on every registered repository as files change, not only the selected one, with keyboard ordering within a group
-- Search local and remote branches in separate groups with the current local branch pinned first and remote prefixes visually separated from branch paths; check out remote branches as local branches, then create, switch, merge, rebase, rename, and delete branches
+- Organize repositories with collapsible groups, a pinned Favorites group, new empty groups, and drag sorting, and rank repository search results by match quality within their groups; status rails and top-right counts identify working-tree changes on every registered repository as files change, not only the selected one, with keyboard ordering within a group
+- Searching branches merges local and remote matches into one list ranked by match quality (exact, then prefix, then path-segment start, then plain substring), preferring local and current branches on ties while remote prefixes stay out of the match; clearing the search restores the local/remote groups with the current local branch pinned first and remote prefixes visually separated from branch paths; check out remote branches as local branches, then create, switch, merge, rebase, rename, and delete branches
 - Use the trailing three-dot menu shown on hover for the same actions as the context menu on History commits and Branches, Tags, and Remotes entries
 - Manage tags, remotes, stashes, and submodules, including complete tracked and untracked stash file lists and per-file diffs
 - Fetch, pull, push, and force-push with lease; push creates the missing remote branch and sets upstream; split Pull and Push buttons show pending commit counts while their dropdowns group pull strategies and push settings; hover the in-progress spinner on Fetch, Pull, or Push and click stop to cancel; every Git operation shows a brief completion result
 - Review affected paths and refs before sensitive Git operations run
 - Enter Git operation details in validated in-app forms instead of browser prompts
 - Explicitly export the bounded current-session Git log with URL credential redaction and no automatic persistence
-- Use the `⌘K` / `Ctrl+K` command palette for stable workflows and repository actions; parameterized and dangerous operations retain their existing forms and impact previews
+- Use the `⌘K` / `Ctrl+K` command palette for stable workflows and repository actions, with commands ranked by match quality and driven from the keyboard; parameterized and dangerous operations retain their existing forms and impact previews
 - Refresh all returns a fresh active summary plus session-cached inactive summaries immediately, then streams updates from at most four background Git processes
 
 ## Requirements
@@ -84,9 +84,9 @@ Both `dist/` and `src-tauri/target/` are generated directories and must not be c
   - `src/App.tsx`: component composition and global layout; state is managed per domain through hooks
   - `src/hooks/`: domain hooks (repository list, working-tree snapshot, history, operations, log buffer)
   - `src/components/`: pane-scoped UI components (repository list, changes, history, branches, stashes, dialogs, toasts, command palette)
-  - `src/lib/`: pure utilities (session-log ring buffer)
+  - `src/lib/`: pure utilities (session-log ring buffer, search match ranking)
   - `src/types.ts`: shared types and constants; `src/api.ts`: Tauri command wrappers
-  - `src/App.test.tsx`: frontend regression tests
+  - `src/App.test.tsx`: frontend regression tests; pure-logic and component tests live next to their source
 - `src-tauri/src/`: Rust backend, split by responsibility
   - `lib.rs`: `AppState` and Tauri command registration; `summary.rs`: repository summary refresh; `repositories.rs`: repository management and settings; `history.rs`: history and reference queries; `operations.rs`: Git operation engine and validation; `process.rs`: child processes, streams, and locks
   - `working_tree/`: working-tree snapshots, diffs, conflict caching, and stale-view validation; `repository_path.rs`: repository-relative path validation

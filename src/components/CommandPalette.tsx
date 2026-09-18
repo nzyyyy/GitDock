@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
+import { rankOrder } from "../lib/search";
 import type { CommandItem } from "../types";
 
 export function CommandPalette({ items, onClose }: { items: CommandItem[]; onClose: () => void }) {
@@ -7,7 +8,7 @@ export function CommandPalette({ items, onClose }: { items: CommandItem[]; onClo
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
-  const visible = items.filter((item) => item.search.includes(query.trim().toLowerCase()));
+  const visible = rankOrder(items.filter((item) => item.search.includes(query.trim().toLowerCase())), query, (item) => [item.label, item.search]);
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;

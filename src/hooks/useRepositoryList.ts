@@ -2,6 +2,7 @@ import { startTransition, useCallback, useEffect, useMemo, useRef, useState } fr
 import { listen } from "@tauri-apps/api/event";
 import { api, type RepositorySummary, type WorkingTreeSnapshot } from "../api";
 import { translate } from "../i18n";
+import { rankOrder } from "../lib/search";
 import { errorMessage, FAVORITES_GROUP, UNGROUPED_GROUP, type RepositoryGroup } from "../types";
 
 type Translate = (key: Parameters<typeof translate>[1]) => string;
@@ -83,9 +84,10 @@ export function useRepositoryList({
 
   const repositoryGroups = useMemo<RepositoryGroup[]>(() => {
     const query = filter.trim().toLowerCase();
-    const visible = repositories
-      .filter((repository) => `${repository.name} ${repository.path} ${repository.group ?? ""}`.toLowerCase().includes(query))
-      .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
+    const matched = repositories.filter((repository) => `${repository.name} ${repository.path} ${repository.group ?? ""}`.toLowerCase().includes(query));
+    const visible = query
+      ? rankOrder(matched, filter, (repository) => [repository.name, repository.group, repository.path], (left, right) => left.order - right.order || left.name.localeCompare(right.name))
+      : [...matched].sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
     const favorites = visible.filter((repository) => repository.favorite);
     const grouped = new Map<string, RepositorySummary[]>();
     for (const repository of visible.filter((item) => !item.favorite)) {
