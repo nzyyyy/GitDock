@@ -18,6 +18,94 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
+fn editor_application(path: &Path) -> Result<PathBuf, String> {
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("Editor is unavailable: {e}"))?;
+    if path.extension().is_none_or(|extension| extension != "app")
+        || !path.join("Contents/Info.plist").is_file()
+        || !path.join("Contents/MacOS").is_dir()
+    {
+        return Err("Choose a valid macOS editor .app".into());
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn set_editor_path(path: String, state: State<'_, AppState>) -> Result<String, String> {
+    save_editor_path(path, &state)
+}
+
+fn save_editor_path(path: String, state: &AppState) -> Result<String, String> {
+    let path = editor_application(Path::new(&path))?
+        .to_string_lossy()
+        .into_owned();
+    state
+        .store
+        .lock()
+        .map_err(|_| "Settings are busy")?
+        .update(|config| {
+            config.settings.editor_path = Some(path.clone());
+            Ok(())
+        })?;
+    Ok(path)
+}
+
+fn repository_open_args(
+    root: &Path,
+    target: RepositoryOpenTarget,
+    editor: Option<&str>,
+) -> Result<Vec<std::ffi::OsString>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("Repository directory is unavailable: {e}"))?;
+    if !root.is_dir() {
+        return Err("Repository path is not a directory".into());
+    }
+    let mut args = match target {
+        RepositoryOpenTarget::Terminal => vec!["-b".into(), "com.apple.Terminal".into()],
+        RepositoryOpenTarget::Finder => vec!["-b".into(), "com.apple.finder".into()],
+        RepositoryOpenTarget::Editor => vec![
+            "-a".into(),
+            editor_application(Path::new(editor.ok_or("Choose an editor first")?))?
+                .into_os_string(),
+        ],
+    };
+    args.push(root.into_os_string());
+    Ok(args)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn open_repository(
+    repository_id: RepositoryId,
+    target: RepositoryOpenTarget,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let record = state.record(repository_id)?;
+    let editor = state
+        .store
+        .lock()
+        .map_err(|_| "Settings are busy")?
+        .config()
+        .settings
+        .editor_path
+        .clone();
+    let args = repository_open_args(Path::new(&record.path), target, editor.as_deref())?;
+    let output = std::process::Command::new("/usr/bin/open")
+        .args(args)
+        .output()
+        .map_err(|e| format!("Cannot open repository: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Cannot open repository: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn set_git_path(
@@ -482,6 +570,87 @@ mod tests {
         collections::HashMap,
         path::{Path, PathBuf},
     };
+
+    #[test]
+    fn external_open_validates_paths_and_keeps_arguments_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("仓库 with 'quotes' ; $(echo nope)");
+        std::fs::create_dir(&root).unwrap();
+        let app = dir.path().join("My Editor.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), "plist").unwrap();
+        for (target, bundle) in [
+            (RepositoryOpenTarget::Terminal, "com.apple.Terminal"),
+            (RepositoryOpenTarget::Finder, "com.apple.finder"),
+        ] {
+            assert_eq!(
+                repository_open_args(&root, target, None).unwrap(),
+                vec![
+                    std::ffi::OsString::from("-b"),
+                    bundle.into(),
+                    root.canonicalize().unwrap().into_os_string()
+                ]
+            );
+        }
+        let args = repository_open_args(&root, RepositoryOpenTarget::Editor, app.to_str()).unwrap();
+        assert_eq!(args[0], "-a");
+        assert_eq!(args[1], app.canonicalize().unwrap().into_os_string());
+        assert_eq!(args[2], root.canonicalize().unwrap().into_os_string());
+        assert!(repository_open_args(&root, RepositoryOpenTarget::Editor, None).is_err());
+        assert!(repository_open_args(
+            &dir.path().join("missing"),
+            RepositoryOpenTarget::Finder,
+            None
+        )
+        .is_err());
+        assert!(repository_open_args(
+            &app.join("Contents/Info.plist"),
+            RepositoryOpenTarget::Finder,
+            None
+        )
+        .is_err());
+        assert!(editor_application(&root).is_err());
+        std::fs::remove_file(app.join("Contents/Info.plist")).unwrap();
+        assert!(editor_application(&app).is_err());
+    }
+
+    #[test]
+    fn editor_preference_is_validated_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Editor.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), "plist").unwrap();
+        let state = crate::test_util::test_state(
+            Git::discover(None).unwrap(),
+            dir.path().join("config.json"),
+        );
+        let expected = app.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            save_editor_path(app.to_string_lossy().into(), &state).unwrap(),
+            expected
+        );
+        assert_eq!(
+            ConfigStore::load(dir.path().join("config.json"))
+                .unwrap()
+                .config()
+                .settings
+                .editor_path
+                .as_deref(),
+            Some(expected.as_str())
+        );
+        assert!(save_editor_path(dir.path().to_string_lossy().into(), &state).is_err());
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .unwrap()
+                .config()
+                .settings
+                .editor_path
+                .as_deref(),
+            Some(expected.as_str())
+        );
+    }
 
     #[test]
     fn watcher_waits_until_the_event_burst_is_quiet() {

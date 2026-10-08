@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -452,7 +452,7 @@ test("loads more history without losing the selected commit", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Load more" }));
   expect((await screen.findAllByText("Older")).length).toBeGreaterThan(0);
   expect(screen.getAllByRole("button", { name: /Selected/ }).some((button) => button.classList.contains("selected") || button.parentElement?.classList.contains("selected"))).toBe(true);
-  expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 100, activeLanes: [] }, limit: 100, branchRef: null });
+  expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 100, activeLanes: [] }, limit: 100, branchRef: null, search: null });
 });
 
 test("opens commit details then a file diff", async () => {
@@ -488,7 +488,7 @@ test("opens commit details then a file diff", async () => {
   expect(screen.getByText("Commit ID")).toBeInTheDocument();
   expect(screen.getByText("Author")).toBeInTheDocument();
   expect(screen.getByText("Date")).toBeInTheDocument();
-  expect(screen.getByText("Commit message")).toBeInTheDocument();
+  expect(screen.getByText("Commit message", { selector: "dt" })).toBeInTheDocument();
   expect(screen.getByText("Changed files")).toBeInTheDocument();
   expect(screen.getByText(/Ada <ada@example.com>/)).toBeInTheDocument();
   expect(screen.getByText(/Body line/)).toBeInTheDocument();
@@ -576,7 +576,7 @@ test("hides pagination when switching to a repository without another page", asy
   expect((await screen.findAllByText("Small history")).length).toBeGreaterThan(0);
   expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
   const smallHistoryCalls = vi.mocked(invoke).mock.calls.filter(([command, args]) => command === "get_history" && args && "repositoryId" in args && args.repositoryId === 2);
-  expect(smallHistoryCalls).toEqual([["get_history", { repositoryId: 2, cursor: null, limit: 100, branchRef: null }]]);
+  expect(smallHistoryCalls).toEqual([["get_history", { repositoryId: 2, cursor: null, limit: 100, branchRef: null, search: null }]]);
 });
 
 test("reloads history after leaving during the initial request", async () => {
@@ -1616,7 +1616,7 @@ test("automatically loads history at the sentinel and keeps the DOM windowed", a
   render(<App />);
   await selectFirstRepository();
   fireEvent.click(await screen.findByRole("tab", { name: "History" }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 1, activeLanes: [] }, limit: 100, branchRef: null }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 1, activeLanes: [] }, limit: 100, branchRef: null, search: null }));
   await screen.findByText("600 commits loaded");
   expect(document.querySelectorAll(".graph-row").length).toBeLessThan(60);
   expect(document.querySelectorAll(".history-pane .object-action-row").length).toBeLessThan(60);
@@ -2052,7 +2052,7 @@ test("filters history and graph by branch and discards stale pages and details",
   expect(screen.getByRole("button", { name: "History branch" })).toHaveTextContent("All branches");
   failMain = true;
   select("refs/heads/main");
-  expect(await screen.findByText("Branch history unavailable")).toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
   expect(document.querySelectorAll(".graph-row")).toHaveLength(0);
   select("");
   expect(await screen.findAllByText("all-history")).toHaveLength(2);
@@ -2066,4 +2066,225 @@ test("filters history and graph by branch and discards stale pages and details",
   await act(async () => staleBranch?.(page("old-repository")));
   expect(screen.queryByText("old-repository")).not.toBeInTheDocument();
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "start_operation")).toBe(false);
+});
+
+
+test("searches messages and SHA across pages, preserves refresh scope, and clears back to the graph", async () => {
+  vi.mocked(invoke).mockClear();
+  const repository = { id: 1, name: "Search repo", path: "/search", kind: "workTree", capabilities: { canRead: true, canWriteWorkTree: true, canManageRefs: true, canManageRemotes: true }, branch: "main", changedCount: 0 };
+  const commit = (subject: string) => ({ oid: subject, subject, parents: ["parent"], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", refs: [], lane: { column: 0, parentColumns: [] } });
+  const handlers: Array<(event: { payload: { repositoryId: number } }) => void> = [];
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof handlers[number]) => {
+    if (event === "repository-changed") handlers.push(handler);
+    return Promise.resolve(() => { const index = handlers.indexOf(handler); if (index >= 0) handlers.splice(index, 1); });
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    const input = args as { search?: { type: string; query: string }; cursor?: unknown };
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true }, settings: {}, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, files: [] });
+    if (command === "refresh_repository") return Promise.resolve({ summary: repository, snapshot: { id: 1, files: [] } });
+    if (command === "get_branches") return Promise.resolve([{ name: "main", current: true, remote: false }, { name: "feature", current: false, remote: false }]);
+    if (command === "get_history") {
+      if (input.search?.query === "dead") return Promise.reject(new Error("SHA prefix is ambiguous"));
+      if (input.search?.query === "missing") return Promise.resolve({ commits: [], nextCursor: null });
+      return Promise.resolve(input.search ? { commits: [commit(input.cursor ? "Older result" : "Message result")], nextCursor: input.cursor ? null : { offset: 1, activeLanes: [] } } : { commits: [commit("Normal history")], nextCursor: null });
+    }
+    if (command === "get_commit_detail") return Promise.resolve({ oid: "Message result", author: "Ada", email: "ada@example.com", authoredAt: "2026-08-09T00:00:00Z", message: "Complete message", files: [] });
+    if (command === "preview_operation") return Promise.resolve({ requiresConfirmation: false, args: [], title: "Cherry-pick", warnings: [], affectedPaths: [], affectedRefs: [] });
+    if (command === "start_operation") return Promise.resolve({ operationId: 900, accepted: true });
+    return Promise.resolve([]);
+  });
+  render(<App />);
+  await selectFirstRepository();
+  fireEvent.click(screen.getByRole("tab", { name: "History" }));
+  await screen.findAllByText("Normal history");
+  const input = screen.getByRole("searchbox", { name: "Search commits" });
+  const types = screen.getByRole("group", { name: "Commit search field" });
+  const messageType = within(types).getByRole("button", { name: "Commit message" });
+  const shaType = within(types).getByRole("button", { name: "SHA" });
+  expect(messageType).toHaveAttribute("aria-pressed", "true");
+  expect(shaType).toHaveAttribute("aria-pressed", "false");
+  expect(messageType).toHaveAttribute("type", "button");
+  expect(shaType).toHaveAttribute("type", "button");
+  expect(screen.queryByRole("combobox", { name: "Commit search field" })).not.toBeInTheDocument();
+  fireEvent.change(input, { target: { value: "body" } });
+  expect(screen.getByRole("button", { name: "Clear commit search" }).parentElement).toBe(input.parentElement);
+  expect(document.querySelector(".commit-graph")).not.toBeNull();
+  fireEvent.submit(input.closest("form")!);
+  await screen.findByText("Message result");
+  expect(document.querySelector(".commit-graph")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /Message result/ }));
+  await screen.findByText("Complete message");
+  await act(async () => { handlers.forEach((handler) => handler({ payload: { repositoryId: 1 } })); });
+  await screen.findByText("Message result");
+  expect(screen.queryByText("Complete message")).not.toBeInTheDocument();
+  expect(input).toHaveValue("body");
+  fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+  await screen.findByText("Older result");
+  expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: { offset: 1, activeLanes: [] }, limit: 100, branchRef: null, search: { type: "message", query: "body" } });
+  fireEvent.click(screen.getAllByRole("button", { name: "Cherry-pick", hidden: true })[0]);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_operation", { repositoryId: 1, request: { type: "cherryPick", commits: ["Message result"] } }));
+  fireEvent.click(screen.getByRole("button", { name: "History branch" }));
+  fireEvent.click(screen.getByRole("button", { name: "feature", hidden: true }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: null, limit: 100, branchRef: "refs/heads/feature", search: { type: "message", query: "body" } }));
+  fireEvent.change(input, { target: { value: "missing" } });
+  fireEvent.click(screen.getByRole("button", { name: "Search" }));
+  await screen.findByText("No matching commits");
+  const callsBeforeTypeChange = vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_history").length;
+  fireEvent.click(shaType);
+  expect(shaType).toHaveAttribute("aria-pressed", "true");
+  expect(messageType).toHaveAttribute("aria-pressed", "false");
+  expect(input).toHaveValue("missing");
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_history")).toHaveLength(callsBeforeTypeChange);
+  fireEvent.change(input, { target: { value: "dead" } });
+  fireEvent.submit(input.closest("form")!);
+  expect(await screen.findByRole("alert")).toHaveTextContent("SHA prefix is ambiguous");
+  expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: null, limit: 100, branchRef: "refs/heads/feature", search: { type: "sha", query: "dead" } });
+  fireEvent.click(screen.getByRole("button", { name: "Clear commit search" }));
+  await screen.findAllByText("Normal history");
+  expect(input).toHaveValue("");
+  expect(document.querySelector(".commit-graph")).not.toBeNull();
+  fireEvent.change(input, { target: { value: "aaaa" } });
+  fireEvent.submit(input.closest("form")!);
+  await screen.findByText("Message result");
+  expect(invoke).toHaveBeenCalledWith("get_history", { repositoryId: 1, cursor: null, limit: 100, branchRef: "refs/heads/feature", search: { type: "sha", query: "aaaa" } });
+  fireEvent.change(input, { target: { value: "" } });
+  await screen.findAllByText("Normal history");
+  expect(document.querySelector(".commit-graph")).not.toBeNull();
+});
+
+test("search ignores late results after a newer query or repository switch", async () => {
+  const repositories = [1, 2].map((id) => ({ id, name: `Search ${id}`, path: `/search${id}`, kind: "workTree", capabilities: {}, branch: "main", changedCount: 0 }));
+  let resolveOld!: (value: unknown) => void;
+  const old = new Promise((resolve) => { resolveOld = resolve; });
+  const commit = (subject: string) => ({ oid: subject, subject, parents: [], author: "Ada", authoredAt: "2026-08-09T00:00:00Z", refs: [], lane: { column: 0, parentColumns: [] } });
+  vi.mocked(listen).mockImplementation(() => Promise.resolve(() => {}));
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    const input = args as { search?: { query: string } };
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true }, settings: {}, repositories });
+    if (command === "get_status") return Promise.resolve({ id: 1, files: [] });
+    if (command === "get_branches") return Promise.resolve([]);
+    if (command === "get_history") return input.search?.query === "slow" ? old : Promise.resolve({ commits: [commit(input.search ? "New result" : "Default result")], nextCursor: null });
+    return Promise.resolve([]);
+  });
+  render(<App />);
+  await selectFirstRepository();
+  fireEvent.click(screen.getByRole("tab", { name: "History" }));
+  await screen.findAllByText("Default result");
+  const input = screen.getByRole("searchbox", { name: "Search commits" });
+  const submit = (query: string) => { fireEvent.change(input, { target: { value: query } }); fireEvent.submit(input.closest("form")!); };
+  submit("slow");
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_history", expect.objectContaining({ search: { type: "message", query: "slow" } })));
+  expect(document.querySelector(".history-results [role='status']")).not.toBeNull();
+  submit("fast");
+  await screen.findByText("New result");
+  await act(async () => resolveOld({ commits: [commit("Obsolete result")], nextCursor: null }));
+  expect(screen.queryByText("Obsolete result")).not.toBeInTheDocument();
+  const another = new Promise((resolve) => { resolveOld = resolve; });
+  vi.mocked(invoke).mockImplementationOnce(() => Promise.resolve([]));
+  vi.mocked(invoke).mockImplementationOnce(() => another);
+  submit("slow");
+  await waitFor(() => expect(screen.queryByText("New result")).not.toBeInTheDocument());
+  fireEvent.click(document.querySelector<HTMLElement>("[data-repository-id='2'] .repo-row")!);
+  await screen.findAllByText("Default result");
+  await act(async () => resolveOld({ commits: [commit("Old repository result")], nextCursor: null }));
+  expect(screen.queryByText("Old repository result")).not.toBeInTheDocument();
+  expect(screen.getByRole("searchbox", { name: "Search commits" })).toHaveValue("");
+  expect(document.querySelector(".commit-graph")).not.toBeNull();
+});
+
+test("opens external tools, remembers the editor, and handles cancellation and launch failures", async () => {
+  vi.mocked(invoke).mockClear();
+  vi.mocked(open).mockReset();
+  const repository = { id: 1, name: "External repo", path: "/external", kind: "workTree", capabilities: {}, changedCount: 0 };
+  let fail = false;
+  vi.mocked(invoke).mockImplementation((command) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true }, settings: {}, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, files: [] });
+    if (command === "set_editor_path") return Promise.resolve("/Applications/Editor.app");
+    if (command === "open_repository" && fail) return Promise.reject(new Error("Editor is unavailable"));
+    return Promise.resolve([]);
+  });
+  render(<App />);
+  await selectFirstRepository();
+  for (const [label, target] of [["Open in Terminal", "terminal"], ["Open in Finder", "finder"]]) {
+    fireEvent.click(screen.getByRole("button", { name: label, hidden: true }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_repository", { repositoryId: 1, target }));
+  }
+  vi.mocked(open).mockResolvedValueOnce(null);
+  fireEvent.click(screen.getByRole("button", { name: "Open in editor", hidden: true }));
+  await waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+  expect(vi.mocked(invoke).mock.calls.filter(([name, args]) => name === "open_repository" && (args as { target: string }).target === "editor")).toHaveLength(0);
+  vi.mocked(open).mockResolvedValueOnce("/Applications/Editor.app");
+  fireEvent.click(screen.getByRole("button", { name: "Open in editor", hidden: true }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_editor_path", { path: "/Applications/Editor.app" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_repository", { repositoryId: 1, target: "editor" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open in editor", hidden: true }));
+  await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([name, args]) => name === "open_repository" && (args as { target: string }).target === "editor")).toHaveLength(2));
+  expect(open).toHaveBeenCalledTimes(2);
+  fireEvent.keyDown(window, { key: "k", metaKey: true });
+  const commandSearch = screen.getByRole("combobox", { name: "Search commands…" });
+  fireEvent.change(commandSearch, { target: { value: "Open in editor" } });
+  fail = true;
+  fireEvent.click(screen.getByRole("option", { name: "Open in editor" }));
+  await screen.findByText("Editor is unavailable");
+  vi.mocked(open).mockResolvedValueOnce(null);
+  fireEvent.click(screen.getByRole("button", { name: "Choose editor", hidden: true }));
+  await waitFor(() => expect(open).toHaveBeenCalledTimes(3));
+  cleanup();
+  fail = false;
+  vi.mocked(invoke).mockClear();
+  vi.mocked(invoke).mockImplementation((command) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true }, settings: { editorPath: "/Applications/Remembered.app" }, repositories: [repository] });
+    if (command === "get_status") return Promise.resolve({ id: 1, files: [] });
+    return Promise.resolve([]);
+  });
+  render(<App />);
+  await selectFirstRepository();
+  fireEvent.click(screen.getByRole("button", { name: "Open in editor", hidden: true }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_repository", { repositoryId: 1, target: "editor" }));
+  expect(open).toHaveBeenCalledTimes(3);
+});
+
+
+test.each(["en", "zh-CN"])("shows local and remote branch committer dates and refreshes them (%s)", async (language) => {
+  const repository = { id: 1, name: "Dates", path: "/dates", kind: "workTree", capabilities: {}, branch: "main", changedCount: 0 };
+  let committedAt = "2026-10-08T09:10:11+08:00";
+  const handlers: Array<(event: { payload: { repositoryId: number } }) => void> = [];
+  vi.mocked(listen).mockImplementation(((event: string, handler: typeof handlers[number]) => {
+    if (event === "repository-changed") handlers.push(handler);
+    return Promise.resolve(() => {});
+  }) as never);
+  vi.mocked(invoke).mockImplementation((command) => {
+    if (command === "bootstrap") return Promise.resolve({ git: { supported: true }, settings: { rightWidth: 300, language }, repositories: [repository] });
+    if (command === "refresh_repository") return Promise.resolve({ summary: repository, snapshot: { id: 1, files: [] } });
+    if (command === "get_status") return Promise.resolve({ id: 1, files: [] });
+    if (command === "get_branches") return Promise.resolve([
+      { name: "main", oid: "aaaaaaaa", current: true, remote: false, committedAt, upstream: "origin/a-very-long-upstream-branch-name" },
+      { name: "origin/main", oid: "aaaaaaaa", current: false, remote: true, committedAt, upstream: null },
+      { name: "missing-date", oid: "bbbbbbbb", current: false, remote: false, committedAt: null },
+      { name: "invalid-date", oid: "cccccccc", current: false, remote: false, committedAt: "invalid" },
+    ]);
+    return Promise.resolve([]);
+  });
+  render(<App />);
+  await selectFirstRepository();
+  fireEvent.click(screen.getByRole("tab", { name: language === "en" ? "Branches" : "分支" }));
+  await screen.findByText(language === "en" ? "Local branches" : "本地分支");
+  const row = (name: string) => [...document.querySelectorAll(".branch-group .object-action-row")].find((element) => element.querySelector("strong")?.textContent === name)!;
+  const date = new Date(committedAt);
+  for (const name of ["main", "origin/main"]) {
+    const time = row(name).querySelector("time")!;
+    expect(time).toHaveAttribute("datetime", committedAt);
+    expect(time).toHaveTextContent([date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, "0")).join("/"));
+    expect(time).toHaveAttribute("title", new Intl.DateTimeFormat(language, { dateStyle: "full", timeStyle: "long" }).format(date));
+  }
+  for (const name of ["missing-date", "invalid-date"]) {
+    expect(row(name).querySelector("time")).toBeNull();
+    expect(row(name).querySelector(".branch-date-missing")).toHaveTextContent("—");
+  }
+  expect(row("main").querySelector(".branch-upstream")).toHaveAttribute("title", "origin/a-very-long-upstream-branch-name");
+  committedAt = "2026-10-09T09:10:11+08:00";
+  await act(async () => { handlers.forEach((handler) => handler({ payload: { repositoryId: 1 } })); });
+  await waitFor(() => expect(row("main").querySelector("time")).toHaveAttribute("datetime", committedAt));
 });

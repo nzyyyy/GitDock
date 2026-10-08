@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 import type { BranchInfo } from "../api";
 import { bestScore, matchScore, rankBranches, rankOrder, searchName, TIER } from "./search";
 
-const branch = (name: string, extra: Partial<BranchInfo> = {}): BranchInfo => ({ name, oid: "a".repeat(40), current: false, remote: false, upstream: null, ...extra });
+const branch = (name: string, extra: Partial<BranchInfo> = {}): BranchInfo => ({ name, oid: "a".repeat(40), current: false, remote: false, upstream: null, committedAt: null, ...extra });
 
 test("grades exact, prefix, segment and substring matches", () => {
   expect(matchScore("develop", "develop")?.tier).toBe(TIER.exact);

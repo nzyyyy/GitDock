@@ -158,6 +158,7 @@ impl Git {
         cursor: Option<HistoryCursor>,
         limit: usize,
         branch_ref: Option<&str>,
+        search: Option<&HistorySearch>,
     ) -> Result<CommitPage, String> {
         if let Some(reference) = branch_ref {
             if !reference.starts_with("refs/heads/") && !reference.starts_with("refs/remotes/") {
@@ -181,6 +182,72 @@ impl Git {
             format!("--max-count={}", limit + 1),
             format!("--format={format}"),
         ];
+        if let Some(search) = search {
+            let query = match search {
+                HistorySearch::Message(q) | HistorySearch::Sha(q) => q,
+            };
+            if query.trim().is_empty() || query.len() > 4096 || query.contains(['\0', '\n', '\r']) {
+                return Err("Search must be a nonempty single line of at most 4096 bytes".into());
+            }
+            match search {
+                HistorySearch::Message(query) => args.extend([
+                    "--fixed-strings".into(),
+                    "--regexp-ignore-case".into(),
+                    format!("--grep={query}"),
+                ]),
+                HistorySearch::Sha(query) => {
+                    if !(4..=64).contains(&query.len())
+                        || !query.bytes().all(|b| b.is_ascii_hexdigit())
+                    {
+                        return Err("SHA requires at least 4 hexadecimal characters".into());
+                    }
+                    let matches = self.text(
+                        cwd,
+                        &[
+                            "rev-parse",
+                            &format!("--disambiguate={}", query.to_ascii_lowercase()),
+                        ],
+                    )?;
+                    let objects: Vec<_> = matches.lines().filter(|line| !line.is_empty()).collect();
+                    if objects.len() > 1 {
+                        return Err("SHA prefix is ambiguous. Enter more characters.".into());
+                    }
+                    let empty = || CommitPage {
+                        commits: vec![],
+                        next_cursor: None,
+                    };
+                    let Some(oid) = objects.first() else {
+                        return Ok(empty());
+                    };
+                    if self.text(cwd, &["cat-file", "-t", oid])? != "commit" {
+                        return Err("SHA does not identify a commit".into());
+                    }
+                    if let Some(reference) = branch_ref {
+                        let output = self.run(
+                            cwd,
+                            &strings(&["merge-base", "--is-ancestor", oid, reference]),
+                            None,
+                        )?;
+                        match output.status.code() {
+                            Some(0) => {}
+                            Some(1) => return Ok(empty()),
+                            _ => {
+                                ensure_success(output)?;
+                            }
+                        }
+                    }
+                    if offset > 0 {
+                        return Ok(empty());
+                    }
+                    args.extend(strings(&["--no-walk", oid, "--"]));
+                    let output = ensure_success(self.run(cwd, &args, None)?)?;
+                    return Ok(CommitPage {
+                        commits: parse_history(&String::from_utf8_lossy(&output.stdout)),
+                        next_cursor: None,
+                    });
+                }
+            }
+        }
         if let Some(reference) = branch_ref {
             args.push(reference.into());
         } else {
@@ -194,7 +261,11 @@ impl Git {
         let mut commits = parse_history(&String::from_utf8_lossy(&output.stdout));
         let has_more = commits.len() > limit;
         commits.truncate(limit);
-        let active_lanes = assign_lanes(&mut commits, active_lanes);
+        let active_lanes = if search.is_none() {
+            assign_lanes(&mut commits, active_lanes)
+        } else {
+            Vec::new()
+        };
         Ok(CommitPage {
             commits,
             next_cursor: has_more.then_some(HistoryCursor {
@@ -367,7 +438,7 @@ impl Git {
             cwd,
             &strings(&[
                 "for-each-ref",
-                "--format=%(refname)%09%(objectname)%09%(HEAD)%09%(upstream:short)",
+                "--format=%(refname)%09%(objectname)%09%(HEAD)%09%(upstream:short)%09%(committerdate:iso-strict)",
                 "refs/heads",
                 "refs/remotes",
             ]),
@@ -384,6 +455,7 @@ impl Git {
                 let oid = p.next()?.into();
                 let current = p.next() == Some("*");
                 let upstream = p.next().filter(|s| !s.is_empty()).map(Into::into);
+                let committed_at = p.next().filter(|s| !s.is_empty()).map(Into::into);
                 let remote = full.starts_with("refs/remotes/");
                 let name = full.trim_start_matches(if remote {
                     "refs/remotes/"
@@ -394,6 +466,7 @@ impl Git {
                     return None;
                 }
                 Some(BranchInfo {
+                    committed_at,
                     name: name.into(),
                     oid,
                     current,
@@ -1345,7 +1418,7 @@ mod tests {
 
         let measure = |cursor| {
             let started = std::time::Instant::now();
-            let page = git.history(dir.path(), cursor, 100, None).unwrap();
+            let page = git.history(dir.path(), cursor, 100, None, None).unwrap();
             assert_eq!(page.commits.len(), 100);
             started.elapsed()
         };
@@ -1430,7 +1503,7 @@ mod tests {
                 .patch,
             diff.patch
         );
-        let history = git.history(dir.path(), None, 20, None).unwrap();
+        let history = git.history(dir.path(), None, 20, None, None).unwrap();
         assert_eq!(history.commits[0].subject, "initial");
     }
 
@@ -1471,7 +1544,7 @@ mod tests {
             Some("2026-08-25T00:00:00 +0000"),
         );
 
-        let history = git.history(dir.path(), None, 20, None).unwrap();
+        let history = git.history(dir.path(), None, 20, None, None).unwrap();
         let subjects: Vec<_> = history
             .commits
             .iter()
@@ -1516,7 +1589,7 @@ mod tests {
             git.text(dir.path(), &["rev-parse", "refs/stash^3"])
                 .unwrap(),
         ];
-        let history = git.history(dir.path(), None, 20, None).unwrap();
+        let history = git.history(dir.path(), None, 20, None, None).unwrap();
 
         assert_eq!(
             history
@@ -1600,6 +1673,50 @@ mod tests {
             git.inspect_repository(&main).unwrap().common_git_dir,
             git.inspect_repository(&linked).unwrap().common_git_dir
         );
+    }
+
+    #[test]
+    fn branch_dates_use_tip_committer_time_for_local_and_remote_refs() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_repository(&git, dir.path());
+        ensure_success(
+            git.run_env(
+                dir.path(),
+                &strings(&["commit", "--allow-empty", "-m", "dated commit"]),
+                None,
+                &[
+                    ("GIT_AUTHOR_DATE".into(), "2020-01-02T03:04:05+00:00".into()),
+                    (
+                        "GIT_COMMITTER_DATE".into(),
+                        "2026-10-08T09:10:11+08:00".into(),
+                    ),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        ensure_success(
+            git.run(
+                dir.path(),
+                &strings(&["update-ref", "refs/remotes/origin/main", "HEAD"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let branches = git.branches(dir.path()).unwrap();
+        assert_eq!(branches.len(), 2);
+        assert!(branches
+            .iter()
+            .any(|branch| !branch.remote && branch.current));
+        assert!(branches.iter().any(|branch| branch.remote));
+        for branch in branches {
+            assert_eq!(
+                branch.committed_at.as_deref(),
+                Some("2026-10-08T09:10:11+08:00")
+            );
+        }
     }
 
     #[test]
@@ -1953,7 +2070,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         init_repository(&git, cwd);
-        assert!(git.history(cwd, None, 20, None).unwrap().commits.is_empty());
+        assert!(git
+            .history(cwd, None, 20, None, None)
+            .unwrap()
+            .commits
+            .is_empty());
         let base = commit_file(&git, cwd, "base", "base");
         let run = |args: &[&str]| {
             ensure_success(git.run(cwd, &strings(args), None).unwrap()).unwrap();
@@ -1966,20 +2087,22 @@ mod tests {
         let main = git.text(cwd, &["rev-parse", "HEAD"]).unwrap();
         run(&["tag", "feature", &main]);
         for reference in ["refs/heads/feature", "refs/remotes/origin/feature"] {
-            let page = git.history(cwd, None, 20, Some(reference)).unwrap();
+            let page = git.history(cwd, None, 20, Some(reference), None).unwrap();
             assert_eq!(
                 page.commits.iter().map(|c| &c.oid).collect::<Vec<_>>(),
                 vec![&feature, &base]
             );
         }
         run(&["merge", "--no-ff", "refs/heads/feature", "-m", "merge"]);
-        let full = git.history(cwd, None, 20, Some("refs/heads/main")).unwrap();
+        let full = git
+            .history(cwd, None, 20, Some("refs/heads/main"), None)
+            .unwrap();
         assert_eq!(full.commits.len(), 4);
         let mut paged = Vec::new();
         let mut cursor = None;
         loop {
             let page = git
-                .history(cwd, cursor, 1, Some("refs/heads/main"))
+                .history(cwd, cursor, 1, Some("refs/heads/main"), None)
                 .unwrap();
             paged.extend(page.commits);
             cursor = page.next_cursor;
@@ -2000,7 +2123,7 @@ mod tests {
             "refs/heads/feature~1",
         ] {
             assert!(
-                git.history(cwd, None, 20, Some(invalid)).is_err(),
+                git.history(cwd, None, 20, Some(invalid), None).is_err(),
                 "{invalid}"
             );
         }
@@ -2008,5 +2131,139 @@ mod tests {
             git.text(cwd, &["symbolic-ref", "HEAD"]).unwrap(),
             "refs/heads/main"
         );
+    }
+    #[test]
+    fn searches_complete_messages_with_literal_patterns_and_pagination() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        init_repository(&git, cwd);
+        let first = commit_file(&git, cwd, "one", "subject\n\nFix [a.*] 中文");
+        commit_file(&git, cwd, "two", "not a match");
+        let second = commit_file(&git, cwd, "three", "FIX [a.*] 中文");
+        let query = HistorySearch::Message("fix [a.*] 中文".into());
+        let page = git.history(cwd, None, 1, None, Some(&query)).unwrap();
+        assert_eq!(page.commits[0].oid, second);
+        assert!(page.next_cursor.as_ref().unwrap().active_lanes.is_empty());
+        let page = git
+            .history(cwd, page.next_cursor, 1, None, Some(&query))
+            .unwrap();
+        assert_eq!(page.commits[0].oid, first);
+        assert!(page.next_cursor.is_none());
+        ensure_success(
+            git.run(cwd, &strings(&["checkout", "-b", "feature"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        let feature = commit_file(&git, cwd, "four", "only-feature");
+        let query = HistorySearch::Message("only-feature".into());
+        assert!(git
+            .history(cwd, None, 20, Some("refs/heads/main"), Some(&query))
+            .unwrap()
+            .commits
+            .is_empty());
+        assert_eq!(
+            git.history(cwd, None, 20, Some("refs/heads/feature"), Some(&query))
+                .unwrap()
+                .commits[0]
+                .oid,
+            feature
+        );
+        for query in ["", "\n", "bad\0input"] {
+            assert!(git
+                .history(
+                    cwd,
+                    None,
+                    20,
+                    None,
+                    Some(&HistorySearch::Message(query.into()))
+                )
+                .is_err());
+        }
+        assert!(git
+            .history(
+                cwd,
+                None,
+                20,
+                None,
+                Some(&HistorySearch::Message("x".repeat(4097)))
+            )
+            .is_err());
+        let query = HistorySearch::Message("--all".into());
+        assert!(git
+            .history(cwd, None, 20, None, Some(&query))
+            .unwrap()
+            .commits
+            .is_empty());
+    }
+
+    #[test]
+    fn sha_search_validates_objects_ambiguity_and_branch_scope() {
+        let git = Git::discover(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        ensure_success(
+            git.run(
+                cwd,
+                &strings(&["init", "--object-format=sha1", "-b", "main"]),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        init_repository(&git, cwd);
+        let base = commit_file(&git, cwd, "base", "base");
+        ensure_success(
+            git.run(cwd, &strings(&["checkout", "-b", "feature"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        let feature = commit_file(&git, cwd, "feature", "feature");
+        let lookup = |value: &str, branch| {
+            git.history(
+                cwd,
+                None,
+                20,
+                branch,
+                Some(&HistorySearch::Sha(value.into())),
+            )
+        };
+        for query in [&base[..8], &base, &base.to_ascii_uppercase()] {
+            let page = lookup(query, Some("refs/heads/main")).unwrap();
+            assert_eq!(page.commits.len(), 1);
+            assert_eq!(page.commits[0].oid, base);
+            assert!(page.next_cursor.is_none());
+        }
+        assert!(lookup(&feature, Some("refs/heads/main"))
+            .unwrap()
+            .commits
+            .is_empty());
+        ensure_success(git.run(cwd, &strings(&["checkout", "main"]), None).unwrap()).unwrap();
+        ensure_success(
+            git.run(cwd, &strings(&["branch", "-D", "feature"]), None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(lookup(&feature, None).unwrap().commits[0].oid, feature);
+        assert!(lookup(&"0".repeat(40), None).unwrap().commits.is_empty());
+        for invalid in ["abc", "--all", "HEAD", "main~1", "abcd\n", &"a".repeat(65)] {
+            assert!(lookup(invalid, None).is_err(), "{invalid}");
+        }
+        let tree = git.text(cwd, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        assert!(lookup(&tree, None)
+            .unwrap_err()
+            .contains("does not identify a commit"));
+        for content in ["collision-225", "collision-367"] {
+            ensure_success(
+                git.run(
+                    cwd,
+                    &strings(&["hash-object", "-w", "--stdin"]),
+                    Some(content.as_bytes()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(lookup("8078", None).unwrap_err().contains("ambiguous"));
     }
 }

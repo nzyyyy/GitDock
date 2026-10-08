@@ -17,6 +17,8 @@ pub struct GitInfo {
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub git_path: Option<String>,
+    #[serde(default)]
+    pub editor_path: Option<String>,
     pub selected_repository_id: Option<RepositoryId>,
     pub left_width: u16,
     pub right_width: u16,
@@ -40,6 +42,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             git_path: None,
+            editor_path: None,
             selected_repository_id: None,
             left_width: 240,
             right_width: 360,
@@ -247,6 +250,21 @@ pub struct HistoryCursor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(tag = "type", content = "query", rename_all = "camelCase")]
+pub enum HistorySearch {
+    Message(String),
+    Sha(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RepositoryOpenTarget {
+    Terminal,
+    Finder,
+    Editor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitPage {
     pub commits: Vec<CommitInfo>,
@@ -284,6 +302,7 @@ pub struct SessionLogLine {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchInfo {
+    pub committed_at: Option<String>,
     pub name: String,
     pub oid: String,
     pub current: bool,

@@ -8,6 +8,8 @@ export const commands = {
 	refreshRepositories: (activeRepositoryId: number | null) => __TAURI_INVOKE<RepositorySummary[]>("refresh_repositories", { activeRepositoryId }),
 	refreshRepository: (repositoryId: number) => __TAURI_INVOKE<RepositoryRefresh>("refresh_repository", { repositoryId }),
 	setGitPath: (path: string | null) => __TAURI_INVOKE<GitInfo>("set_git_path", { path }),
+	setEditorPath: (path: string) => __TAURI_INVOKE<string>("set_editor_path", { path }),
+	openRepository: (repositoryId: number, target: RepositoryOpenTarget) => __TAURI_INVOKE<null>("open_repository", { repositoryId, target }),
 	saveLayout: (leftWidth: number, rightWidth: number, outputHeight: number) => __TAURI_INVOKE<null>("save_layout", { leftWidth, rightWidth, outputHeight }),
 	saveLanguage: (language: Language) => __TAURI_INVOKE<null>("save_language", { language }),
 	addRepository: (path: string) => __TAURI_INVOKE<RepositorySummary>("add_repository", { path }),
@@ -25,7 +27,7 @@ export const commands = {
 	getHistory: (repositoryId: number, cursor: {
 	offset: number,
 	activeLanes: string[],
-} | null, limit: number, branchRef: string | null) => __TAURI_INVOKE<CommitPage>("get_history", { repositoryId, cursor, limit, branchRef }),
+} | null, limit: number, branchRef: string | null, search: { type: "message"; query: string } | { type: "sha"; query: string } | null) => __TAURI_INVOKE<CommitPage>("get_history", { repositoryId, cursor, limit, branchRef, search }),
 	exportSessionLog: (fileName: string, lines: SessionLogLine[]) => __TAURI_INVOKE<boolean>("export_session_log", { fileName, lines }),
 	getCommitDetail: (repositoryId: number, oid: string) => __TAURI_INVOKE<CommitDetail>("get_commit_detail", { repositoryId, oid }),
 	getStashDetail: (repositoryId: number, oid: string) => __TAURI_INVOKE<CommitDetail>("get_stash_detail", { repositoryId, oid }),
@@ -68,6 +70,7 @@ export type Bootstrap = {
 };
 
 export type BranchInfo = {
+	committedAt: string | null,
 	name: string,
 	oid: string,
 	current: boolean,
@@ -178,6 +181,8 @@ export type HistoryCursor = {
 	activeLanes: string[],
 };
 
+export type HistorySearch = { type: "message"; query: string } | { type: "sha"; query: string };
+
 export type Language = "en" | "zh-CN";
 
 export type MergeMode = "fastForward" | "normal" | "squash";
@@ -252,6 +257,8 @@ export type RepositoryCapabilities = {
 
 export type RepositoryKind = "workTree" | "bare" | "missing";
 
+export type RepositoryOpenTarget = "terminal" | "finder" | "editor";
+
 export type RepositoryPlacement = {
 	id: number,
 	group: string | null,
@@ -303,6 +310,7 @@ export type SessionLogLine = {
 
 export type Settings = {
 	gitPath: string | null,
+	editorPath?: string | null,
 	selectedRepositoryId: number | null,
 	leftWidth: number,
 	rightWidth: number,

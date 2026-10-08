@@ -169,3 +169,25 @@ code { font-family: "SFMono-Regular", Menlo, monospace; font-size: 11px; }
 .history-branch-search:focus-visible { outline: none; border-color: var(--muted); box-shadow: inset 0 0 0 1px var(--muted); }
 .history-branch-search::placeholder { color: var(--muted); }
 .history-branch-empty { padding: 8px; color: var(--muted); font-size: 12px; font-weight: 400; }
+
+.history-controls { grid-template-rows: 37px auto minmax(0, 1fr); }
+.history-results { grid-template-rows: minmax(0, 1fr); }
+.commit-search { display: grid; gap: 8px; min-width: 0; padding: 10px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 12px; }
+.commit-search-types { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--canvas); }
+.commit-search-types button { height: 28px; min-height: 28px; padding: 3px 8px; border-color: transparent; border-radius: 4px; background: transparent; color: var(--muted); white-space: nowrap; }
+.commit-search-types button:hover { background: var(--hover); color: var(--text); border-color: transparent; }
+.commit-search-types button[aria-pressed="true"] { background: var(--raised); color: var(--accent); font-weight: 600; }
+.commit-search-types button:focus-visible { outline-offset: -2px; }
+.commit-search-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.commit-search-row > button { height: 32px; min-height: 32px; padding: 4px 12px; white-space: nowrap; }
+.commit-search-input { position: relative; min-width: 0; }
+.commit-search-input input { display: block; width: 100%; min-width: 0; height: 32px; padding: 5px 30px 5px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--canvas); color: var(--text); appearance: none; }
+.commit-search-input input::placeholder { color: var(--muted); }
+.commit-search-input input:focus-visible { border-color: var(--focus); }
+.commit-search-input input::-webkit-search-cancel-button { -webkit-appearance: none; }
+.commit-search-input .commit-search-clear { position: absolute; top: 4px; right: 4px; display: grid; place-items: center; width: 24px; height: 24px; min-height: 24px; padding: 0; border-color: transparent; background: transparent; color: var(--muted); font-size: 16px; }
+.commit-search-input .commit-search-clear:hover { background: var(--raised); color: var(--text); }
+
+.branch-group .branch-meta { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.branch-meta .branch-sha, .branch-meta > time, .branch-meta > .branch-date-missing { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.branch-meta .branch-upstream { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

@@ -114,6 +114,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             summary::refresh_repositories,
             summary::refresh_repository,
             repositories::set_git_path,
+            repositories::set_editor_path,
+            repositories::open_repository,
             repositories::save_layout,
             repositories::save_language,
             repositories::add_repository,

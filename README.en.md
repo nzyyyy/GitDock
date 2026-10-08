@@ -6,6 +6,9 @@ GitDock is a macOS Git desktop client built with Tauri, React, TypeScript, and R
 
 ## Features
 
+- The History sidebar search uses two rows: choose Commit message / SHA with segmented buttons above, then enter a query and click Search or press Enter below; clear the query inside the input. Search by complete commit message (case-insensitive literal matching) or a full / unique SHA prefix of at least four characters; message search covers the selected branch’s entire history with pagination, showing a result list until cleared to restore the graph. SHA searches check reachability for a selected branch and can inspect repository commit objects directly when all branches are selected.
+- Open the repository directory in macOS Terminal, Finder, or an editor from the repository menu or command palette; choose an editor `.app` once, remember it globally, and change it at any time.
+- The Branches list shows the tip commit’s committer date next to each local and remote branch SHA, displayed as YYYY/MM/DD in the system time zone; hover for the full timestamp in the interface language. Remote dates come from local remote-tracking refs without an automatic fetch.
 - Search branch names in the menu next to the Commits heading to filter the commit list and graph by a local or remote branch, ranked by match quality, including its full ancestry and merged history without checking it out; all branches are shown by default.
 - Branch comparisons use the commit-style file list with names, paths, line statistics, and a total count; open a file for a read-only diff and return to the list to select another, with support for additions, deletions, renames, binary files, and metadata-only changes; empty comparisons show an explicit message
 - Inspect file history and blame with distinct loading, empty, and error states; switching repositories, workflows, or files discards stale inspection results

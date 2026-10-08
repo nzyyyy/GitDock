@@ -21,6 +21,7 @@ pub(crate) fn get_history(
     cursor: Option<HistoryCursor>,
     limit: usize,
     branch_ref: Option<String>,
+    search: Option<HistorySearch>,
     state: State<'_, AppState>,
 ) -> Result<CommitPage, String> {
     validate_history_cursor(&cursor)?;
@@ -31,6 +32,7 @@ pub(crate) fn get_history(
         cursor,
         limit.clamp(1, 200),
         branch_ref.as_deref(),
+        search.as_ref(),
     )
 }
 
